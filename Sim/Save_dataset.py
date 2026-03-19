@@ -25,11 +25,12 @@ except ImportError:
 # === Configuration ===
 MODEL_PATH = "meca_add.xml"
 SAVE_DIR = "collected_data_sim_clean"
-MAX_EPISODES = 1   
+MAX_EPISODES = 1
 IMG_WIDTH = 640
 IMG_HEIGHT = 480
 TARGET_INSERTION_DEPTH = 0.0275
 TRAJ_DURATION = np.random.uniform(12.0, 18.0)
+TASK_INSTRUCTION = "Align the needle and insert it into the trocar opening"
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
 class SimRecorder:
@@ -49,7 +50,7 @@ class SimRecorder:
         self.episode_metadata = dict(episode_metadata or {})
         self.recording = True
 
-    def add(self, frames, qpos, ee_pose, action, timestamp, phase, sensor_dist):
+    def add(self, frames, qpos, ee_pose, action, timestamp, phase, sensor_dist, instruction=""):
         if not self.recording: return
         self.buffer.append({
             "ts": timestamp,
@@ -58,7 +59,8 @@ class SimRecorder:
             "p": ee_pose,
             "act": action,
             "phase": phase,
-            "sd": sensor_dist  # 추가됨
+            "sd": sensor_dist,
+            "instruction": instruction,
         })
 
     def save_async(self):
@@ -78,17 +80,30 @@ class SimRecorder:
 
                     q_data = np.array([x['q'] for x in data], dtype=np.float32)
                     p_data = np.array([x['p'] for x in data], dtype=np.float32)
-                    act_data = np.array([x['act'] for x in data], dtype=np.float32)
+                    act_data = np.array([x['act'] for x in data], dtype=np.float32)  # (N, 6)
                     ts_data = np.array([x['ts'] for x in data], dtype=np.float32)
                     phase_data = np.array([x['phase'] for x in data], dtype=np.int32)
-                    sensor_data = np.array([x['sd'] for x in data], dtype=np.float32) # 추가됨
+                    sensor_data = np.array([x['sd'] for x in data], dtype=np.float32)
+
+                    # Gripper: phase 1(정렬)→open, phase 2(삽입)→closed
+                    # Action gripper: -1=open, 1=closed (DROID convention)
+                    action_gripper = np.where(phase_data >= 2, 1.0, -1.0).astype(np.float32).reshape(-1, 1)
+                    act_data = np.concatenate([act_data, action_gripper], axis=-1)  # (N, 7)
+
+                    # Proprio gripper: 0=open, 1=closed (DROID convention)
+                    proprio_gripper = np.where(phase_data >= 2, 1.0, 0.0).astype(np.float32).reshape(-1, 1)
+                    p_data = np.concatenate([p_data, proprio_gripper], axis=-1)  # (N, 7)
 
                     obs.create_dataset("qpos", data=q_data, compression="gzip")
                     obs.create_dataset("ee_pose", data=p_data, compression="gzip")
-                    obs.create_dataset("sensor_dist", data=sensor_data, compression="gzip") # 추가됨
+                    obs.create_dataset("sensor_dist", data=sensor_data, compression="gzip")
                     f.create_dataset("action", data=act_data, compression="gzip")
                     f.create_dataset("timestamp", data=ts_data, compression="gzip")
                     f.create_dataset("phase", data=phase_data, compression="gzip")
+
+                    # Language instruction 저장
+                    instruction = data[0].get("instruction", "")
+                    f.create_dataset("language_instruction", data=instruction)
 
                     for key, value in metadata.items():
                         value_arr = np.asarray(value)
@@ -198,7 +213,7 @@ def main():
     recorder = SimRecorder(SAVE_DIR)
     # home_pose = np.array([0.5236, -0.3491, 0.3491, 0.0000, 0.5236, 1.0472]) # (30, -20, 20, 0, 30, 60)
     home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.3, -0.4), np.random.uniform(0.3, 0.4),  0.0000,np.random.uniform(0.45, 0.55), np.random.uniform(0.95, 1.05)]) # (30, -20, 20, 0, 30, 60)
-    current_speed = np.random.uniform(0.4, 0.6)
+    current_speed = np.random.uniform(0.3, 0.6)
 
     def get_ee_pose_6d_scaled():
         """Get 6_link world pose (x, y, z, rx, ry, rz)."""
@@ -341,7 +356,7 @@ def main():
                     renderer.update_scene(data, camera=cam_name)
                     frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
 
-                recorder.add(frames, current_qpos_deg, current_ee_pose_mm, delta_ee_action, data.time, task_state, current_sensor_dist)
+                recorder.add(frames, current_qpos_deg, current_ee_pose_mm, delta_ee_action, data.time, task_state, current_sensor_dist, instruction=TASK_INSTRUCTION)
                 last_ee_pose = current_ee_pose_mm.copy()
 
             if data.time - traj_start_time > 50.0: break
