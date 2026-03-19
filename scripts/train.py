@@ -18,6 +18,11 @@ from contextlib import nullcontext
 from torchvision.transforms import RandomResizedCrop
 from torchvision.transforms import functional as TVF
 
+try:
+    import deepspeed
+except ImportError:
+    deepspeed = None
+
 from src.models.VLANeXt import VLANeXt
 from src.models.rt2_like_baseline import RT2LikeBaseline
 from src.datasets.libero_act import LiberoAct
@@ -280,11 +285,44 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
+def build_deepspeed_config(config, total_batch_size, per_device_batch_size, gradient_accumulation_steps):
+    train_cfg = config["train"]
+    ds_cfg = train_cfg.get("deepspeed", {}) or {}
+    zero_stage = int(ds_cfg.get("zero_stage", 3))
+
+    ds_config = {
+        "train_batch_size": total_batch_size,
+        "train_micro_batch_size_per_gpu": per_device_batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "gradient_clipping": float(train_cfg.get("max_grad_norm", 0.0)),
+        "bf16": {"enabled": True},
+        "zero_allow_untested_optimizer": True,
+        "zero_optimization": {
+            "stage": zero_stage,
+            "contiguous_gradients": True,
+            "reduce_scatter": True,
+            "overlap_comm": True,
+        },
+    }
+
+    offload_optimizer_device = str(ds_cfg.get("offload_optimizer_device", "none")).lower()
+    if offload_optimizer_device != "none":
+        ds_config["zero_optimization"]["offload_optimizer"] = {"device": offload_optimizer_device}
+
+    offload_param_device = str(ds_cfg.get("offload_param_device", "none")).lower()
+    if offload_param_device != "none":
+        ds_config["zero_optimization"]["offload_param"] = {"device": offload_param_device}
+
+    return ds_config
+
 def train(config):
     # -----------------------------------------------------------------------------
     # ----------------------------------- Setup -----------------------------------
     # -----------------------------------------------------------------------------
-    is_distributed = config['train'].get('distributed', False)
+    config_distributed = bool(config['train'].get('distributed', False))
+    env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    is_distributed = config_distributed or env_world_size > 1
+    use_deepspeed = bool(config['train'].get('deepspeed', {}).get('enabled', False))
     gradient_accumulation_steps = config['train'].get('gradient_accumulation_steps', 1)
     use_proprio_input_vlm = config['model'].get('use_proprio_input_vlm', True)
     use_action_input_policy = config['model'].get('use_action_input_policy', True)
@@ -307,6 +345,9 @@ def train(config):
 
     set_seed(seed)
 
+    if use_deepspeed and deepspeed is None:
+        raise ImportError("DeepSpeed is enabled in the config, but the deepspeed package is not installed.")
+
     if is_distributed:
         dist.init_process_group(backend=config['train']['dist_backend'])
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -314,6 +355,11 @@ def train(config):
         world_size = int(os.environ["WORLD_SIZE"])
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
+        if global_rank == 0 and not config_distributed:
+            print(
+                f"Detected torchrun environment with WORLD_SIZE={world_size} while config train.distributed=false. "
+                "Enabling distributed mode automatically."
+            )
         print(f"[Rank {global_rank}] Initialized process group")
     else:
         local_rank = 0
@@ -322,22 +368,22 @@ def train(config):
         device = torch.device(config['train'].get('device', 'cuda'))
         
     os.makedirs(config['project']['output_dir'], exist_ok=True)
-    save_dir = ""
     wandb_project = config['project'].get('wandb_project', 'VLANeXt')
     wandb_name = config['project']['name']
+    full_name = config['project']['name']
+    parts = full_name.split('_')
+    if len(parts) > 3:
+        parent_dir = '_'.join(parts[:3])
+        sub_dir = '_'.join(parts[3:])
+        save_dir = os.path.join(config['project']['output_dir'], parent_dir, sub_dir)
+        wandb_project = parent_dir
+        wandb_name = sub_dir
+    else:
+        save_dir = os.path.join(config['project']['output_dir'], full_name)
     if global_rank == 0:
-        full_name = config['project']['name']
-        parts = full_name.split('_')
-        if len(parts) > 3:
-            parent_dir = '_'.join(parts[:3])
-            sub_dir = '_'.join(parts[3:])
-            save_dir = os.path.join(config['project']['output_dir'], parent_dir, sub_dir)
-            
-            wandb_project = parent_dir
-            wandb_name = sub_dir
-        else:
-            save_dir = os.path.join(config['project']['output_dir'], full_name)
         os.makedirs(save_dir, exist_ok=True)
+    if is_distributed:
+        dist.barrier()
     if config['project'].get('use_wandb', False) and global_rank == 0:
         wandb.init(
             project=wandb_project,
@@ -423,7 +469,7 @@ def train(config):
             else:
                 print("No pretrained checkpoint provided. Training from scratch.")
 
-    if is_distributed:
+    if is_distributed and not use_deepspeed:
         model = DDP(model, device_ids=[local_rank])
         model_unwrapped = model.module
     else:
@@ -453,6 +499,11 @@ def train(config):
         load_future_image=load_future_image,
     )
     total_batch_size = config['data']['batch_size']
+    if total_batch_size % (world_size * gradient_accumulation_steps) != 0:
+        raise ValueError(
+            f"Total batch size {total_batch_size} must be divisible by "
+            f"world_size * gradient_accumulation_steps = {world_size * gradient_accumulation_steps}."
+        )
     per_device_batch_size = total_batch_size // (world_size * gradient_accumulation_steps)
     if global_rank == 0:
         print(f"Total Batch Size: {total_batch_size}, World Size: {world_size}, Grad Acc Steps: {gradient_accumulation_steps}, Per-Device Batch Size: {per_device_batch_size}")
@@ -554,8 +605,15 @@ def train(config):
     # -----------------------------------------------------------------------------
     # ------------------------ Action Generation Training -------------------------
     # -----------------------------------------------------------------------------
-    optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    ds_train_cfg = config['train'].get('deepspeed', {}) or {}
+    offload_optimizer_device = str(ds_train_cfg.get('offload_optimizer_device', 'none')).lower()
+    optimizer_cls = AdamW
+    if use_deepspeed and offload_optimizer_device == "cpu":
+        optimizer_cls = deepspeed.ops.adam.DeepSpeedCPUAdam
+
+    optimizer = optimizer_cls(
+        trainable_params,
         lr=float(config['train']['learning_rate']),
         weight_decay=float(config['train']['weight_decay'])
     )
@@ -567,25 +625,51 @@ def train(config):
         num_training_steps=config['data']['max_steps']
     )
 
+    if use_deepspeed:
+        ds_config = build_deepspeed_config(
+            config,
+            total_batch_size=total_batch_size,
+            per_device_batch_size=per_device_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
+        if global_rank == 0:
+            zero_stage = ds_config["zero_optimization"]["stage"]
+            print(f"Enabling DeepSpeed ZeRO-{zero_stage} for training.")
+        model, optimizer, _, lr_scheduler = deepspeed.initialize(
+            model=model,
+            optimizer=optimizer,
+            model_parameters=trainable_params,
+            lr_scheduler=lr_scheduler,
+            config=ds_config,
+            dist_init_required=False,
+        )
+        model_unwrapped = model.module
+
     start_step = 0
     if config['train'].get('resume_path'):
         resume_path = config['train']['resume_path']
         if os.path.exists(resume_path):
             if global_rank == 0:
                 print(f"Resuming training from checkpoint: {resume_path}")
-            checkpoint = torch.load(resume_path, map_location=device)
-            state_dict = checkpoint['model_state_dict']
+            if use_deepspeed:
+                load_path, client_state = model.load_checkpoint(resume_path)
+                if load_path is None:
+                    raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {resume_path}")
+                start_step = int((client_state or {}).get('step', 0))
+            else:
+                checkpoint = torch.load(resume_path, map_location=device)
+                state_dict = checkpoint['model_state_dict']
 
-            if is_distributed and not list(state_dict.keys())[0].startswith('module.'):
-                state_dict = {f'module.{k}': v for k, v in state_dict.items()}
-            elif not is_distributed and list(state_dict.keys())[0].startswith('module.'):
-                state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-                
-            model.load_state_dict(state_dict)
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if 'scheduler_state_dict' in checkpoint:
-                lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_step = checkpoint['step']
+                if is_distributed and not list(state_dict.keys())[0].startswith('module.'):
+                    state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+                elif not is_distributed and list(state_dict.keys())[0].startswith('module.'):
+                    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                    
+                model.load_state_dict(state_dict)
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if 'scheduler_state_dict' in checkpoint:
+                    lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                start_step = checkpoint['step']
             if global_rank == 0:
                 print(f"Resumed at step {start_step}")
         else:
@@ -598,7 +682,8 @@ def train(config):
     if global_rank == 0:
         progress_bar = tqdm(total=config['data']['max_steps'], initial=start_step, desc="Finetuning")
     data_iter = iter(dataloader)
-    optimizer.zero_grad()
+    if not use_deepspeed:
+        optimizer.zero_grad()
     while step < config['data']['max_steps']:
         try:
             batch = next(data_iter)
@@ -625,8 +710,7 @@ def train(config):
         valid_keys = {"input_ids", "attention_mask", "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
         do_update = (batch_idx + 1) % gradient_accumulation_steps == 0
-        sync_context = model.no_sync if (is_distributed and not do_update) else nullcontext
-        with sync_context():
+        if use_deepspeed:
             loss = model(
                 actions=gt_actions,
                 proprioception=proprio,
@@ -635,40 +719,68 @@ def train(config):
                 **forward_args
             )
             loss = loss / gradient_accumulation_steps
-            loss.backward()
+            did_update = model.is_gradient_accumulation_boundary()
+            model.backward(loss)
+            model.step()
+        else:
+            sync_context = model.no_sync if (is_distributed and not do_update) else nullcontext
+            with sync_context():
+                loss = model(
+                    actions=gt_actions,
+                    proprioception=proprio,
+                    history_actions=hist_actions,
+                    future_images=future_images,
+                    **forward_args
+                )
+                loss = loss / gradient_accumulation_steps
+                loss.backward()
+            did_update = do_update
         
-        if do_update:
-            if config['train']['max_grad_norm'] > 0:
+        if did_update:
+            if (not use_deepspeed) and config['train']['max_grad_norm'] > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config['train']['max_grad_norm'])
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+            if not use_deepspeed:
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
             step += 1
             if global_rank == 0:
                 progress_bar.update(1)
                 progress_bar.set_postfix({"loss": f"{loss.item() * gradient_accumulation_steps:.4f}"})
             if step % config['project']['log_interval'] == 0 and global_rank == 0:
                 if config['project'].get('use_wandb', False):
+                    current_lr = optimizer.param_groups[0]["lr"] if optimizer.param_groups else 0.0
                     wandb.log({
                         "train/loss": loss.item() * gradient_accumulation_steps,
-                        "train/lr": lr_scheduler.get_last_lr()[0],
+                        "train/lr": current_lr,
                         "step": step
                     })
-            if step % config['project']['save_interval'] == 0 and global_rank == 0:
-                save_path = os.path.join(save_dir, f"checkpoint_{step}.pt")
-                torch.save({
-                    'step': step,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': lr_scheduler.state_dict(),
-                    'config': config
-                }, save_path)
-                print(f"\nSaved checkpoint to {save_path}")
+            if step % config['project']['save_interval'] == 0:
+                if use_deepspeed:
+                    ckpt_tag = f"step_{step}"
+                    model.save_checkpoint(save_dir, tag=ckpt_tag, client_state={"step": step, "config": config})
+                    if global_rank == 0:
+                        print(f"\nSaved DeepSpeed checkpoint to {os.path.join(save_dir, ckpt_tag)}")
+                elif global_rank == 0:
+                    save_path = os.path.join(save_dir, f"checkpoint_{step}.pt")
+                    torch.save({
+                        'step': step,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': lr_scheduler.state_dict(),
+                        'config': config
+                    }, save_path)
+                    print(f"\nSaved checkpoint to {save_path}")
                 
         batch_idx += 1
 
     if global_rank == 0:
         print("Finetuning finished.")
+    if use_deepspeed:
+        model.save_checkpoint(save_dir, tag="final", client_state={"step": step, "config": config})
+        if global_rank == 0:
+            print(f"Saved DeepSpeed checkpoint to {os.path.join(save_dir, 'final')}")
+    elif global_rank == 0:
         torch.save({
             'step': step,
             'model_state_dict': model.state_dict(),
@@ -677,8 +789,8 @@ def train(config):
             'config': config
         }, os.path.join(save_dir, "checkpoint_final.pt"))
 
-        if config['project'].get('use_wandb', False):
-            wandb.finish()
+    if global_rank == 0 and config['project'].get('use_wandb', False):
+        wandb.finish()
             
     if is_distributed:
         dist.destroy_process_group()

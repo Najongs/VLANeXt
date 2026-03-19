@@ -374,6 +374,23 @@ class VLANeXt(nn.Module):
         elif self.model_family == "qwen":
             return self._get_vlm_condition_qwen(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw)
 
+    def _build_qwen_mm_token_type_ids(self, input_ids):
+        mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int)
+
+        image_token_id = getattr(self.processor, "image_token_id", None)
+        if image_token_id is None:
+            image_token_id = getattr(self.lmm.config, "image_token_id", None)
+        if image_token_id is not None:
+            mm_token_type_ids[input_ids == image_token_id] = 1
+
+        video_token_id = getattr(self.processor, "video_token_id", None)
+        if video_token_id is None:
+            video_token_id = getattr(self.lmm.config, "video_token_id", None)
+        if video_token_id is not None:
+            mm_token_type_ids[input_ids == video_token_id] = 2
+
+        return mm_token_type_ids
+
     def _get_vlm_condition_qwen(self, input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw):
         B = input_ids.shape[0]
         
@@ -406,8 +423,11 @@ class VLANeXt(nn.Module):
         else:
             extended_input_ids = input_ids
 
+        mm_token_type_ids = self._build_qwen_mm_token_type_ids(extended_input_ids)
+
         rope_kwargs = {
             "input_ids": extended_input_ids,
+            "mm_token_type_ids": mm_token_type_ids,
             "image_grid_thw": image_grid_thw,
             "video_grid_thw": video_grid_thw,
             "attention_mask": attention_mask
@@ -424,6 +444,7 @@ class VLANeXt(nn.Module):
             "pixel_values_videos": pixel_values_videos,
             "image_grid_thw": image_grid_thw,
             "video_grid_thw": video_grid_thw,
+            "mm_token_type_ids": mm_token_type_ids,
             "output_hidden_states": output_hidden_states_flag,
         }
         outputs = backbone(**forward_kwargs)

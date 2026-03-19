@@ -1,7 +1,7 @@
 project:
   # [projectname]_[versionname]_[benchmarkname]_[else......]
-  name: "VLANeXt_final_libero_spatial"
-  output_dir: "/mnt/draven/checkpoints/VLANeXt"
+  name: "VLANeXt_final_libero_bs255_zero3_spatial"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 10
   save_interval: 2000
   use_wandb: true
@@ -9,7 +9,7 @@ project:
 data:
   dataset_name: "libero"
   # /mnt/draven/data/LIBERO_modified
-  data_root: "/mnt/draven/data/LIBERO_modified"
+  data_root: "/home/najo/NAS/LIBERO_modified"
   # loptions: libero_spatial, libero_object, libero_goal, libero_10
   task_suite_name: "libero_spatial"
   full_sequence: true  # If true, sample every timestep; if false, subsample
@@ -23,12 +23,12 @@ data:
   future_len: 8
 
   # shuffle buffer size
-  buffer_size: 10000
+  buffer_size: 512
 
   # batch training configs
-  batch_size: 256  # this is the total batch size across all GPUs, it will be automatically divided by the number of GPUs used
+  batch_size: 255  # total effective batch size across all GPUs and gradient accumulation
   max_steps: 10000 # 10k for spatial, object, goal; 12k for long (10)
-  num_workers: 2
+  num_workers: 0
 
   # vision input controls
   input_modality: "image"   # temporal history, options: "video", "image"
@@ -130,8 +130,13 @@ train:
   learning_rate: 1.0e-4
   weight_decay: 0.01
   warmup_steps: 500 # 5% of max steps
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 51
   max_grad_norm: 1.0
   device: "cuda"
-  distributed: false
+  distributed: true
   dist_backend: "nccl"
+  deepspeed:
+    enabled: true
+    zero_stage: 3
+    offload_optimizer_device: "none"
+    offload_param_device: "none"
