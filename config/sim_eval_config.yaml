@@ -1,0 +1,20 @@
+data:
+  augmentation:
+    center_crop: false
+    center_crop_ratio: 1.0
+
+model:
+  diffusion_steps: 10
+  scheduler_type: "flow_match"
+
+eval:
+  finetuned_checkpoint: ""  # Path to the finetuned model checkpoint
+  num_episodes: 50
+  max_steps_per_episode: 600       # max control steps (~40s at 15Hz)
+  num_steps_execute: 1             # actions to execute per model query
+  seed: 42
+  image_size: 256
+  sim_steps_per_control: 67       # MuJoCo steps between control actions (matches data collection)
+  randomize_phantom_pos: true
+  save_video: true
+  video_fps: 15

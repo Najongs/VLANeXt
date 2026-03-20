@@ -2,12 +2,12 @@ project:
   name: "VLANeXt_finetune_sim_zero3"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 10
-  save_interval: 1000
+  save_interval: 500
   use_wandb: true
 
 data:
   dataset_name: "sim"
-  data_root: "/data/public/NAS/VLANeXt/Sim/collected_data_sim_clean"
+  data_root: "/data/public/NAS/VLANeXt/dataset/New1/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
 
@@ -15,8 +15,8 @@ data:
   future_len: 8
   buffer_size: 512
 
-  batch_size: 255
-  max_steps: 50000
+  batch_size: 60
+  max_steps: 10000
   num_workers: 0
 
   input_modality: "image"
@@ -46,7 +46,7 @@ model:
   model_type: "vlanext"
   lmm_path: "Qwen/Qwen3-VL-2B-Instruct"
   vision_encoder_path: "google/siglip2-base-patch16-256"
-  backbone_mode: "finetune"
+  backbone_mode: "frozen"
 
   action_dim: 7
 
@@ -102,8 +102,8 @@ train:
   pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_droid.pt"
   learning_rate: 1.0e-5  # fine-tuning이므로 DROID보다 낮게
   weight_decay: 0.01
-  warmup_steps: 2500
-  gradient_accumulation_steps: 85
+  warmup_steps: 200
+  gradient_accumulation_steps: 20
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true
@@ -111,5 +111,5 @@ train:
   deepspeed:
     enabled: true
     zero_stage: 3
-    offload_optimizer_device: "none"
+    offload_optimizer_device: "cpu"
     offload_param_device: "none"
