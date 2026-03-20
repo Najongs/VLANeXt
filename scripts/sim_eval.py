@@ -20,6 +20,7 @@ os.environ['MUJOCO_GL'] = 'egl'
 import sys
 import argparse
 import yaml
+from omegaconf import OmegaConf
 import random
 import time
 import pathlib
@@ -52,11 +53,54 @@ class DictConfig:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Model / Processor Loading  (adapted from VLANeXt_utils.py)
 # ═══════════════════════════════════════════════════════════════════════════════
-def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: str = "flow_match"):
-    """Load a VLANeXt checkpoint for evaluation."""
+def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: str = "flow_match",
+               train_config_path: str = None):
+    """Load a VLANeXt checkpoint for evaluation.
+
+    Supports two formats:
+      1. Full checkpoint with 'config' and 'model_state_dict' keys
+      2. State-dict-only file from zero_to_fp32.py (requires train_config_path)
+    """
     print(f"Loading model from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    train_config = checkpoint["config"]
+
+    def _default_train_config_path():
+        return os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config", "sim_train_config.yaml")
+
+    if os.path.isdir(checkpoint_path):
+        # Sharded checkpoint directory (from zero_to_fp32.py)
+        from safetensors import safe_open
+        import json
+        index_path = os.path.join(checkpoint_path, "pytorch_model.bin.index.json")
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                index = json.load(f)
+            shard_files = sorted(set(index["weight_map"].values()))
+            state_dict = {}
+            for shard in shard_files:
+                shard_path = os.path.join(checkpoint_path, shard)
+                state_dict.update(torch.load(shard_path, map_location="cpu"))
+            print(f"Loaded {len(state_dict)} keys from {len(shard_files)} shards")
+        else:
+            raise FileNotFoundError(f"No pytorch_model.bin.index.json in {checkpoint_path}")
+        if train_config_path is None:
+            train_config_path = _default_train_config_path()
+        print(f"Loading config from {train_config_path}")
+        train_config = OmegaConf.to_container(OmegaConf.load(train_config_path), resolve=True)
+    else:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # Detect format: full checkpoint vs state-dict-only
+        if isinstance(checkpoint, dict) and "config" in checkpoint and "model_state_dict" in checkpoint:
+            train_config = checkpoint["config"]
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            if train_config_path is None:
+                train_config_path = _default_train_config_path()
+            print(f"State-dict-only checkpoint detected. Loading config from {train_config_path}")
+            train_config = OmegaConf.to_container(OmegaConf.load(train_config_path), resolve=True)
+            state_dict = checkpoint
+
     mc = train_config["model"]
     dc = train_config["data"]
 
@@ -106,7 +150,6 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         dct_similarity_type=mc.get("dct_similarity_type", "mae"),
     )
 
-    state_dict = checkpoint["model_state_dict"]
     if list(state_dict.keys())[0].startswith("module."):
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 
@@ -120,10 +163,20 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
     return model
 
 
-def load_processor(checkpoint_path: str):
+def load_processor(checkpoint_path: str, train_config_path: str = None):
     """Load the vision-language processor that matches the checkpoint."""
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    lmm_path = checkpoint["config"]["model"]["lmm_path"]
+    lmm_path = None
+    if not os.path.isdir(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(checkpoint, dict) and "config" in checkpoint:
+            lmm_path = checkpoint["config"]["model"]["lmm_path"]
+    if lmm_path is None:
+        if train_config_path is None:
+            train_config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "config", "sim_train_config.yaml")
+        cfg = OmegaConf.to_container(OmegaConf.load(train_config_path), resolve=True)
+        lmm_path = cfg["model"]["lmm_path"]
 
     if "llama" in lmm_path.lower():
         ve_path = checkpoint["config"]["model"].get("vision_encoder_path", "google/siglip2-base-patch16-256")

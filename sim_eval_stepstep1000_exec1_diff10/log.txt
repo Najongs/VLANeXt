@@ -1,0 +1,5 @@
+Episode 1/50 | FAIL | Steps: 600 | SR: 0.0% (0/1)
+Episode 2/50 | FAIL | Steps: 600 | SR: 0.0% (0/2)
+Episode 3/50 | FAIL | Steps: 600 | SR: 0.0% (0/3)
+Episode 4/50 | FAIL | Steps: 600 | SR: 0.0% (0/4)
+Episode 5/50 | FAIL | Steps: 600 | SR: 0.0% (0/5)

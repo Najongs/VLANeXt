@@ -628,6 +628,10 @@ def train(config):
     # ------------------------ Action Generation Training -------------------------
     # -----------------------------------------------------------------------------
     trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if global_rank == 0:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_count = sum(p.numel() for p in trainable_params)
+        print(f"Total params: {total_params:,} | Trainable params: {trainable_count:,} ({100*trainable_count/total_params:.1f}%)")
     ds_train_cfg = config['train'].get('deepspeed', {}) or {}
     offload_optimizer_device = str(ds_train_cfg.get('offload_optimizer_device', 'none')).lower()
     optimizer_cls = AdamW
