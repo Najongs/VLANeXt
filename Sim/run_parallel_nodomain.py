@@ -4,8 +4,8 @@ Simple Parallel Data Collection (Without Domain Randomization)
 Runs multiple Save_dataset.py instances in parallel
 
 Usage:
-CUDA_VISIBLE_DEVICES=2 python run_parallel_nodomain.py --workers 10 --episodes 1000 \
-    --base_dir /data/public/NAS/VLANeXt/dataset/New1
+CUDA_VISIBLE_DEVICES=0 python run_parallel_nodomain.py --workers 10 --episodes 1000 \
+    --base_dir /home/najo/NAS/VLANeXt/dataset/New1
 """
 import os
 import sys

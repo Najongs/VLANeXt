@@ -9,7 +9,7 @@ model:
   scheduler_type: "flow_match" # Options: "ddpm", "ddim", "flow_match"
 
 eval:
-  finetuned_checkpoint: "" # Path to the finetuned model checkpoint
+  finetuned_checkpoint: "/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_libero_spatial.pt" # Path to the finetuned model checkpoint
   task_suite_name: "libero_spatial" # Options: libero_spatial, libero_object, libero_goal, libero_10
   num_steps_wait: 10
   num_steps_execute: 8 # Number of actions to execute from the predicted chunk
