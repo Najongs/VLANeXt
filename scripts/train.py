@@ -1,4 +1,9 @@
 import os
+os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+
 import yaml
 import argparse
 import wandb
@@ -7,6 +12,8 @@ import re
 from PIL import Image
 
 import torch
+torch.set_num_threads(4)
+
 import numpy as np
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -182,9 +189,13 @@ class DataCollatorForVLANeXt:
                     im1 = self._augment_frames_uint8(sample["image_wrist"])
                     images.extend([im0, im1])
                     num_imgs = 2
+                    if "image_top" in sample:
+                        im2 = self._augment_frames_uint8(sample["image_top"])
+                        images.append(im2)
+                        num_imgs = 3
                 else:
                     images.append(im0)
-                
+
                 texts.append("<image>" * num_imgs + instruction)
 
             elif is_llama:
@@ -192,9 +203,12 @@ class DataCollatorForVLANeXt:
                 if self.view_mode == "multi":
                     im1 = self._augment_frames_uint8(sample["image_wrist"])
                     images.extend([im0, im1])
+                    if "image_top" in sample:
+                        im2 = self._augment_frames_uint8(sample["image_top"])
+                        images.append(im2)
                 else:
                     images.append(im0)
-                
+
                 texts.append(instruction)
 
             elif is_qwen:
@@ -204,7 +218,11 @@ class DataCollatorForVLANeXt:
                     if self.view_mode == "multi":
                         v1 = self._augment_frames_uint8(sample["video_wrist"])
                         content.extend([{"type": "video", "video": v0}, {"type": "video", "video": v1}])
-                        videos.extend([v0, v1]) 
+                        videos.extend([v0, v1])
+                        if "video_top" in sample:
+                            v2 = self._augment_frames_uint8(sample["video_top"])
+                            content.append({"type": "video", "video": v2})
+                            videos.append(v2)
                     else:
                         content.append({"type": "video", "video": v0})
                         videos.append(v0)
@@ -215,6 +233,10 @@ class DataCollatorForVLANeXt:
                         im1 = self._augment_frames_uint8(sample["image_wrist"])
                         content.extend([{"type": "image", "image": im0}, {"type": "image", "image": im1}])
                         images.extend([im0, im1])
+                        if "image_top" in sample:
+                            im2 = self._augment_frames_uint8(sample["image_top"])
+                            content.append({"type": "image", "image": im2})
+                            images.append(im2)
                     else:
                         content.append({"type": "image", "image": im0})
                         images.append(im0)
@@ -548,6 +570,7 @@ def train(config):
                 buffer_size=buffer_size,
                 cam_exterior=config['data'].get('cam_exterior', 'side_camera'),
                 cam_wrist=config['data'].get('cam_wrist', 'tool_camera'),
+                cam_top=config['data'].get('cam_top', ''),
             )
         else:
             ds = LiberoAct(
@@ -563,10 +586,11 @@ def train(config):
                 buffer_size=buffer_size,
             )
         return DataLoader(
-            ds, 
+            ds,
             batch_size=per_device_batch_size,
             num_workers=config['data']['num_workers'],
-            collate_fn=collator
+            collate_fn=collator,
+            pin_memory=True,
         )
 
     dataloader = create_dataloader(config['data']['history_len'])

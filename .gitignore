@@ -4,3 +4,4 @@ checkpoints/
 New1/
 output*/
 *.mp4
+sim_eval_step*/

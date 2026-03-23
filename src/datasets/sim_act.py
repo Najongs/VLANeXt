@@ -7,6 +7,13 @@ import h5py
 import torch
 from torch.utils.data import IterableDataset
 
+# Action normalization stats (computed over 10,000 episodes, 3,953,000 steps)
+# delta_pose(6) + gripper(1)
+action_min_sim = [-0.806854248046875, -0.3126593232154846, -0.39316439628601074,
+                  -0.026845814660191536, -0.07198608666658401, -0.05876559019088745, -1.0]
+action_max_sim = [0.6364461779594421, 1.2791228294372559, 0.16193009912967682,
+                  0.0033334598410874605, 0.0004181701806373894, 0.012391704134643078, 1.0]
+
 
 class SimAct(IterableDataset):
     """
@@ -48,6 +55,7 @@ class SimAct(IterableDataset):
         buffer_size=10000,
         cam_exterior="side_camera",
         cam_wrist="tool_camera",
+        cam_top="top_camera",
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -63,6 +71,11 @@ class SimAct(IterableDataset):
         self.buffer_size = buffer_size
         self.cam_exterior = cam_exterior
         self.cam_wrist = cam_wrist
+        self.cam_top = cam_top
+
+        # Action normalization to [-1, 1]
+        self.action_min = np.array(action_min_sim, dtype=np.float32)
+        self.action_max = np.array(action_max_sim, dtype=np.float32)
 
         # Collect all h5 files
         self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "*.h5")))
@@ -89,8 +102,12 @@ class SimAct(IterableDataset):
         with h5py.File(h5_path, "r") as f:
             traj_len = f["action"].shape[0]
 
-            # --- Actions (N, 7) ---
+            # --- Actions (N, 7): normalize delta_pose + gripper to [-1, 1] ---
             actions_np = f["action"][:].astype(np.float32)
+            denominator = self.action_max - self.action_min
+            denominator = np.where(denominator == 0, 1.0, denominator)
+            actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
+            actions_np = np.clip(actions_np, -1.0, 1.0)
 
             # --- Proprioception: ee_pose (N, 7) ---
             proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)
@@ -111,6 +128,7 @@ class SimAct(IterableDataset):
             )  # (N, H, W, 3) uint8
 
             wrist_np = None
+            top_np = None
             if self.view_mode == "multi":
                 if self.cam_wrist in img_grp:
                     wrist_np = np.stack(
@@ -119,8 +137,13 @@ class SimAct(IterableDataset):
                     )
                 else:
                     wrist_np = images_np.copy()
+                if self.cam_top and self.cam_top in img_grp:
+                    top_np = np.stack(
+                        [self._decode_jpeg(img_grp[self.cam_top][i]) for i in range(traj_len)],
+                        axis=0,
+                    )
 
-        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np
+        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -154,7 +177,7 @@ class SimAct(IterableDataset):
 
         for ep_path in episode_paths:
             try:
-                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np = self._load_episode(ep_path)
+                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np = self._load_episode(ep_path)
             except Exception as e:
                 print(f"[Warn] Skipping {ep_path}: {e}")
                 continue
@@ -224,10 +247,14 @@ class SimAct(IterableDataset):
                     sample["video"] = images_np[hist_indices_obs]
                     if self.view_mode == "multi":
                         sample["video_wrist"] = wrist_np[hist_indices_obs] if wrist_np is not None else images_np[hist_indices_obs]
+                        if top_np is not None:
+                            sample["video_top"] = top_np[hist_indices_obs]
                 elif self.input_modality == "image":
                     sample["image"] = images_np[t].copy()
                     if self.view_mode == "multi":
                         sample["image_wrist"] = wrist_np[t].copy() if wrist_np is not None else images_np[t].copy()
+                        if top_np is not None:
+                            sample["image_top"] = top_np[t].copy()
                 else:
                     raise ValueError(f"Unknown input_modality: {self.input_modality}")
 
@@ -242,6 +269,8 @@ class SimAct(IterableDataset):
             del images_np, actions_np, proprio_np
             if wrist_np is not None:
                 del wrist_np
+            if top_np is not None:
+                del top_np
             gc.collect()
 
         # Flush remaining buffer

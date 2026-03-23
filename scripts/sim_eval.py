@@ -4,8 +4,8 @@ sim_eval.py
 Evaluates a fine-tuned VLANeXt model in the MuJoCo needle-insertion simulation.
 
 Usage:
-    python scripts/sim_eval.py --config config/sim_eval_config.yaml \
-        --checkpoint checkpoints/VLANeXt_finetune_sim_zero3/checkpoint_5000.pt
+python scripts/sim_eval.py --config config/sim_eval_config.yaml \
+    --checkpoint /data/public/NAS/VLANeXt/output_step6500.pt
 
 The script:
   1. Loads the fine-tuned model checkpoint
@@ -36,6 +36,7 @@ from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
 # ── project imports ──────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
+from src.datasets.sim_act import action_min_sim, action_max_sim
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +236,10 @@ def predict_action(model, processor, obs, task_label):
         all_wrist = obs.get("image_history_wrist", [obs["full_image_wrist"]])
         wrist_np = _take_last(all_wrist, obs["full_image_wrist"], history_len)
         pil_wrist = [Image.fromarray(img) for img in wrist_np]
+        if "full_image_top" in obs:
+            all_top = obs.get("image_history_top", [obs["full_image_top"]])
+            top_np = _take_last(all_top, obs["full_image_top"], history_len)
+            pil_top = [Image.fromarray(img) for img in top_np]
 
     # ── proprioception ────────────────────────────────────────────────────────
     proprioception = None
@@ -265,6 +270,8 @@ def predict_action(model, processor, obs, task_label):
     # ── build processor inputs ────────────────────────────────────────────────
     if view_mode == "multi":
         images = [pil_images[-1], pil_wrist[-1]]
+        if "full_image_top" in obs:
+            images.append(pil_top[-1])
     else:
         images = [pil_images[-1]]
 
@@ -367,7 +374,7 @@ class SimEnv:
     def render_cameras(self):
         """Return dict of RGB uint8 images {cam_name: (H, W, 3)}."""
         frames = {}
-        for cam_name in ["side_camera", "tool_camera"]:
+        for cam_name in ["side_camera", "tool_camera", "top_camera"]:
             self.renderer.update_scene(self.data, camera=cam_name)
             frames[cam_name] = self.renderer.render().copy()  # already RGB
         return frames
@@ -605,6 +612,7 @@ def run_eval(cfg):
 
         image_history = []
         image_history_wrist = []
+        image_history_top = []
         state_history = []
         action_history = []
         action_buffer = []
@@ -617,9 +625,11 @@ def run_eval(cfg):
             frames = env.render_cameras()
             img_ext = preprocess_image(frames["side_camera"], (image_size, image_size))
             img_wrist = preprocess_image(frames["tool_camera"], (image_size, image_size))
+            img_top = preprocess_image(frames["top_camera"], (image_size, image_size))
 
             image_history.append(img_ext)
             image_history_wrist.append(img_wrist)
+            image_history_top.append(img_top)
             replay_images.append(img_ext)
 
             # Proprioception: ee_pose(6) + gripper_proxy(1)
@@ -634,8 +644,10 @@ def run_eval(cfg):
             observation = {
                 "full_image": img_ext,
                 "full_image_wrist": img_wrist,
+                "full_image_top": img_top,
                 "image_history": image_history,
                 "image_history_wrist": image_history_wrist,
+                "image_history_top": image_history_top,
                 "state_history": state_history,
                 "action_history": action_history,
             }
@@ -648,11 +660,15 @@ def run_eval(cfg):
                 steps_exec = min(num_steps_execute, len(raw_chunk))
                 action_buffer = list(raw_chunk[:steps_exec])
 
-            raw_action = action_buffer.pop(0)  # (7,)
+            raw_action = action_buffer.pop(0)  # (7,) normalized [-1, 1]
             action_history.append(raw_action)
 
-            # ── 3. Apply action ───────────────────────────────────────────────
-            delta_ee = raw_action[:6]   # (dx, dy, dz, drx, dry, drz) in mm/rad
+            # ── 3. Denormalize & apply action ─────────────────────────────────
+            # Model outputs [-1, 1] → convert back to mm/rad
+            a_min = np.array(action_min_sim, dtype=np.float32)
+            a_max = np.array(action_max_sim, dtype=np.float32)
+            denorm_action = (raw_action + 1.0) / 2.0 * (a_max - a_min) + a_min
+            delta_ee = denorm_action[:6]   # (dx, dy, dz, drx, dry, drz) in mm/rad
             # 7th dim (gripper) is ignored — no physical gripper
 
             env.apply_delta_ee(delta_ee, n_sim_steps=sim_steps_per_ctrl)
