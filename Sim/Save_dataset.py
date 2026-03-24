@@ -22,6 +22,25 @@ try:
 except ImportError:
     tqdm = lambda x, total=None: x
 
+
+def project_to_2d(point_3d, model, data, cam_name, img_w, img_h):
+    """Project a 3D world point to normalized 2D image coordinates [0,1] using MuJoCo camera."""
+    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
+    cam_pos = data.cam_xpos[cam_id]
+    cam_mat = data.cam_xmat[cam_id].reshape(3, 3)
+    fovy = model.cam_fovy[cam_id]
+
+    # World → Camera frame
+    p_cam = cam_mat.T @ (point_3d - cam_pos)
+
+    # Perspective projection (MuJoCo convention: camera looks along -Z)
+    f = img_h / (2.0 * np.tan(np.deg2rad(fovy) / 2.0))
+    u = -f * (p_cam[0] / p_cam[2]) + (img_w - 1) / 2.0
+    v =  f * (p_cam[1] / p_cam[2]) + (img_h - 1) / 2.0
+
+    return np.array([u / img_w, v / img_h], dtype=np.float32)
+
+
 # === Configuration ===
 MODEL_PATH = "meca_add.xml"
 SAVE_DIR = "collected_data_sim_clean"
@@ -50,7 +69,9 @@ class SimRecorder:
         self.episode_metadata = dict(episode_metadata or {})
         self.recording = True
 
-    def add(self, frames, qpos, ee_pose, action, timestamp, phase, sensor_dist, instruction=""):
+    def add(self, frames, qpos, ee_pose, action, timestamp, phase, sensor_dist,
+            needle_tip_mm=None, trocar_entry_mm=None, keypoints_wrist=None,
+            keypoints_visibility=None, instruction=""):
         if not self.recording: return
         self.buffer.append({
             "ts": timestamp,
@@ -60,6 +81,10 @@ class SimRecorder:
             "act": action,
             "phase": phase,
             "sd": sensor_dist,
+            "needle_tip_mm": needle_tip_mm,
+            "trocar_entry_mm": trocar_entry_mm,
+            "keypoints_wrist": keypoints_wrist,
+            "keypoints_visibility": keypoints_visibility,
             "instruction": instruction,
         })
 
@@ -100,6 +125,17 @@ class SimRecorder:
                     f.create_dataset("action", data=act_data, compression="gzip")
                     f.create_dataset("timestamp", data=ts_data, compression="gzip")
                     f.create_dataset("phase", data=phase_data, compression="gzip")
+
+                    # Spatial auxiliary data (needle_tip, trocar, 2D keypoints from wrist camera)
+                    if data[0].get("needle_tip_mm") is not None:
+                        needle_tip_data = np.array([x['needle_tip_mm'] for x in data], dtype=np.float32)
+                        trocar_entry_data = np.array([x['trocar_entry_mm'] for x in data], dtype=np.float32)
+                        kp_wrist_data = np.array([x['keypoints_wrist'] for x in data], dtype=np.float32)
+                        kp_vis_data = np.array([x['keypoints_visibility'] for x in data], dtype=np.float32)
+                        obs.create_dataset("needle_tip_pos", data=needle_tip_data, compression="gzip")
+                        obs.create_dataset("trocar_entry_pos", data=trocar_entry_data, compression="gzip")
+                        obs.create_dataset("keypoints_wrist", data=kp_wrist_data, compression="gzip")
+                        obs.create_dataset("keypoints_visibility", data=kp_vis_data, compression="gzip")
 
                     # Language instruction 저장
                     instruction = data[0].get("instruction", "")
@@ -356,7 +392,23 @@ def main():
                     renderer.update_scene(data, camera=cam_name)
                     frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
 
-                recorder.add(frames, current_qpos_deg, current_ee_pose_mm, delta_ee_action, data.time, task_state, current_sensor_dist, instruction=TASK_INSTRUCTION)
+                # Spatial auxiliary data: 3D positions (mm) and 2D keypoints (wrist camera only)
+                needle_tip_mm = data.site_xpos[tip_id].copy() * 1000
+                trocar_entry_mm = data.site_xpos[target_entry_id].copy() * 1000
+
+                tip_uv_wrist = project_to_2d(data.site_xpos[tip_id], model, data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
+                trocar_uv_wrist = project_to_2d(data.site_xpos[target_entry_id], model, data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
+                keypoints_wrist = np.concatenate([tip_uv_wrist, trocar_uv_wrist]).astype(np.float32)  # (4,)
+
+                # Visibility: 1 if keypoint is within [0,1] image bounds, 0 otherwise
+                tip_visible = float(0.0 <= tip_uv_wrist[0] <= 1.0 and 0.0 <= tip_uv_wrist[1] <= 1.0)
+                trocar_visible = float(0.0 <= trocar_uv_wrist[0] <= 1.0 and 0.0 <= trocar_uv_wrist[1] <= 1.0)
+                keypoints_visibility = np.array([tip_visible, trocar_visible], dtype=np.float32)  # (2,)
+
+                recorder.add(frames, current_qpos_deg, current_ee_pose_mm, delta_ee_action, data.time, task_state, current_sensor_dist,
+                             needle_tip_mm=needle_tip_mm, trocar_entry_mm=trocar_entry_mm,
+                             keypoints_wrist=keypoints_wrist, keypoints_visibility=keypoints_visibility,
+                             instruction=TASK_INSTRUCTION)
                 last_ee_pose = current_ee_pose_mm.copy()
 
             if data.time - traj_start_time > 50.0: break

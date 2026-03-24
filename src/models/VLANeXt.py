@@ -80,6 +80,7 @@ class VLANeXt(nn.Module):
         dct_high_freq_weight=3.0,
         dct_freq_split=0.5,
         dct_similarity_type="mse",  # Options: "mse", "mae", "cosine"
+        spatial_loss_weight=0.0,
     ):
         super().__init__()
         
@@ -170,7 +171,17 @@ class VLANeXt(nn.Module):
         self.dct_high_freq_weight = dct_high_freq_weight
         self.dct_freq_split = dct_freq_split
         self.dct_similarity_type = dct_similarity_type
-        
+
+        self.spatial_loss_weight = spatial_loss_weight
+        if spatial_loss_weight > 0:
+            self.spatial_head = nn.Sequential(
+                nn.Linear(self.hidden_size, 256),
+                nn.GELU(),
+                nn.Linear(256, 8)  # kp_wrist(4) + visibility(2) + dist(1) + phase(1)
+            )
+        else:
+            self.spatial_head = None
+
         self.action_vqvae_config = action_vqvae
         if self.action_vqvae_config.get('enabled', False):
             self.action_vqvae = ActionVQVAE(
@@ -583,6 +594,49 @@ class VLANeXt(nn.Module):
         
         return loss_img, gen_hidden_states
 
+    def _compute_spatial_loss(self, hidden_states, spatial_targets):
+        """Compute auxiliary spatial loss from VLM hidden states.
+
+        spatial_targets layout (8D):
+            [0:4] kp_wrist: needle_tip_u, needle_tip_v, trocar_u, trocar_v
+            [4:6] visibility: needle_tip_visible, trocar_visible (0 or 1)
+            [6]   dist: normalized 3D distance
+            [7]   phase: 0=align, 1=insert
+        """
+        last_hidden = hidden_states[-1]  # (B, seq_len, hidden_size)
+        pooled = last_hidden.mean(dim=1)  # (B, hidden_size)
+        spatial_pred = self.spatial_head(pooled)  # (B, 8)
+        spatial_targets = spatial_targets.to(spatial_pred.dtype)
+
+        # --- Visibility loss (BCE) ---
+        vis_pred = spatial_pred[:, 4:6]       # (B, 2): tip_vis, trocar_vis logits
+        vis_target = spatial_targets[:, 4:6]  # (B, 2): 0 or 1
+        loss_vis = F.binary_cross_entropy_with_logits(vis_pred, vis_target)
+
+        # --- Keypoint loss with GT visibility masking ---
+        kp_pred = spatial_pred[:, :4]       # (B, 4): tip_u, tip_v, trocar_u, trocar_v
+        kp_target = spatial_targets[:, :4]
+        tip_vis = spatial_targets[:, 4]     # (B,)
+        trocar_vis = spatial_targets[:, 5]  # (B,)
+
+        vis_mask = torch.stack([tip_vis, tip_vis, trocar_vis, trocar_vis], dim=-1)  # (B, 4)
+        kp_diff = (kp_pred - kp_target) ** 2  # (B, 4)
+        kp_masked = kp_diff * vis_mask
+        num_visible = vis_mask.sum().clamp(min=1.0)
+        loss_kp = kp_masked.sum() / num_visible
+
+        # --- Distance loss (always valid, uses 3D coords) ---
+        dist_pred = spatial_pred[:, 6]
+        dist_target = spatial_targets[:, 6]
+        loss_dist = F.mse_loss(dist_pred, dist_target)
+
+        # --- Phase loss (BCE) ---
+        phase_pred = spatial_pred[:, 7]
+        phase_target = spatial_targets[:, 7]
+        loss_phase = F.binary_cross_entropy_with_logits(phase_pred, phase_target)
+
+        return loss_kp + loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
+
     def _compute_dct_loss(self, pred, target):
         B, T, D = pred.shape
 
@@ -627,27 +681,27 @@ class VLANeXt(nn.Module):
             raise ValueError(f"Unknown dct_similarity_type: {sim_type!r}. "
                              f"Options are: 'mse', 'mae', 'cosine'.")
 
-    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, task=None):
+    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, task=None):
         if task == "action_vqvae_pretrain":
             return self.forward_action_vqvae_pretrain(actions)
-            
+
         if self.loss_type == "regression":
             return self._forward_regression(
                 input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask,
-                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images
+                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets
             )
         elif self.loss_type == "classification":
             return self._forward_classification(
                 input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask,
-                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images
+                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets
             )
         elif self.loss_type == "diffusion":
             return self._forward_diffusion(
                 input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask,
-                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images
+                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets
             )
 
-    def _forward_classification(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None):
+    def _forward_classification(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -724,9 +778,11 @@ class VLANeXt(nn.Module):
         
         if self.future_image_loss_weight > 0:
             loss = loss + self.future_image_loss_weight * loss_img
+        if self.spatial_loss_weight > 0 and self.spatial_head is not None and spatial_targets is not None and hidden_states is not None:
+            loss = loss + self.spatial_loss_weight * self._compute_spatial_loss(hidden_states, spatial_targets)
         return loss
 
-    def _forward_regression(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None):
+    def _forward_regression(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -760,9 +816,11 @@ class VLANeXt(nn.Module):
             
         if self.future_image_loss_weight > 0:
             loss = loss + self.future_image_loss_weight * loss_img
+        if self.spatial_loss_weight > 0 and self.spatial_head is not None and spatial_targets is not None and hidden_states is not None:
+            loss = loss + self.spatial_loss_weight * self._compute_spatial_loss(hidden_states, spatial_targets)
         return loss
 
-    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None):
+    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -824,6 +882,8 @@ class VLANeXt(nn.Module):
             
         if self.future_image_loss_weight > 0:
             loss = loss + self.future_image_loss_weight * loss_img
+        if self.spatial_loss_weight > 0 and self.spatial_head is not None and spatial_targets is not None and hidden_states is not None:
+            loss = loss + self.spatial_loss_weight * self._compute_spatial_loss(hidden_states, spatial_targets)
         return loss
 
     @torch.no_grad()

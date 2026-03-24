@@ -119,6 +119,24 @@ class SimAct(IterableDataset):
             else:
                 instruction = str(raw)
 
+            # --- Spatial auxiliary targets (backward compatible) ---
+            # Layout (8D): kp_wrist(4) + visibility(2) + dist(1) + phase(1)
+            spatial_targets_np = None
+            if "keypoints_wrist" in f["observations"]:
+                needle_tip = f["observations"]["needle_tip_pos"][:].astype(np.float32)     # (N, 3)
+                trocar_entry = f["observations"]["trocar_entry_pos"][:].astype(np.float32) # (N, 3)
+                kp_wrist = f["observations"]["keypoints_wrist"][:].astype(np.float32)      # (N, 4)
+                kp_vis = f["observations"]["keypoints_visibility"][:].astype(np.float32)   # (N, 2)
+                phase_raw = f["phase"][:].astype(np.float32)                                # (N,)
+
+                dist = np.linalg.norm(trocar_entry - needle_tip, axis=-1, keepdims=True)   # (N, 1) mm
+                dist_normalized = dist / 100.0  # roughly [0, 1]
+                phase_binary = np.clip(phase_raw - 1, 0, 1).reshape(-1, 1)  # 1→0, 2→1
+
+                spatial_targets_np = np.concatenate(
+                    [kp_wrist, kp_vis, dist_normalized, phase_binary], axis=-1
+                )  # (N, 8)
+
             # --- Images: decode all frames for selected cameras ---
             img_grp = f["observations"]["images"]
 
@@ -143,7 +161,7 @@ class SimAct(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np
+        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -177,7 +195,7 @@ class SimAct(IterableDataset):
 
         for ep_path in episode_paths:
             try:
-                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np = self._load_episode(ep_path)
+                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np = self._load_episode(ep_path)
             except Exception as e:
                 print(f"[Warn] Skipping {ep_path}: {e}")
                 continue
@@ -234,6 +252,12 @@ class SimAct(IterableDataset):
                     "instruction": instruction,
                 }
 
+                # Spatial target for auxiliary loss (current timestep)
+                if spatial_targets_np is not None:
+                    sample["spatial_target"] = torch.from_numpy(spatial_targets_np[t].copy())
+                else:
+                    sample["spatial_target"] = None
+
                 # --- Future image (optional) ---
                 if self.load_future_image:
                     if self.future_image_mode == "last":
@@ -271,6 +295,8 @@ class SimAct(IterableDataset):
                 del wrist_np
             if top_np is not None:
                 del top_np
+            if spatial_targets_np is not None:
+                del spatial_targets_np
             gc.collect()
 
         # Flush remaining buffer

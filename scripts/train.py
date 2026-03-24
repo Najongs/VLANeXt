@@ -174,6 +174,7 @@ class DataCollatorForVLANeXt:
         proprio_list = []
         hist_actions_list = []
         future_images_list = []
+        spatial_target_list = []
 
         is_paligemma = "PaliGemma" in self.processor.__class__.__name__
         is_qwen = "Qwen" in self.processor.__class__.__name__
@@ -252,7 +253,10 @@ class DataCollatorForVLANeXt:
             gt_actions_list.append(sample["future_actions"])
             proprio_list.append(sample["proprioception"])
             hist_actions_list.append(sample["history_actions"])
-            
+
+            if "spatial_target" in sample and sample["spatial_target"] is not None:
+                spatial_target_list.append(sample["spatial_target"])
+
             if self.load_future_image and "future_image" in sample:
                 f_img = sample["future_image"]
                 f_img = torch.from_numpy(f_img).permute(2, 0, 1).float() / 127.5 - 1.0
@@ -301,8 +305,9 @@ class DataCollatorForVLANeXt:
         proprio = torch.stack(proprio_list) if self.use_proprio_input_vlm else None
         hist_actions = torch.stack(hist_actions_list) if self.use_action_input_policy else None
         future_images = torch.stack(future_images_list) if self.load_future_image else None
-        
-        return inputs, gt_actions, proprio, hist_actions, future_images
+        spatial_targets = torch.stack(spatial_target_list) if spatial_target_list else None
+
+        return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -476,6 +481,7 @@ def train(config):
             dct_high_freq_weight=config['model'].get('dct_high_freq_weight', 1.0),
             dct_freq_split=config['model'].get('dct_freq_split', 0.125),
             dct_similarity_type=config['model'].get('dct_similarity_type', 'mae'),
+            spatial_loss_weight=config['model'].get('spatial_loss_weight', 0.0),
         ).to(device, dtype=torch.bfloat16)
     if has_pretrained_ckpt:
         if global_rank == 0:
@@ -622,7 +628,7 @@ def train(config):
             except StopIteration:
                 vqvae_iter = iter(dataloader)
                 batch = next(vqvae_iter)
-            _, gt_actions, _, _, _ = batch
+            _, gt_actions, _, _, _, _ = batch
             gt_actions = gt_actions.to(device, dtype=torch.bfloat16)
             vqvae_optim.zero_grad()
             loss = model(actions=gt_actions, task="action_vqvae_pretrain")
@@ -702,7 +708,7 @@ def train(config):
             if global_rank == 0:
                 print(f"Resuming training from checkpoint: {resume_path}")
             if use_deepspeed:
-                load_path, client_state = model.load_checkpoint(resume_path)
+                load_path, client_state = model.load_checkpoint(resume_path, load_module_strict=False)
                 if load_path is None:
                     raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {resume_path}")
                 start_step = int((client_state or {}).get('step', 0))
@@ -741,7 +747,7 @@ def train(config):
             data_iter = iter(dataloader)
             batch = next(data_iter)
             
-        inputs, gt_actions, proprio, hist_actions, future_images = batch
+        inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets = batch
         del batch
         model_inputs = {k: v.to(device) for k, v in inputs.items()}
         del inputs
@@ -756,6 +762,8 @@ def train(config):
             hist_actions = hist_actions.to(device, dtype=torch.bfloat16)
         if future_images is not None:
             future_images = future_images.to(device, dtype=torch.bfloat16)
+        if spatial_targets is not None:
+            spatial_targets = spatial_targets.to(device, dtype=torch.bfloat16)
         
         valid_keys = {"input_ids", "attention_mask", "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
@@ -766,6 +774,7 @@ def train(config):
                 proprioception=proprio,
                 history_actions=hist_actions,
                 future_images=future_images,
+                spatial_targets=spatial_targets,
                 **forward_args
             )
             loss = loss / gradient_accumulation_steps
@@ -780,6 +789,7 @@ def train(config):
                     proprioception=proprio,
                     history_actions=hist_actions,
                     future_images=future_images,
+                    spatial_targets=spatial_targets,
                     **forward_args
                 )
                 loss = loss / gradient_accumulation_steps
