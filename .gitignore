@@ -2,6 +2,7 @@ wandb
 __pycache__
 checkpoints/
 New1/
+New2/
 output*/
 *.mp4
 sim_eval_step*/
