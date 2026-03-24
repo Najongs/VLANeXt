@@ -630,7 +630,9 @@ def run_eval(cfg):
             image_history.append(img_ext)
             image_history_wrist.append(img_wrist)
             image_history_top.append(img_top)
-            replay_images.append(img_ext)
+            # Concat all 3 views side-by-side for replay video
+            replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)  # (H, W*3, 3)
+            replay_images.append(replay_frame)
 
             # Proprioception: ee_pose(6) + gripper_proxy(1)
             ee_pose = env.get_ee_pose()  # (6,)
