@@ -1,4 +1,4 @@
 [Worker 1] Starting with MAX_EPISODES=500, SAVE_DIR=/data/public/NAS/VLANeXt/dataset/New2/worker_1
 🔄 Loading Model: meca_add.xml
 🚀 Starting Headless Collection...
-Collecting:   0%|          | 0/500 [00:00<?, ?ep/s]Collecting:   0%|          | 1/500 [00:13<1:51:54, 13.45s/ep]Collecting:   0%|          | 2/500 [00:27<1:56:39, 14.06s/ep]
+Collecting:   0%|          | 0/500 [00:00<?, ?ep/s]Collecting:   0%|          | 1/500 [00:13<1:51:54, 13.45s/ep]Collecting:   0%|          | 2/500 [00:27<1:56:39, 14.06s/ep]Collecting:   1%|          | 3/500 [00:41<1:55:59, 14.00s/ep]Collecting:   1%|          | 4/500 [00:56<1:56:16, 14.07s/ep]Collecting:   1%|          | 5/500 [01:10<1:55:45, 14.03s/ep]Collecting:   1%|          | 6/500 [01:24<1:56:19, 14.13s/ep]Collecting:   1%|▏         | 7/500 [01:38<1:56:39, 14.20s/ep]Collecting:   2%|▏         | 8/500 [01:52<1:55:54, 14.13s/ep]Collecting:   2%|▏         | 9/500 [02:07<1:56:16, 14.21s/ep]Collecting:   2%|▏         | 10/500 [02:20<1:54:35, 14.03s/ep]Collecting:   2%|▏         | 11/500 [02:34<1:53:50, 13.97s/ep]
