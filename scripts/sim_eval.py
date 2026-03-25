@@ -30,6 +30,10 @@ import numpy as np
 import cv2
 import torch
 import imageio
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
 
@@ -149,6 +153,7 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         dct_high_freq_weight=mc.get("dct_high_freq_weight", 1.0),
         dct_freq_split=mc.get("dct_freq_split", 0.125),
         dct_similarity_type=mc.get("dct_similarity_type", "mae"),
+        spatial_loss_weight=mc.get("spatial_loss_weight", 0.0),
     )
 
     if list(state_dict.keys())[0].startswith("module."):
@@ -296,12 +301,22 @@ def predict_action(model, processor, obs, task_label):
     if "pixel_values" in inputs:
         inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
 
-    action_pred = model.predict_action(
-        proprioception=proprioception,
-        history_actions=history_actions,
-        **inputs,
-    )
-    return action_pred[0].float().cpu().numpy()  # (num_actions, 7)
+    has_spatial = getattr(model, "spatial_head", None) is not None
+    if has_spatial:
+        action_pred, spatial_pred = model.predict_action(
+            proprioception=proprioception,
+            history_actions=history_actions,
+            return_spatial=True,
+            **inputs,
+        )
+        return action_pred[0].float().cpu().numpy(), spatial_pred
+    else:
+        action_pred = model.predict_action(
+            proprioception=proprioception,
+            history_actions=history_actions,
+            **inputs,
+        )
+        return action_pred[0].float().cpu().numpy(), None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -331,6 +346,19 @@ def randomize_phantom_pos(model_mj, data_mj, phantom_id, rot_id):
 
     mujoco.mj_forward(model_mj, data_mj)
     return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32)
+
+
+def project_to_2d(point_3d, model_mj, data_mj, cam_name, img_w, img_h):
+    """Project a 3D world point to normalized 2D image coordinates [0,1]."""
+    cam_id = mujoco.mj_name2id(model_mj, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
+    cam_pos = data_mj.cam_xpos[cam_id]
+    cam_mat = data_mj.cam_xmat[cam_id].reshape(3, 3)
+    fovy = model_mj.cam_fovy[cam_id]
+    p_cam = cam_mat.T @ (point_3d - cam_pos)
+    f = img_h / (2.0 * np.tan(np.deg2rad(fovy) / 2.0))
+    u = -f * (p_cam[0] / p_cam[2]) + (img_w - 1) / 2.0
+    v = f * (p_cam[1] / p_cam[2]) + (img_h - 1) / 2.0
+    return np.array([u / img_w, v / img_h], dtype=np.float32)
 
 
 class SimEnv:
@@ -494,6 +522,53 @@ class SimEnv:
         )
         return dist * 1000.0 if dist >= 0 else -1.0
 
+    # ── Spatial metrics ────────────────────────────────────────────────────────
+    def get_spatial_metrics(self):
+        """Return a dict of spatial metrics for the current state."""
+        tip_pos = self.data.site_xpos[self.tip_id].copy()
+        back_pos = self.data.site_xpos[self.back_id].copy()
+        entry_pos = self.data.site_xpos[self.target_entry_id].copy()
+        depth_pos = self.data.site_xpos[self.target_depth_id].copy()
+
+        # 3D distance (mm)
+        dist_mm = np.linalg.norm((entry_pos - tip_pos) * 1000.0)
+
+        # Insertion axis
+        axis = depth_pos - entry_pos
+        axis_len = np.linalg.norm(axis)
+        axis_dir = axis / (axis_len + 1e-10)
+
+        # Depth along insertion axis (mm)
+        tip_offset = tip_pos - entry_pos
+        insertion_depth_mm = np.dot(tip_offset, axis_dir) * 1000.0
+
+        # Lateral distance from axis (mm)
+        projection = tip_offset - np.dot(tip_offset, axis_dir) * axis_dir
+        lateral_mm = np.linalg.norm(projection) * 1000.0
+
+        # Needle-trocar angle (degrees)
+        needle_dir = tip_pos - back_pos
+        needle_len = np.linalg.norm(needle_dir)
+        if needle_len > 1e-8:
+            needle_dir /= needle_len
+            cos_angle = abs(np.dot(needle_dir, axis_dir))
+            angle_deg = np.degrees(np.arccos(np.clip(cos_angle, 0.0, 1.0)))
+        else:
+            angle_deg = 90.0
+
+        # 2D projections on wrist camera
+        tip_uv = project_to_2d(tip_pos, self.model, self.data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
+        trocar_uv = project_to_2d(entry_pos, self.model, self.data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
+
+        return {
+            "dist_mm": dist_mm,
+            "insertion_depth_mm": insertion_depth_mm,
+            "lateral_mm": lateral_mm,
+            "angle_deg": angle_deg,
+            "tip_uv": tip_uv,
+            "trocar_uv": trocar_uv,
+        }
+
     # ── rotation helpers ──────────────────────────────────────────────────────
     @staticmethod
     def _rpy_to_rotmat(rpy):
@@ -553,6 +628,160 @@ def save_rollout_video(images, episode_idx, success, save_dir, fps=15):
     print(f"  Saved video: {path}")
 
 
+def save_episode_plot(metrics_history, episode_idx, success, save_dir):
+    """Save a multi-panel plot of spatial metrics over the episode."""
+    os.makedirs(save_dir, exist_ok=True)
+    tag = "SUCCESS" if success else "FAIL"
+    steps = list(range(len(metrics_history)))
+
+    dist = [m["dist_mm"] for m in metrics_history]
+    depth = [m["insertion_depth_mm"] for m in metrics_history]
+    lateral = [m["lateral_mm"] for m in metrics_history]
+    angle = [m["angle_deg"] for m in metrics_history]
+
+    has_spatial = any("spatial_pred" in m for m in metrics_history)
+    nrows = 3 if has_spatial else 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(12, 4 * nrows))
+    fig.suptitle(f"Episode {episode_idx} [{tag}]", fontsize=14, fontweight="bold")
+
+    axes[0, 0].plot(steps, dist, "b-", linewidth=1.2, label="GT dist")
+    if has_spatial:
+        pred_steps = [i for i, m in enumerate(metrics_history) if "spatial_pred" in m]
+        pred_dist = [m["spatial_pred"]["dist_norm"] * 100 for m in metrics_history if "spatial_pred" in m]
+        axes[0, 0].plot(pred_steps, pred_dist, "r--", linewidth=1.0, alpha=0.7, label="Pred dist")
+        axes[0, 0].legend(fontsize=8)
+    axes[0, 0].set_ylabel("Distance (mm)")
+    axes[0, 0].set_title("Needle Tip <-> Trocar Entry")
+    axes[0, 0].grid(True, alpha=0.3)
+
+    axes[0, 1].plot(steps, depth, "g-", linewidth=1.2)
+    axes[0, 1].axhline(y=TARGET_INSERTION_DEPTH * 1000, color="r", linestyle="--", label=f"target={TARGET_INSERTION_DEPTH*1000:.1f}mm")
+    axes[0, 1].set_ylabel("Depth (mm)")
+    axes[0, 1].set_title("Insertion Depth (along axis)")
+    axes[0, 1].legend(fontsize=8)
+    axes[0, 1].grid(True, alpha=0.3)
+
+    axes[1, 0].plot(steps, lateral, "m-", linewidth=1.2)
+    axes[1, 0].axhline(y=3.0, color="r", linestyle="--", label="thresh=3mm")
+    axes[1, 0].set_ylabel("Lateral (mm)")
+    axes[1, 0].set_title("Lateral Distance from Axis")
+    axes[1, 0].set_xlabel("Control Step")
+    axes[1, 0].legend(fontsize=8)
+    axes[1, 0].grid(True, alpha=0.3)
+
+    axes[1, 1].plot(steps, angle, "c-", linewidth=1.2)
+    axes[1, 1].axhline(y=30.0, color="r", linestyle="--", label="thresh=30deg")
+    axes[1, 1].set_ylabel("Angle (deg)")
+    axes[1, 1].set_title("Needle-Trocar Axis Angle")
+    axes[1, 1].set_xlabel("Control Step")
+    axes[1, 1].legend(fontsize=8)
+    axes[1, 1].grid(True, alpha=0.3)
+
+    if has_spatial:
+        pred_steps = [i for i, m in enumerate(metrics_history) if "spatial_pred" in m]
+        # Visibility predictions
+        tip_vis = [m["spatial_pred"]["tip_visible"] for m in metrics_history if "spatial_pred" in m]
+        tro_vis = [m["spatial_pred"]["trocar_visible"] for m in metrics_history if "spatial_pred" in m]
+        gt_tip_vis = []
+        gt_tro_vis = []
+        for i in pred_steps:
+            m = metrics_history[i]
+            t_uv = m["tip_uv"]
+            r_uv = m["trocar_uv"]
+            gt_tip_vis.append(1.0 if (0 <= t_uv[0] <= 1 and 0 <= t_uv[1] <= 1) else 0.0)
+            gt_tro_vis.append(1.0 if (0 <= r_uv[0] <= 1 and 0 <= r_uv[1] <= 1) else 0.0)
+
+        axes[2, 0].plot(pred_steps, tip_vis, "r-", linewidth=1.2, label="Pred tip_vis")
+        axes[2, 0].plot(pred_steps, gt_tip_vis, "r--", linewidth=0.8, alpha=0.5, label="GT tip_vis")
+        axes[2, 0].plot(pred_steps, tro_vis, "g-", linewidth=1.2, label="Pred tro_vis")
+        axes[2, 0].plot(pred_steps, gt_tro_vis, "g--", linewidth=0.8, alpha=0.5, label="GT tro_vis")
+        axes[2, 0].set_ylabel("Visibility (prob)")
+        axes[2, 0].set_title("Visibility Predictions vs GT")
+        axes[2, 0].set_xlabel("Control Step")
+        axes[2, 0].set_ylim(-0.1, 1.1)
+        axes[2, 0].legend(fontsize=7)
+        axes[2, 0].grid(True, alpha=0.3)
+
+        # Phase predictions
+        phase_pred = [m["spatial_pred"]["phase"] for m in metrics_history if "spatial_pred" in m]
+        axes[2, 1].plot(pred_steps, phase_pred, "b-", linewidth=1.2, label="Pred phase")
+        axes[2, 1].set_ylabel("Phase (prob)")
+        axes[2, 1].set_title("Phase Prediction (0=align, 1=insert)")
+        axes[2, 1].set_xlabel("Control Step")
+        axes[2, 1].set_ylim(-0.1, 1.1)
+        axes[2, 1].legend(fontsize=8)
+        axes[2, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, f"episode_{episode_idx:04d}_{tag.lower()}_metrics.png")
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+
+
+def draw_overlay(frame, metrics, ctrl_step):
+    """Draw spatial metrics as text overlay on a video frame (in-place)."""
+    h, w = frame.shape[:2]
+    lines = [
+        f"step={ctrl_step}",
+        f"dist={metrics['dist_mm']:.1f}mm",
+        f"depth={metrics['insertion_depth_mm']:.1f}mm",
+        f"lateral={metrics['lateral_mm']:.1f}mm",
+        f"angle={metrics['angle_deg']:.1f}deg",
+    ]
+    sp = metrics.get("spatial_pred")
+    if sp is not None:
+        lines.append(f"pred: tip_vis={sp['tip_visible']:.2f} tro_vis={sp['trocar_visible']:.2f}")
+        lines.append(f"pred: dist={sp['dist_norm']*100:.1f}mm phase={sp['phase']:.2f}")
+    for i, line in enumerate(lines):
+        cv2.putText(frame, line, (5, 14 + i * 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(frame, line, (5, 14 + i * 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # Draw predicted keypoints on the wrist camera panel (2nd panel)
+    if sp is not None:
+        kp = sp["kp_wrist"]
+        panel_w = w // 3  # each panel width
+        wrist_offset_x = panel_w  # wrist is 2nd panel
+
+        def _clamp_draw(u_norm, v_norm, label, vis_val, color):
+            """Draw keypoint clamped to wrist panel bounds."""
+            px_raw = int(u_norm * panel_w) + wrist_offset_x
+            py_raw = int(v_norm * h)
+            # Clamp to wrist panel region
+            px = max(wrist_offset_x + 2, min(wrist_offset_x + panel_w - 2, px_raw))
+            py = max(2, min(h - 2, py_raw))
+            oob = not (0.0 <= u_norm <= 1.0 and 0.0 <= v_norm <= 1.0)
+            marker = "x" if oob else ""
+            cv2.circle(frame, (px, py), 6, color, 2)
+            txt = f"{label}({vis_val:.2f}){marker}"
+            # Keep text inside frame
+            tx = min(px + 8, wrist_offset_x + panel_w - 100)
+            ty = max(py - 4, 14)
+            cv2.putText(frame, txt, (tx, ty),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+
+        _clamp_draw(kp[0], kp[1], "P:tip", sp["tip_visible"], (255, 0, 0))
+        _clamp_draw(kp[2], kp[3], "P:tro", sp["trocar_visible"], (0, 255, 0))
+
+    # Draw GT keypoints on wrist panel (cyan/yellow circles)
+    tip_uv = metrics.get("tip_uv")
+    trocar_uv = metrics.get("trocar_uv")
+    if tip_uv is not None:
+        panel_w = w // 3
+        wrist_offset_x = panel_w
+        if 0.0 <= tip_uv[0] <= 1.0 and 0.0 <= tip_uv[1] <= 1.0:
+            px = int(tip_uv[0] * panel_w) + wrist_offset_x
+            py = int(tip_uv[1] * h)
+            cv2.circle(frame, (px, py), 4, (0, 255, 255), 1)  # cyan = GT tip
+        if 0.0 <= trocar_uv[0] <= 1.0 and 0.0 <= trocar_uv[1] <= 1.0:
+            px = int(trocar_uv[0] * panel_w) + wrist_offset_x
+            py = int(trocar_uv[1] * h)
+            cv2.circle(frame, (px, py), 4, (0, 255, 255), 1)  # cyan = GT trocar
+
+    return frame
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main evaluation loop
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -606,6 +835,13 @@ def run_eval(cfg):
 
     total_successes = 0
 
+    # CSV for all episodes summary
+    csv_path = eval_dir / "metrics_summary.csv"
+    csv_file = open(csv_path, "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(["episode", "success", "steps", "final_dist_mm", "final_depth_mm",
+                         "final_lateral_mm", "final_angle_deg", "min_dist_mm"])
+
     for ep in range(1, num_episodes + 1):
         env.reset()
         last_ee_pose = env.get_ee_pose()
@@ -617,6 +853,7 @@ def run_eval(cfg):
         action_history = []
         action_buffer = []
         replay_images = []
+        metrics_history = []
 
         success = False
 
@@ -630,9 +867,13 @@ def run_eval(cfg):
             image_history.append(img_ext)
             image_history_wrist.append(img_wrist)
             image_history_top.append(img_top)
-            # Concat all 3 views side-by-side for replay video
+
+            # Collect spatial metrics
+            metrics = env.get_spatial_metrics()
+            metrics_history.append(metrics)
+
+            # Concat all 3 views side-by-side for replay video (overlay drawn after prediction)
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)  # (H, W*3, 3)
-            replay_images.append(replay_frame)
 
             # Proprioception: ee_pose(6) + gripper_proxy(1)
             ee_pose = env.get_ee_pose()  # (6,)
@@ -655,12 +896,26 @@ def run_eval(cfg):
             }
 
             # ── 2. Get action from model (or from buffer) ────────────────────
+            spatial_pred = None
             if len(action_buffer) == 0:
-                raw_chunk = predict_action(model, processor, observation, TASK_INSTRUCTION)
+                raw_chunk, spatial_pred = predict_action(model, processor, observation, TASK_INSTRUCTION)
                 if raw_chunk.ndim == 1:
                     raw_chunk = raw_chunk[None, :]
                 steps_exec = min(num_steps_execute, len(raw_chunk))
                 action_buffer = list(raw_chunk[:steps_exec])
+            if spatial_pred is not None:
+                metrics["spatial_pred"] = spatial_pred
+                if ctrl_step % 100 == 0:
+                    kp = spatial_pred["kp_wrist"]
+                    print(f"  [step {ctrl_step}] spatial_pred: kp=({kp[0]:.3f},{kp[1]:.3f},{kp[2]:.3f},{kp[3]:.3f}) "
+                          f"tip_vis={spatial_pred['tip_visible']:.3f} tro_vis={spatial_pred['trocar_visible']:.3f} "
+                          f"dist={spatial_pred['dist_norm']:.3f} phase={spatial_pred['phase']:.3f} | "
+                          f"GT tip_uv=({metrics['tip_uv'][0]:.3f},{metrics['tip_uv'][1]:.3f}) "
+                          f"tro_uv=({metrics['trocar_uv'][0]:.3f},{metrics['trocar_uv'][1]:.3f})")
+
+            # Draw overlay AFTER spatial prediction is available
+            draw_overlay(replay_frame, metrics, ctrl_step)
+            replay_images.append(replay_frame)
 
             raw_action = action_buffer.pop(0)  # (7,) normalized [-1, 1]
             action_history.append(raw_action)
@@ -681,19 +936,41 @@ def run_eval(cfg):
             # ── 4. Check success ──────────────────────────────────────────────
             if env.check_success():
                 success = True
+                # Collect final metrics after success
+                metrics_history.append(env.get_spatial_metrics())
                 break
 
         if success:
             total_successes += 1
 
         sr = total_successes / ep * 100
-        msg = f"Episode {ep}/{num_episodes} | {'SUCCESS' if success else 'FAIL'} | Steps: {ctrl_step + 1} | SR: {sr:.1f}% ({total_successes}/{ep})"
+        final_m = metrics_history[-1]
+        min_dist = min(m["dist_mm"] for m in metrics_history)
+        msg = (f"Episode {ep}/{num_episodes} | {'SUCCESS' if success else 'FAIL'} | "
+               f"Steps: {ctrl_step + 1} | SR: {sr:.1f}% ({total_successes}/{ep}) | "
+               f"dist={final_m['dist_mm']:.1f}mm lateral={final_m['lateral_mm']:.1f}mm "
+               f"angle={final_m['angle_deg']:.1f}deg min_dist={min_dist:.1f}mm")
         print(msg)
         log_file.write(msg + "\n")
         log_file.flush()
 
+        # Write CSV row
+        csv_writer.writerow([
+            ep, int(success), ctrl_step + 1,
+            f"{final_m['dist_mm']:.2f}", f"{final_m['insertion_depth_mm']:.2f}",
+            f"{final_m['lateral_mm']:.2f}", f"{final_m['angle_deg']:.2f}",
+            f"{min_dist:.2f}",
+        ])
+        csv_file.flush()
+
+        # Save per-episode metrics plot
+        save_episode_plot(metrics_history, ep, success, str(eval_dir))
+
         if save_video:
             save_rollout_video(replay_images, ep, success, str(eval_dir), fps=video_fps)
+
+    csv_file.close()
+    print(f"  Metrics CSV: {csv_path}")
 
     # ── Final report ──────────────────────────────────────────────────────────
     final_sr = total_successes / num_episodes * 100

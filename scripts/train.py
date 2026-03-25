@@ -631,7 +631,7 @@ def train(config):
             _, gt_actions, _, _, _, _ = batch
             gt_actions = gt_actions.to(device, dtype=torch.bfloat16)
             vqvae_optim.zero_grad()
-            loss = model(actions=gt_actions, task="action_vqvae_pretrain")
+            loss, _ = model(actions=gt_actions, task="action_vqvae_pretrain")
             loss.backward()
             vqvae_optim.step()
             if global_rank == 0:
@@ -674,11 +674,29 @@ def train(config):
         weight_decay=float(config['train']['weight_decay'])
     )
     
+    # If resuming, schedule LR over remaining steps only
+    scheduler_total_steps = config['data']['max_steps']
+    resume_path = config['train'].get('resume_path', '')
+    if resume_path and os.path.exists(resume_path):
+        # Peek at checkpoint to get start_step
+        latest_file = os.path.join(resume_path, 'latest')
+        if os.path.isfile(latest_file):
+            with open(latest_file, 'r') as f:
+                tag = f.read().strip()
+            client_state_file = os.path.join(resume_path, tag, 'client_state.pt')
+            if os.path.isfile(client_state_file):
+                cs = torch.load(client_state_file, map_location='cpu')
+                peek_step = int(cs.get('step', 0))
+                if peek_step > 0:
+                    scheduler_total_steps = config['data']['max_steps'] - peek_step
+                    if global_rank == 0:
+                        print(f"LR scheduler: {scheduler_total_steps} steps (resuming from step {peek_step})")
+
     lr_scheduler = get_scheduler(
         "cosine",
         optimizer=optimizer,
         num_warmup_steps=config['train']['warmup_steps'],
-        num_training_steps=config['data']['max_steps']
+        num_training_steps=scheduler_total_steps,
     )
 
     if use_deepspeed:
@@ -708,7 +726,12 @@ def train(config):
             if global_rank == 0:
                 print(f"Resuming training from checkpoint: {resume_path}")
             if use_deepspeed:
-                load_path, client_state = model.load_checkpoint(resume_path, load_module_strict=False)
+                load_path, client_state = model.load_checkpoint(
+                    resume_path,
+                    load_module_strict=False,
+                    load_optimizer_states=False,
+                    load_lr_scheduler_states=False,
+                )
                 if load_path is None:
                     raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {resume_path}")
                 start_step = int((client_state or {}).get('step', 0))
@@ -769,7 +792,7 @@ def train(config):
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
         do_update = (batch_idx + 1) % gradient_accumulation_steps == 0
         if use_deepspeed:
-            loss = model(
+            loss, loss_dict = model(
                 actions=gt_actions,
                 proprioception=proprio,
                 history_actions=hist_actions,
@@ -784,7 +807,7 @@ def train(config):
         else:
             sync_context = model.no_sync if (is_distributed and not do_update) else nullcontext
             with sync_context():
-                loss = model(
+                loss, loss_dict = model(
                     actions=gt_actions,
                     proprioception=proprio,
                     history_actions=hist_actions,
@@ -810,11 +833,14 @@ def train(config):
             if step % config['project']['log_interval'] == 0 and global_rank == 0:
                 if config['project'].get('use_wandb', False):
                     current_lr = optimizer.param_groups[0]["lr"] if optimizer.param_groups else 0.0
-                    wandb.log({
+                    log_data = {
                         "train/loss": loss.item() * gradient_accumulation_steps,
                         "train/lr": current_lr,
-                        "step": step
-                    })
+                        "step": step,
+                    }
+                    for k, v in loss_dict.items():
+                        log_data[f"train/{k}"] = v
+                    wandb.log(log_data)
             if step % config['project']['save_interval'] == 0:
                 if use_deepspeed:
                     ckpt_tag = f"step_{step}"

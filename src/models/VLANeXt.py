@@ -39,6 +39,137 @@ class LlamaProcessorWrapper:
         self.tokenizer = tokenizer
         self.image_processor = image_processor
 
+class SpatialCrossAttentionHead(nn.Module):
+    """Cross-attention based spatial head inspired by VLA-Adapter.
+
+    Uses learnable spatial queries that attend to image patch tokens
+    from multiple VLM layers to predict keypoints, visibility, distance, and phase.
+
+    Output layout (8D):
+        [0:4] kp_wrist: tip_u, tip_v, trocar_u, trocar_v
+        [4:6] visibility: tip_visible, trocar_visible (logits)
+        [6]   dist: normalized 3D distance
+        [7]   phase: align/insert (logit)
+    """
+
+    def __init__(self, hidden_size, num_layers_to_use=4, num_heads=4):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers_to_use = num_layers_to_use
+        self.num_heads = num_heads
+
+        # Learnable spatial queries: tip + trocar
+        self.spatial_queries = nn.Parameter(torch.randn(2, hidden_size) * 0.02)
+
+        # Layer projection: fuse selected layers into one
+        self.layer_weights = nn.Parameter(torch.ones(num_layers_to_use) / num_layers_to_use)
+
+        # Cross-attention
+        self.q_proj = nn.Linear(hidden_size, hidden_size)
+        self.k_proj = nn.Linear(hidden_size, hidden_size)
+        self.v_proj = nn.Linear(hidden_size, hidden_size)
+        self.o_proj = nn.Linear(hidden_size, hidden_size)
+        self.norm_q = nn.LayerNorm(hidden_size)
+        self.norm_kv = nn.LayerNorm(hidden_size)
+
+        # Per-query output: [u, v, visibility] = 3 per query → 6 total
+        self.keypoint_head = nn.Sequential(
+            nn.Linear(hidden_size, 256),
+            nn.GELU(),
+            nn.Linear(256, 3),  # u, v, visibility_logit
+        )
+
+        # Global output from both queries: dist + phase = 2
+        self.global_head = nn.Sequential(
+            nn.Linear(hidden_size * 2, 256),
+            nn.GELU(),
+            nn.Linear(256, 2),  # dist_norm, phase_logit
+        )
+
+    def forward(self, hidden_states, image_token_mask):
+        """
+        Args:
+            hidden_states: tuple of (B, seq_len, H) from all VLM layers
+            image_token_mask: (B, seq_len) bool, True for image patch tokens
+        Returns:
+            spatial_pred: (B, 8)
+        """
+        # Select last N layers and compute weighted sum
+        num_layers = len(hidden_states)
+        selected_indices = list(range(
+            max(0, num_layers - self.num_layers_to_use), num_layers
+        ))
+        w = F.softmax(self.layer_weights[:len(selected_indices)], dim=0)
+
+        # Weighted sum of selected layers
+        fused = sum(
+            w[i] * hidden_states[idx] for i, idx in enumerate(selected_indices)
+        )  # (B, seq_len, H)
+
+        # Extract image patch tokens only
+        B = fused.shape[0]
+        patch_list = []
+        max_patches = 0
+        for b in range(B):
+            patches = fused[b][image_token_mask[b]]  # (num_patches, H)
+            patch_list.append(patches)
+            max_patches = max(max_patches, patches.shape[0])
+
+        # Pad to same length
+        if max_patches == 0:
+            # Fallback: use all tokens if no image tokens detected
+            kv = self.norm_kv(fused)
+        else:
+            padded = torch.zeros(B, max_patches, self.hidden_size,
+                                 device=fused.device, dtype=fused.dtype)
+            attn_mask = torch.zeros(B, max_patches, device=fused.device, dtype=torch.bool)
+            for b, patches in enumerate(patch_list):
+                n = patches.shape[0]
+                padded[b, :n] = patches
+                attn_mask[b, :n] = True
+            kv = self.norm_kv(padded)
+
+        # Spatial queries: (2, H) → (B, 2, H)
+        queries = self.spatial_queries.unsqueeze(0).expand(B, -1, -1)
+        queries = self.norm_q(queries)
+
+        # Multi-head cross-attention
+        head_dim = self.hidden_size // self.num_heads
+        Q = self.q_proj(queries).view(B, 2, self.num_heads, head_dim).transpose(1, 2)
+        K = self.k_proj(kv).view(B, -1, self.num_heads, head_dim).transpose(1, 2)
+        V = self.v_proj(kv).view(B, -1, self.num_heads, head_dim).transpose(1, 2)
+
+        # Attention with mask
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (head_dim ** 0.5)
+        if max_patches > 0:
+            # Mask out padded positions
+            mask_expanded = attn_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, max_patches)
+            attn_scores = attn_scores.masked_fill(~mask_expanded, float('-inf'))
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_out = torch.matmul(attn_weights, V)  # (B, num_heads, 2, head_dim)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, 2, self.hidden_size)
+        attn_out = self.o_proj(attn_out)  # (B, 2, H)
+
+        # Per-query keypoint predictions
+        tip_out = self.keypoint_head(attn_out[:, 0])    # (B, 3): u, v, vis_logit
+        trocar_out = self.keypoint_head(attn_out[:, 1])  # (B, 3): u, v, vis_logit
+
+        # Global predictions from concatenated queries
+        global_feat = torch.cat([attn_out[:, 0], attn_out[:, 1]], dim=-1)  # (B, 2H)
+        global_out = self.global_head(global_feat)  # (B, 2): dist, phase_logit
+
+        # Assemble: [tip_u, tip_v, trocar_u, trocar_v, tip_vis, trocar_vis, dist, phase]
+        spatial_pred = torch.cat([
+            tip_out[:, :2],       # tip u, v
+            trocar_out[:, :2],    # trocar u, v
+            tip_out[:, 2:3],      # tip visibility logit
+            trocar_out[:, 2:3],   # trocar visibility logit
+            global_out,           # dist, phase logit
+        ], dim=-1)  # (B, 8)
+
+        return spatial_pred
+
+
 class VLANeXt(nn.Module):
     def __init__(
         self, 
@@ -174,10 +305,10 @@ class VLANeXt(nn.Module):
 
         self.spatial_loss_weight = spatial_loss_weight
         if spatial_loss_weight > 0:
-            self.spatial_head = nn.Sequential(
-                nn.Linear(self.hidden_size, 256),
-                nn.GELU(),
-                nn.Linear(256, 8)  # kp_wrist(4) + visibility(2) + dist(1) + phase(1)
+            self.spatial_head = SpatialCrossAttentionHead(
+                hidden_size=self.hidden_size,
+                num_layers_to_use=4,
+                num_heads=4,
             )
         else:
             self.spatial_head = None
@@ -456,7 +587,7 @@ class VLANeXt(nn.Module):
 
         position_ids, _ = backbone.get_rope_index(**rope_kwargs)
 
-        output_hidden_states_flag = (self.enable_future_image_loss or self.condition_type in ["tight", "soft"])
+        output_hidden_states_flag = (self.enable_future_image_loss or self.condition_type in ["tight", "soft"] or self.spatial_loss_weight > 0)
         forward_kwargs = {
             "inputs_embeds": inputs_embeds,
             "position_ids": position_ids,
@@ -474,7 +605,16 @@ class VLANeXt(nn.Module):
         if self.condition_type == "loose" and self.connector is not None:
             query_outputs = outputs.last_hidden_state[:, -self.num_queries:, :]
             connector_out = self.connector(query_outputs)
-            
+
+        # Build image token mask for spatial head
+        image_token_mask = (mm_token_type_ids == 1) | (mm_token_type_ids == 2)  # image or video tokens
+        # Verify length matches hidden_states; if not, fallback to all tokens
+        if hidden_states is not None:
+            hs_len = hidden_states[-1].shape[1]
+            if image_token_mask.shape[1] != hs_len:
+                image_token_mask = torch.ones(B, hs_len, dtype=torch.bool, device=image_token_mask.device)
+        self._image_token_mask = image_token_mask  # cache for spatial head
+
         return connector_out, hidden_states
 
     def _get_vlm_condition_llama(self, input_ids, attention_mask, pixel_values, proprioception, proprio_attention_mask):
@@ -520,7 +660,7 @@ class VLANeXt(nn.Module):
         inputs_embeds = torch.cat(embeds_list, dim=1)
         combined_attention_mask = torch.cat(mask_list, dim=1)
 
-        output_hidden_states_flag = (self.enable_future_image_loss or self.condition_type in ["tight", "soft"])
+        output_hidden_states_flag = (self.enable_future_image_loss or self.condition_type in ["tight", "soft"] or self.spatial_loss_weight > 0)
         outputs = self.lmm.model(
             inputs_embeds=inputs_embeds,
             attention_mask=combined_attention_mask,
@@ -603,9 +743,12 @@ class VLANeXt(nn.Module):
             [6]   dist: normalized 3D distance
             [7]   phase: 0=align, 1=insert
         """
-        last_hidden = hidden_states[-1]  # (B, seq_len, hidden_size)
-        pooled = last_hidden.mean(dim=1)  # (B, hidden_size)
-        spatial_pred = self.spatial_head(pooled)  # (B, 8)
+        image_token_mask = getattr(self, '_image_token_mask', None)
+        if image_token_mask is None:
+            # Fallback: use all tokens
+            B, S, H = hidden_states[-1].shape
+            image_token_mask = torch.ones(B, S, dtype=torch.bool, device=hidden_states[-1].device)
+        spatial_pred = self.spatial_head(hidden_states, image_token_mask)  # (B, 8)
         spatial_targets = spatial_targets.to(spatial_pred.dtype)
 
         # --- Visibility loss (BCE) ---
@@ -635,7 +778,15 @@ class VLANeXt(nn.Module):
         phase_target = spatial_targets[:, 7]
         loss_phase = F.binary_cross_entropy_with_logits(phase_pred, phase_target)
 
-        return loss_kp + loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
+        spatial_loss = loss_kp + loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
+        spatial_detail = {
+            "spatial/keypoint": loss_kp.item(),
+            "spatial/distance": loss_dist.item(),
+            "spatial/visibility": loss_vis.item(),
+            "spatial/phase": loss_phase.item(),
+            "spatial/total": spatial_loss.item(),
+        }
+        return spatial_loss, spatial_detail
 
     def _compute_dct_loss(self, pred, target):
         B, T, D = pred.shape
@@ -683,7 +834,7 @@ class VLANeXt(nn.Module):
 
     def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, task=None):
         if task == "action_vqvae_pretrain":
-            return self.forward_action_vqvae_pretrain(actions)
+            return self.forward_action_vqvae_pretrain(actions), {}
 
         if self.loss_type == "regression":
             return self._forward_regression(
@@ -772,15 +923,21 @@ class VLANeXt(nn.Module):
                 
                 pred_action_continuous = torch.cat([pred_pose, pred_gripper], dim=-1)
 
+        loss_dict = {"loss/main": loss.item() if isinstance(loss, torch.Tensor) else loss}
+
         if self.dct_loss_weight > 0 and pred_action_continuous is not None:
              loss_dct = self._compute_dct_loss(pred_action_continuous.float(), actions.float())
+             loss_dict["loss/dct"] = loss_dct.item()
              loss = loss + self.dct_loss_weight * loss_dct
-        
+
         if self.future_image_loss_weight > 0:
+            loss_dict["loss/future_image"] = loss_img.item() if isinstance(loss_img, torch.Tensor) else loss_img
             loss = loss + self.future_image_loss_weight * loss_img
         if self.spatial_loss_weight > 0 and self.spatial_head is not None and spatial_targets is not None and hidden_states is not None:
-            loss = loss + self.spatial_loss_weight * self._compute_spatial_loss(hidden_states, spatial_targets)
-        return loss
+            spatial_loss, spatial_detail = self._compute_spatial_loss(hidden_states, spatial_targets)
+            loss_dict.update(spatial_detail)
+            loss = loss + self.spatial_loss_weight * spatial_loss
+        return loss, loss_dict
 
     def _forward_regression(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
         connector_out, hidden_states = self.get_vlm_condition(
@@ -809,16 +966,21 @@ class VLANeXt(nn.Module):
 
         if actions.ndim == 2: actions = actions.unsqueeze(1)
         loss = F.mse_loss(pred_actions, actions)
+        loss_dict = {"loss/main": loss.item()}
 
         if self.dct_loss_weight > 0:
             loss_dct = self._compute_dct_loss(pred_actions.float(), actions.float())
+            loss_dict["loss/dct"] = loss_dct.item()
             loss = loss + self.dct_loss_weight * loss_dct
-            
+
         if self.future_image_loss_weight > 0:
+            loss_dict["loss/future_image"] = loss_img.item() if isinstance(loss_img, torch.Tensor) else loss_img
             loss = loss + self.future_image_loss_weight * loss_img
         if self.spatial_loss_weight > 0 and self.spatial_head is not None and spatial_targets is not None and hidden_states is not None:
-            loss = loss + self.spatial_loss_weight * self._compute_spatial_loss(hidden_states, spatial_targets)
-        return loss
+            spatial_loss, spatial_detail = self._compute_spatial_loss(hidden_states, spatial_targets)
+            loss_dict.update(spatial_detail)
+            loss = loss + self.spatial_loss_weight * spatial_loss
+        return loss, loss_dict
 
     def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
         connector_out, hidden_states = self.get_vlm_condition(
@@ -862,6 +1024,7 @@ class VLANeXt(nn.Module):
              raise ValueError(f"Unknown condition type: {self.condition_type}")
         
         loss = F.mse_loss(pred, target)
+        loss_dict = {"loss/main": loss.item()}
 
         if self.dct_loss_weight > 0:
             pred_x_start = None
@@ -878,23 +1041,49 @@ class VLANeXt(nn.Module):
 
             if pred_x_start is not None:
                  loss_dct = self._compute_dct_loss(pred_x_start.float(), actions.float())
+                 loss_dict["loss/dct"] = loss_dct.item()
                  loss = loss + self.dct_loss_weight * loss_dct
-            
+
         if self.future_image_loss_weight > 0:
+            loss_dict["loss/future_image"] = loss_img.item() if isinstance(loss_img, torch.Tensor) else loss_img
             loss = loss + self.future_image_loss_weight * loss_img
         if self.spatial_loss_weight > 0 and self.spatial_head is not None and spatial_targets is not None and hidden_states is not None:
-            loss = loss + self.spatial_loss_weight * self._compute_spatial_loss(hidden_states, spatial_targets)
-        return loss
+            spatial_loss, spatial_detail = self._compute_spatial_loss(hidden_states, spatial_targets)
+            loss_dict.update(spatial_detail)
+            loss = loss + self.spatial_loss_weight * spatial_loss
+        return loss, loss_dict
 
     @torch.no_grad()
-    def predict_action(self, input_ids, attention_mask, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None):
+    def predict_spatial(self, hidden_states):
+        """Run spatial head on VLM hidden states. Returns dict or None."""
+        if self.spatial_head is None or hidden_states is None:
+            return None
+        image_token_mask = getattr(self, '_image_token_mask', None)
+        if image_token_mask is None:
+            B, S, H = hidden_states[-1].shape
+            image_token_mask = torch.ones(B, S, dtype=torch.bool, device=hidden_states[-1].device)
+        raw = self.spatial_head(hidden_states, image_token_mask)  # (B, 8)
+        pred = raw[0].float().cpu().numpy()  # single sample
+        tip_vis = torch.sigmoid(raw[0, 4]).item()
+        trocar_vis = torch.sigmoid(raw[0, 5]).item()
+        phase = torch.sigmoid(raw[0, 7]).item()
+        return {
+            "kp_wrist": pred[:4],          # tip_u, tip_v, trocar_u, trocar_v
+            "tip_visible": tip_vis,         # probability
+            "trocar_visible": trocar_vis,   # probability
+            "dist_norm": pred[6],           # normalized distance
+            "phase": phase,                 # probability (0=align, 1=insert)
+        }
+
+    @torch.no_grad()
+    def predict_action(self, input_ids, attention_mask, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, return_spatial=False):
         B = input_ids.shape[0]
-        
+
         connector_out, hidden_states = self.get_vlm_condition(
-            input_ids, attention_mask, 
+            input_ids, attention_mask,
             proprioception=proprioception,
             proprio_attention_mask=proprio_attention_mask,
-            pixel_values=pixel_values, 
+            pixel_values=pixel_values,
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw
@@ -924,8 +1113,7 @@ class VLANeXt(nn.Module):
                 action = self.action_head(cond_input, history_actions=policy_history)
             if action.ndim == 2 and self.num_actions > 1:
                 action = action.view(action.shape[0], self.num_actions, self.action_dim)
-            
-            return action.to(dtype=self.lmm.dtype)
+            action = action.to(dtype=self.lmm.dtype)
 
         elif self.loss_type == "classification":
             if self.action_vqvae is not None:
@@ -937,32 +1125,31 @@ class VLANeXt(nn.Module):
                 else:
                     cond_input = connector_out.mean(dim=1)
                     logits = self.action_head(cond_input, history_actions=policy_history)
-                
+
                 indices = torch.argmax(logits, dim=-1) # (B, T, Latent_Codes)
                 action = self.action_vqvae.decode_indices(indices)
-                return action.to(dtype=self.lmm.dtype)
-            
-            if self.condition_type in ["tight", "soft"]:
-                 if self.enable_future_image_loss:
-                     logits = self.action_head(hidden_states, history_actions=policy_history, gen_hidden_states=gen_hidden_states)
-                 else:
-                     logits = self.action_head(hidden_states, history_actions=policy_history)
+                action = action.to(dtype=self.lmm.dtype)
             else:
-                 cond_input = connector_out.mean(dim=1)
-                 logits = self.action_head(cond_input, history_actions=policy_history)
-            pose_logits = logits[:, :, :self.action_dim - 1, :]
-            gripper_logits = logits[:, :, -1:, :2]
-            pose_idx = torch.argmax(pose_logits, dim=-1)
-            gripper_idx = torch.argmax(gripper_logits, dim=-1)
-            pose_pred = (pose_idx.float() / (self.num_bins - 1)) * 2 - 1
-            gripper_pred = gripper_idx.float() * 2 - 1
-            action = torch.cat([pose_pred, gripper_pred], dim=-1).to(dtype=self.lmm.dtype)
-            return action
+                if self.condition_type in ["tight", "soft"]:
+                     if self.enable_future_image_loss:
+                         logits = self.action_head(hidden_states, history_actions=policy_history, gen_hidden_states=gen_hidden_states)
+                     else:
+                         logits = self.action_head(hidden_states, history_actions=policy_history)
+                else:
+                     cond_input = connector_out.mean(dim=1)
+                     logits = self.action_head(cond_input, history_actions=policy_history)
+                pose_logits = logits[:, :, :self.action_dim - 1, :]
+                gripper_logits = logits[:, :, -1:, :2]
+                pose_idx = torch.argmax(pose_logits, dim=-1)
+                gripper_idx = torch.argmax(gripper_logits, dim=-1)
+                pose_pred = (pose_idx.float() / (self.num_bins - 1)) * 2 - 1
+                gripper_pred = gripper_idx.float() * 2 - 1
+                action = torch.cat([pose_pred, gripper_pred], dim=-1).to(dtype=self.lmm.dtype)
 
         elif self.loss_type == "diffusion":
             action = torch.randn(B, self.num_actions, self.action_dim, device=input_ids.device).to(self.lmm.dtype)
             self.noise_scheduler.set_timesteps(self.num_inference_timesteps)
-            
+
             for t in self.noise_scheduler.timesteps:
                 timesteps = torch.full((B,), t, device=input_ids.device)
                 if self.scheduler_type != "flow_match": timesteps = timesteps.long()
@@ -974,14 +1161,17 @@ class VLANeXt(nn.Module):
                 else:
                     cond_input = connector_out.mean(dim=1)
                     output = self.action_head(action, timesteps, cond_input, history_actions=policy_history)
-                
+
                 action = self.noise_scheduler.step(output, t, action).prev_sample
                 action = action.to(dtype=self.lmm.dtype)
-            
-            return action
-        
+
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
+
+        if return_spatial:
+            spatial_pred = self.predict_spatial(hidden_states)
+            return action, spatial_pred
+        return action
 
     @torch.no_grad()
     def predict_image(self, input_ids, attention_mask, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, max_new_tokens=1024):

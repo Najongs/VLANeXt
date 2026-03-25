@@ -11,4 +11,4 @@
 # Sim eval
 CUDA_VISIBLE_DEVICES=0 python -m scripts.sim_eval \
     --config config/sim_eval_config.yaml \
-    --checkpoint /data/public/NAS/VLANeXt/outputs_step10000_Normal.pt
+    --checkpoint /data/public/NAS/VLANeXt/outputs_step20000
