@@ -9,6 +9,6 @@
 #     --checkpoint checkpoints/VLANeXt_droid.pt
 
 # Sim eval
-CUDA_VISIBLE_DEVICES=0 python -m scripts.sim_eval \
+CUDA_VISIBLE_DEVICES=2 python -m scripts.sim_eval \
     --config config/sim_eval_config.yaml \
-    --checkpoint /data/public/NAS/VLANeXt/outputs_step20000
+    --checkpoint /data/public/NAS/VLANeXt/checkpoints/Saved_models/outputs_step_12500_add_loss_v2

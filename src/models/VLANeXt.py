@@ -778,7 +778,7 @@ class VLANeXt(nn.Module):
         phase_target = spatial_targets[:, 7]
         loss_phase = F.binary_cross_entropy_with_logits(phase_pred, phase_target)
 
-        spatial_loss = loss_kp + loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
+        spatial_loss = 100.0 * loss_kp + loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
         spatial_detail = {
             "spatial/keypoint": loss_kp.item(),
             "spatial/distance": loss_dist.item(),
