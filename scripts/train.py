@@ -726,12 +726,45 @@ def train(config):
             if global_rank == 0:
                 print(f"Resuming training from checkpoint: {resume_path}")
             if use_deepspeed:
+                # Monkey-patch frozen params loading to tolerate missing keys
+                import deepspeed.runtime.engine as _ds_engine
+                _orig_load_module = _ds_engine.DeepSpeedEngine.load_module_state_dict
+
+                def _safe_load_module(self_engine, checkpoint, strict=True, custom_load_fn=None, **kwargs):
+                    # Intercept: wrap frozen params dict to return dummy for missing keys
+                    if 'frozen_param_fragments' in checkpoint:
+                        _orig_frozen = checkpoint['frozen_param_fragments']
+
+                        class _TolerantDict(dict):
+                            """Returns a dummy tensor for missing frozen param keys."""
+                            def __getitem__(self, key):
+                                if dict.__contains__(self, key):
+                                    return dict.__getitem__(self, key)
+                                if global_rank == 0:
+                                    print(f"  [INFO] New param not in checkpoint (skip frozen): {key}")
+                                # Return a dummy; DeepSpeed copies .data from this
+                                return torch.tensor([0.0])
+
+                            def __contains__(self, key):
+                                return True  # Pretend all keys exist to avoid other checks
+
+                        checkpoint['frozen_param_fragments'] = _TolerantDict(_orig_frozen)
+
+                    return _orig_load_module(self_engine, checkpoint, strict=False,
+                                             custom_load_fn=custom_load_fn, **kwargs)
+
+                _ds_engine.DeepSpeedEngine.load_module_state_dict = _safe_load_module
+
                 load_path, client_state = model.load_checkpoint(
                     resume_path,
                     load_module_strict=False,
                     load_optimizer_states=False,
                     load_lr_scheduler_states=False,
                 )
+
+                # Restore original method
+                _ds_engine.DeepSpeedEngine.load_module_state_dict = _orig_load_module
+
                 if load_path is None:
                     raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {resume_path}")
                 start_step = int((client_state or {}).get('step', 0))
