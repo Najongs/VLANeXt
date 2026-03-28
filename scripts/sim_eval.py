@@ -154,6 +154,7 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         dct_freq_split=mc.get("dct_freq_split", 0.125),
         dct_similarity_type=mc.get("dct_similarity_type", "mae"),
         spatial_loss_weight=mc.get("spatial_loss_weight", 0.0),
+        proprio_dim=mc.get("proprio_dim", None),
     )
 
     if list(state_dict.keys())[0].startswith("module."):
@@ -804,8 +805,9 @@ def run_eval(cfg):
     # ── Load model & processor ────────────────────────────────────────────────
     diff_steps = getattr(cfg.model, "diffusion_steps", 10)
     sched_type = getattr(cfg.model, "scheduler_type", "flow_match")
-    model = load_model(checkpoint_path, diffusion_steps=diff_steps, scheduler_type=sched_type)
-    processor = load_processor(checkpoint_path)
+    train_config_path = getattr(cfg, "train_config_path", None)
+    model = load_model(checkpoint_path, diffusion_steps=diff_steps, scheduler_type=sched_type, train_config_path=train_config_path)
+    processor = load_processor(checkpoint_path, train_config_path=train_config_path)
 
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
@@ -875,13 +877,12 @@ def run_eval(cfg):
             # Concat all 3 views side-by-side for replay video (overlay drawn after prediction)
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)  # (H, W*3, 3)
 
-            # Proprioception: ee_pose(6) + gripper_proxy(1)
+            # Proprioception: ee_pose(6) + gripper_proxy(1) + proximity(1)
             ee_pose = env.get_ee_pose()  # (6,)
             sensor_dist = env.get_sensor_dist()
-            # Use sensor_dist as a proxy for gripper state:
-            # close to surface → "grasping" → 1.0, else → 0.0
             gripper_state = 1.0 if (0 < sensor_dist < 30) else 0.0
-            proprio = np.concatenate([ee_pose, [gripper_state]])  # (7,)
+            proximity = 1.0 if (0 <= sensor_dist < 10) else 0.0
+            proprio = np.concatenate([ee_pose, [gripper_state, proximity]])  # (8,)
             state_history.append(proprio)
 
             observation = {
@@ -993,6 +994,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate VLANeXt on needle-insertion sim")
     parser.add_argument("--config", type=str, default="config/sim_eval_config.yaml")
     parser.add_argument("--checkpoint", type=str, default="", help="Override eval.finetuned_checkpoint")
+    parser.add_argument("--train-config", type=str, default=None, help="Path to train config (for model architecture)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -1002,4 +1004,5 @@ if __name__ == "__main__":
         config_dict.setdefault("eval", {})["finetuned_checkpoint"] = args.checkpoint
 
     cfg = DictConfig(config_dict)
+    cfg.train_config_path = args.train_config
     run_eval(cfg)

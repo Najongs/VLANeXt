@@ -40,10 +40,10 @@ class LlamaProcessorWrapper:
         self.image_processor = image_processor
 
 class SpatialCrossAttentionHead(nn.Module):
-    """Cross-attention based spatial head inspired by VLA-Adapter.
+    """Cross-attention based spatial head.
 
-    Uses learnable spatial queries that attend to image patch tokens
-    from multiple VLM layers to predict keypoints, visibility, distance, and phase.
+    Keypoint queries attend ONLY to wrist camera tokens for precise 2D prediction.
+    Global queries (dist/phase) attend to ALL image tokens across views.
 
     Output layout (8D):
         [0:4] kp_wrist: tip_u, tip_v, trocar_u, trocar_v
@@ -58,13 +58,15 @@ class SpatialCrossAttentionHead(nn.Module):
         self.num_layers_to_use = num_layers_to_use
         self.num_heads = num_heads
 
-        # Learnable spatial queries: tip + trocar
+        # Learnable spatial queries: tip + trocar (keypoints, wrist-only)
         self.spatial_queries = nn.Parameter(torch.randn(2, hidden_size) * 0.02)
+        # Learnable global queries: dist + phase (all views)
+        self.global_queries = nn.Parameter(torch.randn(2, hidden_size) * 0.02)
 
         # Layer projection: fuse selected layers into one
         self.layer_weights = nn.Parameter(torch.ones(num_layers_to_use) / num_layers_to_use)
 
-        # Cross-attention
+        # Cross-attention (shared projections)
         self.q_proj = nn.Linear(hidden_size, hidden_size)
         self.k_proj = nn.Linear(hidden_size, hidden_size)
         self.v_proj = nn.Linear(hidden_size, hidden_size)
@@ -86,11 +88,54 @@ class SpatialCrossAttentionHead(nn.Module):
             nn.Linear(256, 2),  # dist_norm, phase_logit
         )
 
-    def forward(self, hidden_states, image_token_mask):
+    def _cross_attend(self, queries, kv, attn_mask, B):
+        """Shared cross-attention logic."""
+        num_q = queries.shape[1]
+        head_dim = self.hidden_size // self.num_heads
+
+        Q = self.q_proj(queries).view(B, num_q, self.num_heads, head_dim).transpose(1, 2)
+        K = self.k_proj(kv).view(B, -1, self.num_heads, head_dim).transpose(1, 2)
+        V = self.v_proj(kv).view(B, -1, self.num_heads, head_dim).transpose(1, 2)
+
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (head_dim ** 0.5)
+        if attn_mask is not None:
+            mask_expanded = attn_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, S)
+            attn_scores = attn_scores.masked_fill(~mask_expanded, float('-inf'))
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_out = torch.matmul(attn_weights, V)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, num_q, self.hidden_size)
+        return self.o_proj(attn_out)
+
+    def _extract_and_pad(self, fused, mask, B):
+        """Extract masked tokens and pad to same length."""
+        patch_list = []
+        max_patches = 0
+        for b in range(B):
+            patches = fused[b][mask[b]]
+            patch_list.append(patches)
+            max_patches = max(max_patches, patches.shape[0])
+
+        if max_patches == 0:
+            return self.norm_kv(fused), None
+
+        padded = torch.zeros(B, max_patches, self.hidden_size,
+                             device=fused.device, dtype=fused.dtype)
+        attn_mask = torch.zeros(B, max_patches, device=fused.device, dtype=torch.bool)
+        for b, patches in enumerate(patch_list):
+            n = patches.shape[0]
+            padded[b, :n] = patches
+            attn_mask[b, :n] = True
+        return self.norm_kv(padded), attn_mask
+
+    def forward(self, hidden_states, image_token_mask, image_grid_thw=None, wrist_image_index=1):
         """
         Args:
             hidden_states: tuple of (B, seq_len, H) from all VLM layers
             image_token_mask: (B, seq_len) bool, True for image patch tokens
+            image_grid_thw: (num_images, 3) tensor — per-image (t, h, w) grid info.
+                            Used to identify wrist camera token range.
+            wrist_image_index: index of wrist camera in image sequence (default: 1,
+                               i.e. [side=0, wrist=1, top=2])
         Returns:
             spatial_pred: (B, 8)
         """
@@ -100,63 +145,56 @@ class SpatialCrossAttentionHead(nn.Module):
             max(0, num_layers - self.num_layers_to_use), num_layers
         ))
         w = F.softmax(self.layer_weights[:len(selected_indices)], dim=0)
-
-        # Weighted sum of selected layers
         fused = sum(
             w[i] * hidden_states[idx] for i, idx in enumerate(selected_indices)
         )  # (B, seq_len, H)
 
-        # Extract image patch tokens only
         B = fused.shape[0]
-        patch_list = []
-        max_patches = 0
-        for b in range(B):
-            patches = fused[b][image_token_mask[b]]  # (num_patches, H)
-            patch_list.append(patches)
-            max_patches = max(max_patches, patches.shape[0])
 
-        # Pad to same length
-        if max_patches == 0:
-            # Fallback: use all tokens if no image tokens detected
-            kv = self.norm_kv(fused)
-        else:
-            padded = torch.zeros(B, max_patches, self.hidden_size,
-                                 device=fused.device, dtype=fused.dtype)
-            attn_mask = torch.zeros(B, max_patches, device=fused.device, dtype=torch.bool)
-            for b, patches in enumerate(patch_list):
-                n = patches.shape[0]
-                padded[b, :n] = patches
-                attn_mask[b, :n] = True
-            kv = self.norm_kv(padded)
+        # --- Build wrist-only mask from image_grid_thw ---
+        wrist_mask = None
+        if image_grid_thw is not None and image_grid_thw.shape[0] > wrist_image_index:
+            # Compute token counts per image
+            tokens_per_image = (image_grid_thw[:, 0] * image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
+            # For batched processing, image_grid_thw is stacked: B * num_images_per_sample rows
+            num_images_per_sample = len(tokens_per_image) // B if B > 0 else 0
 
-        # Spatial queries: (2, H) → (B, 2, H)
-        queries = self.spatial_queries.unsqueeze(0).expand(B, -1, -1)
-        queries = self.norm_q(queries)
+            if num_images_per_sample > wrist_image_index:
+                wrist_mask = torch.zeros_like(image_token_mask)  # (B, seq_len)
+                for b in range(B):
+                    # Get image token positions for this sample
+                    img_positions = image_token_mask[b].nonzero(as_tuple=True)[0]
+                    if img_positions.numel() == 0:
+                        continue
+                    # Compute wrist token range within image tokens
+                    img_idx_base = b * num_images_per_sample
+                    offset = sum(int(tokens_per_image[img_idx_base + i]) for i in range(wrist_image_index))
+                    wrist_len = int(tokens_per_image[img_idx_base + wrist_image_index])
+                    end = min(offset + wrist_len, img_positions.numel())
+                    if offset < end:
+                        wrist_positions = img_positions[offset:end]
+                        wrist_mask[b, wrist_positions] = True
 
-        # Multi-head cross-attention
-        head_dim = self.hidden_size // self.num_heads
-        Q = self.q_proj(queries).view(B, 2, self.num_heads, head_dim).transpose(1, 2)
-        K = self.k_proj(kv).view(B, -1, self.num_heads, head_dim).transpose(1, 2)
-        V = self.v_proj(kv).view(B, -1, self.num_heads, head_dim).transpose(1, 2)
+        # --- Keypoint cross-attention: wrist-only tokens ---
+        kp_token_mask = wrist_mask if wrist_mask is not None else image_token_mask
+        kp_kv, kp_attn_mask = self._extract_and_pad(fused, kp_token_mask, B)
 
-        # Attention with mask
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (head_dim ** 0.5)
-        if max_patches > 0:
-            # Mask out padded positions
-            mask_expanded = attn_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, max_patches)
-            attn_scores = attn_scores.masked_fill(~mask_expanded, float('-inf'))
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_out = torch.matmul(attn_weights, V)  # (B, num_heads, 2, head_dim)
-        attn_out = attn_out.transpose(1, 2).contiguous().view(B, 2, self.hidden_size)
-        attn_out = self.o_proj(attn_out)  # (B, 2, H)
+        kp_queries = self.spatial_queries.unsqueeze(0).expand(B, -1, -1)
+        kp_queries = self.norm_q(kp_queries)
+        kp_out = self._cross_attend(kp_queries, kp_kv, kp_attn_mask, B)  # (B, 2, H)
 
-        # Per-query keypoint predictions
-        tip_out = self.keypoint_head(attn_out[:, 0])    # (B, 3): u, v, vis_logit
-        trocar_out = self.keypoint_head(attn_out[:, 1])  # (B, 3): u, v, vis_logit
+        tip_out = self.keypoint_head(kp_out[:, 0])    # (B, 3): u, v, vis_logit
+        trocar_out = self.keypoint_head(kp_out[:, 1])  # (B, 3): u, v, vis_logit
 
-        # Global predictions from concatenated queries
-        global_feat = torch.cat([attn_out[:, 0], attn_out[:, 1]], dim=-1)  # (B, 2H)
-        global_out = self.global_head(global_feat)  # (B, 2): dist, phase_logit
+        # --- Global cross-attention: all image tokens ---
+        all_kv, all_attn_mask = self._extract_and_pad(fused, image_token_mask, B)
+
+        global_q = self.global_queries.unsqueeze(0).expand(B, -1, -1)
+        global_q = self.norm_q(global_q)
+        global_out = self._cross_attend(global_q, all_kv, all_attn_mask, B)  # (B, 2, H)
+
+        global_feat = torch.cat([global_out[:, 0], global_out[:, 1]], dim=-1)  # (B, 2H)
+        global_pred = self.global_head(global_feat)  # (B, 2): dist, phase_logit
 
         # Assemble: [tip_u, tip_v, trocar_u, trocar_v, tip_vis, trocar_vis, dist, phase]
         spatial_pred = torch.cat([
@@ -164,7 +202,7 @@ class SpatialCrossAttentionHead(nn.Module):
             trocar_out[:, :2],    # trocar u, v
             tip_out[:, 2:3],      # tip visibility logit
             trocar_out[:, 2:3],   # trocar visibility logit
-            global_out,           # dist, phase logit
+            global_pred,          # dist, phase logit
         ], dim=-1)  # (B, 8)
 
         return spatial_pred
@@ -212,9 +250,10 @@ class VLANeXt(nn.Module):
         dct_freq_split=0.5,
         dct_similarity_type="mse",  # Options: "mse", "mae", "cosine"
         spatial_loss_weight=0.0,
+        proprio_dim=None,
     ):
         super().__init__()
-        
+
         print(f"Initializing VLM {lmm_path} with attn_implementation: {attn_implementation}")
         if "paligemma" in lmm_path.lower():
             self.model_family = "paligemma"
@@ -345,7 +384,7 @@ class VLANeXt(nn.Module):
             self.generator = None
 
         if self.use_proprio_input_vlm:
-            projector_input_dim = action_dim
+            projector_input_dim = proprio_dim if proprio_dim is not None else action_dim
             if use_transformer_proprio_projector:
                 self.action_projector = ActionTransformerProjector(
                     action_dim=projector_input_dim,
@@ -614,6 +653,7 @@ class VLANeXt(nn.Module):
             if image_token_mask.shape[1] != hs_len:
                 image_token_mask = torch.ones(B, hs_len, dtype=torch.bool, device=image_token_mask.device)
         self._image_token_mask = image_token_mask  # cache for spatial head
+        self._image_grid_thw = image_grid_thw  # cache for spatial head (wrist masking)
 
         return connector_out, hidden_states
 
@@ -748,7 +788,8 @@ class VLANeXt(nn.Module):
             # Fallback: use all tokens
             B, S, H = hidden_states[-1].shape
             image_token_mask = torch.ones(B, S, dtype=torch.bool, device=hidden_states[-1].device)
-        spatial_pred = self.spatial_head(hidden_states, image_token_mask)  # (B, 8)
+        image_grid_thw = getattr(self, '_image_grid_thw', None)
+        spatial_pred = self.spatial_head(hidden_states, image_token_mask, image_grid_thw=image_grid_thw)  # (B, 8)
         spatial_targets = spatial_targets.to(spatial_pred.dtype)
 
         # --- Visibility loss (BCE) ---
@@ -832,7 +873,7 @@ class VLANeXt(nn.Module):
             raise ValueError(f"Unknown dct_similarity_type: {sim_type!r}. "
                              f"Options are: 'mse', 'mae', 'cosine'.")
 
-    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, task=None):
+    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, task=None):
         if task == "action_vqvae_pretrain":
             return self.forward_action_vqvae_pretrain(actions), {}
 
@@ -849,7 +890,8 @@ class VLANeXt(nn.Module):
         elif self.loss_type == "diffusion":
             return self._forward_diffusion(
                 input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask,
-                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets
+                pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets,
+                action_weights=action_weights
             )
 
     def _forward_classification(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
@@ -982,7 +1024,7 @@ class VLANeXt(nn.Module):
             loss = loss + self.spatial_loss_weight * spatial_loss
         return loss, loss_dict
 
-    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
+    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -1023,7 +1065,12 @@ class VLANeXt(nn.Module):
         else:
              raise ValueError(f"Unknown condition type: {self.condition_type}")
         
-        loss = F.mse_loss(pred, target)
+        if action_weights is not None:
+            # Weighted MSE: action_weights is (B,), expand to match pred shape
+            w = action_weights.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
+            loss = (w * (pred - target) ** 2).mean()
+        else:
+            loss = F.mse_loss(pred, target)
         loss_dict = {"loss/main": loss.item()}
 
         if self.dct_loss_weight > 0:
@@ -1062,7 +1109,8 @@ class VLANeXt(nn.Module):
         if image_token_mask is None:
             B, S, H = hidden_states[-1].shape
             image_token_mask = torch.ones(B, S, dtype=torch.bool, device=hidden_states[-1].device)
-        raw = self.spatial_head(hidden_states, image_token_mask)  # (B, 8)
+        image_grid_thw = getattr(self, '_image_grid_thw', None)
+        raw = self.spatial_head(hidden_states, image_token_mask, image_grid_thw=image_grid_thw)  # (B, 8)
         pred = raw[0].float().cpu().numpy()  # single sample
         tip_vis = torch.sigmoid(raw[0, 4]).item()
         trocar_vis = torch.sigmoid(raw[0, 5]).item()

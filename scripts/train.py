@@ -175,6 +175,7 @@ class DataCollatorForVLANeXt:
         hist_actions_list = []
         future_images_list = []
         spatial_target_list = []
+        action_weight_list = []
 
         is_paligemma = "PaliGemma" in self.processor.__class__.__name__
         is_qwen = "Qwen" in self.processor.__class__.__name__
@@ -256,6 +257,8 @@ class DataCollatorForVLANeXt:
 
             if "spatial_target" in sample and sample["spatial_target"] is not None:
                 spatial_target_list.append(sample["spatial_target"])
+            if "action_weight" in sample:
+                action_weight_list.append(sample["action_weight"])
 
             if self.load_future_image and "future_image" in sample:
                 f_img = sample["future_image"]
@@ -306,8 +309,9 @@ class DataCollatorForVLANeXt:
         hist_actions = torch.stack(hist_actions_list) if self.use_action_input_policy else None
         future_images = torch.stack(future_images_list) if self.load_future_image else None
         spatial_targets = torch.stack(spatial_target_list) if spatial_target_list else None
+        action_weights = torch.stack(action_weight_list) if action_weight_list else None
 
-        return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets
+        return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -482,6 +486,7 @@ def train(config):
             dct_freq_split=config['model'].get('dct_freq_split', 0.125),
             dct_similarity_type=config['model'].get('dct_similarity_type', 'mae'),
             spatial_loss_weight=config['model'].get('spatial_loss_weight', 0.0),
+            proprio_dim=config['model'].get('proprio_dim', None),
         ).to(device, dtype=torch.bfloat16)
     if has_pretrained_ckpt:
         if global_rank == 0:
@@ -490,6 +495,13 @@ def train(config):
         state_dict = checkpoint['model_state_dict']
         if list(state_dict.keys())[0].startswith('module.'):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        # Filter out shape-mismatched keys
+        model_sd = model.state_dict()
+        mismatched = [k for k in state_dict if k in model_sd and state_dict[k].shape != model_sd[k].shape]
+        for k in mismatched:
+            if global_rank == 0:
+                print(f"  Shape mismatch, skipping: {k} ckpt={state_dict[k].shape} model={model_sd[k].shape}")
+            del state_dict[k]
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if global_rank == 0:
             print(f"Loaded weights. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
@@ -731,6 +743,16 @@ def train(config):
                 _orig_load_module = _ds_engine.DeepSpeedEngine.load_module_state_dict
 
                 def _safe_load_module(self_engine, checkpoint, strict=True, custom_load_fn=None, **kwargs):
+                    # Filter out shape-mismatched keys from module state_dict
+                    if 'module' in checkpoint:
+                        model_sd = self_engine.module.state_dict()
+                        ckpt_sd = checkpoint['module']
+                        mismatched = [k for k in ckpt_sd if k in model_sd and ckpt_sd[k].shape != model_sd[k].shape]
+                        for k in mismatched:
+                            if global_rank == 0:
+                                print(f"  Shape mismatch, skipping: {k} ckpt={ckpt_sd[k].shape} model={model_sd[k].shape}")
+                            del ckpt_sd[k]
+
                     # Intercept: wrap frozen params dict to return dummy for missing keys
                     if 'frozen_param_fragments' in checkpoint:
                         _orig_frozen = checkpoint['frozen_param_fragments']
@@ -803,7 +825,7 @@ def train(config):
             data_iter = iter(dataloader)
             batch = next(data_iter)
             
-        inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets = batch
+        inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights = batch
         del batch
         model_inputs = {k: v.to(device) for k, v in inputs.items()}
         del inputs
@@ -820,7 +842,9 @@ def train(config):
             future_images = future_images.to(device, dtype=torch.bfloat16)
         if spatial_targets is not None:
             spatial_targets = spatial_targets.to(device, dtype=torch.bfloat16)
-        
+        if action_weights is not None:
+            action_weights = action_weights.to(device, dtype=torch.bfloat16)
+
         valid_keys = {"input_ids", "attention_mask", "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
         do_update = (batch_idx + 1) % gradient_accumulation_steps == 0
@@ -831,6 +855,7 @@ def train(config):
                 history_actions=hist_actions,
                 future_images=future_images,
                 spatial_targets=spatial_targets,
+                action_weights=action_weights,
                 **forward_args
             )
             loss = loss / gradient_accumulation_steps
@@ -846,6 +871,7 @@ def train(config):
                     history_actions=hist_actions,
                     future_images=future_images,
                     spatial_targets=spatial_targets,
+                    action_weights=action_weights,
                     **forward_args
                 )
                 loss = loss / gradient_accumulation_steps

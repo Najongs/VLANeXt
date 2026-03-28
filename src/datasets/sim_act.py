@@ -109,8 +109,13 @@ class SimAct(IterableDataset):
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) ---
+            # --- Proprioception: ee_pose (N, 7) + proximity (N, 1) ---
             proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)
+            sensor_dist_np = None
+            if "sensor_dist" in f["observations"]:
+                sensor_dist_np = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,)
+                proximity = ((sensor_dist_np >= 0) & (sensor_dist_np < 10.0)).astype(np.float32)
+                proprio_np = np.concatenate([proprio_np, proximity.reshape(-1, 1)], axis=-1)  # (N, 8)
 
             # --- Language instruction ---
             raw = f["language_instruction"][()]
@@ -137,6 +142,13 @@ class SimAct(IterableDataset):
                     [kp_wrist, kp_vis, dist_normalized, phase_binary], axis=-1
                 )  # (N, 8)
 
+            # --- Action weight: critical zone = phase 1 (align) + sensor within 30mm ---
+            action_weight_np = np.ones(traj_len, dtype=np.float32)
+            if sensor_dist_np is not None:
+                phase_raw = f["phase"][:].astype(np.float32)
+                critical = (phase_raw == 1) & (sensor_dist_np >= 0) & (sensor_dist_np < 30.0)
+                action_weight_np[critical] = 5.0  # 5x weight in critical zone
+
             # --- Images: decode all frames for selected cameras ---
             img_grp = f["observations"]["images"]
 
@@ -161,7 +173,7 @@ class SimAct(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np
+        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -195,7 +207,7 @@ class SimAct(IterableDataset):
 
         for ep_path in episode_paths:
             try:
-                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np = self._load_episode(ep_path)
+                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
             except Exception as e:
                 print(f"[Warn] Skipping {ep_path}: {e}")
                 continue
@@ -258,6 +270,9 @@ class SimAct(IterableDataset):
                 else:
                     sample["spatial_target"] = None
 
+                # Action loss weight (higher in critical zone)
+                sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)
+
                 # --- Future image (optional) ---
                 if self.load_future_image:
                     if self.future_image_mode == "last":
@@ -290,7 +305,7 @@ class SimAct(IterableDataset):
                     yield shuffle_buffer.pop()
 
             # Cleanup per episode
-            del images_np, actions_np, proprio_np
+            del images_np, actions_np, proprio_np, action_weight_np
             if wrist_np is not None:
                 del wrist_np
             if top_np is not None:

@@ -11,4 +11,5 @@
 # Sim eval
 CUDA_VISIBLE_DEVICES=2 python -m scripts.sim_eval \
     --config config/sim_eval_config.yaml \
-    --checkpoint /data/public/NAS/VLANeXt/checkpoints/Saved_models/outputs_step_12500_add_loss_v2
+    --checkpoint /data/public/NAS/VLANeXt/output_dir_spatial_sensor \
+    --train-config config/sim_train_spatial_config.yaml

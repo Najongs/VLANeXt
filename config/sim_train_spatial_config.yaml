@@ -1,8 +1,8 @@
 project:
-  name: "VLANeXt_finetune_sim_spatial"
+  name: "VLANeXt_finetune_sim_spatial_sensor"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 500
+  save_interval: 1000
   use_wandb: true
 
 data:
@@ -16,7 +16,7 @@ data:
   buffer_size: 1000
 
   batch_size: 51
-  max_steps: 20000
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
@@ -50,6 +50,7 @@ model:
   backbone_mode: "frozen"
 
   action_dim: 7
+  proprio_dim: 8  # ee_pose(7) + proximity(1): object within 10mm
 
   loss_type: "diffusion"
   num_train_timesteps: 1000
