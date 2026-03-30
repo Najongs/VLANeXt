@@ -123,6 +123,8 @@ class SimAct(IterableDataset):
                 instruction = raw.decode("utf-8")
             else:
                 instruction = str(raw)
+            # Override with VLM-friendly description (frozen VLM may not know "trocar")
+            instruction = "Align the needle with the hollow cylindrical opening and insert it"
 
             # --- Spatial auxiliary targets (backward compatible) ---
             # Layout (8D): kp_wrist(4) + visibility(2) + dist(1) + phase(1)

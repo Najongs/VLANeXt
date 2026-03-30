@@ -325,7 +325,7 @@ def predict_action(model, processor, obs, task_label):
 # ═══════════════════════════════════════════════════════════════════════════════
 SIM_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "Sim", "meca_add.xml")
 TARGET_INSERTION_DEPTH = 0.0275
-TASK_INSTRUCTION = "Align the needle and insert it into the trocar opening"
+TASK_INSTRUCTION = "Align the needle with the hollow cylindrical opening and insert it"
 IMG_WIDTH, IMG_HEIGHT = 640, 480
 
 
