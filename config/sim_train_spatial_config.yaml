@@ -1,13 +1,13 @@
 project:
   name: "VLANeXt_finetune_sim_spatial_sensor"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 1000
   use_wandb: true
 
 data:
   dataset_name: "sim"
-  data_root: "/data/public/NAS/VLANeXt/dataset/New2/collected_data_merged"
+  data_root: "/home/najo/NAS/VLANeXt/dataset/New2/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
 
@@ -15,7 +15,7 @@ data:
   future_len: 8
   buffer_size: 1000
 
-  batch_size: 51
+  batch_size: 50
   max_steps: 10000
   num_workers: 4
 
@@ -47,7 +47,7 @@ model:
   model_type: "vlanext"
   lmm_path: "Qwen/Qwen3-VL-2B-Instruct"
   vision_encoder_path: "google/siglip2-base-patch16-256"
-  backbone_mode: "frozen"
+  backbone_mode: "finetune"
 
   action_dim: 7
   proprio_dim: 8  # ee_pose(7) + proximity(1): object within 10mm
@@ -102,7 +102,7 @@ model:
 
 train:
   seed: 2026
-  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/nomal_second_zero3"
+  resume_path: "/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/spatial"
   pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
