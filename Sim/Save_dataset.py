@@ -192,13 +192,20 @@ def smooth_step(t):
 
 def randomize_phantom_pos(model, data, phantom_id, rot_id):
     # 1. 위치 이동 (Translation)
-    offset_x = np.random.uniform(-0.05, 0.05)
-    offset_y = np.random.uniform(-0.03, 0.03)
-    offset_z = 0.0 # np.random.uniform(0.0, 0.1) 
+    offset_x = np.random.uniform(-0.05, 0.05) # 기존 테스트용 주석 해제
+    offset_y = np.random.uniform(-0.4, 0.0)   # 0부터 -0.4까지 랜덤 설정
+    offset_z = 0.0 
+
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
     
     # 2. 회전 (Rotation)
-    random_angle_deg = np.random.uniform(-15, 15)
+    if offset_y >= -0.25:
+        # 0.0 ~ -0.25 구간
+        random_angle_deg = np.random.uniform(-15, 15)
+    else:
+        # -0.3 ~ -0.4 구간
+        random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
     model.body_quat[rot_id] = new_quat
@@ -248,7 +255,7 @@ def main():
 
     recorder = SimRecorder(SAVE_DIR)
     # home_pose = np.array([0.5236, -0.3491, 0.3491, 0.0000, 0.5236, 1.0472]) # (30, -20, 20, 0, 30, 60)
-    home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.3, -0.4), np.random.uniform(0.3, 0.4),  0.0000,np.random.uniform(0.45, 0.55), np.random.uniform(0.95, 1.05)]) # (30, -20, 20, 0, 30, 60)
+    home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.4, -0.3), np.random.uniform(0.3, 0.4),  0.0000,np.random.uniform(0.45, 0.55), np.random.uniform(0.95, 1.05)]) # (30, -20, 20, 0, 30, 60)
     current_speed = np.random.uniform(0.3, 0.6)
 
     def get_ee_pose_6d_scaled():
