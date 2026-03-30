@@ -813,6 +813,25 @@ def train(config):
     model.train()
     step = start_step
     batch_idx = 0
+
+    # save_interval == 0: save immediately after loading, then disable periodic saving
+    if config['project']['save_interval'] == 0:
+        if use_deepspeed:
+            ckpt_tag = f"step_{step}"
+            model.save_checkpoint(save_dir, tag=ckpt_tag, client_state={"step": step, "config": config})
+            if global_rank == 0:
+                print(f"\nSaved initial checkpoint to {os.path.join(save_dir, ckpt_tag)}")
+        elif global_rank == 0:
+            save_path = os.path.join(save_dir, f"checkpoint_{step}.pt")
+            torch.save({
+                'step': step,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': lr_scheduler.state_dict(),
+                'config': config
+            }, save_path)
+            print(f"\nSaved initial checkpoint to {save_path}")
+
     if global_rank == 0:
         progress_bar = tqdm(total=config['data']['max_steps'], initial=start_step, desc="Finetuning")
     data_iter = iter(dataloader)
@@ -900,7 +919,7 @@ def train(config):
                     for k, v in loss_dict.items():
                         log_data[f"train/{k}"] = v
                     wandb.log(log_data)
-            if step % config['project']['save_interval'] == 0:
+            if config['project']['save_interval'] > 0 and step % config['project']['save_interval'] == 0:
                 if use_deepspeed:
                     ckpt_tag = f"step_{step}"
                     model.save_checkpoint(save_dir, tag=ckpt_tag, client_state={"step": step, "config": config})

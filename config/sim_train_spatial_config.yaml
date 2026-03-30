@@ -2,7 +2,7 @@ project:
   name: "VLANeXt_finetune_sim_spatial_sensor"
   output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 1000
+  save_interval: 0
   use_wandb: true
 
 data:
@@ -47,7 +47,7 @@ model:
   model_type: "vlanext"
   lmm_path: "Qwen/Qwen3-VL-2B-Instruct"
   vision_encoder_path: "google/siglip2-base-patch16-256"
-  backbone_mode: "finetune"
+  backbone_mode: "frozen"
 
   action_dim: 7
   proprio_dim: 8  # ee_pose(7) + proximity(1): object within 10mm

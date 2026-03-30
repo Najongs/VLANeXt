@@ -48,7 +48,8 @@ MAX_EPISODES = 1
 IMG_WIDTH = 640
 IMG_HEIGHT = 480
 TARGET_INSERTION_DEPTH = 0.0275
-TRAJ_DURATION = np.random.uniform(12.0, 18.0)
+ALIGN_SPEED = 0.01      # 정렬 단계 속도: 0.015 m/s (초당 1.5cm)
+INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Align the needle and insert it into the trocar opening"
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
@@ -256,7 +257,7 @@ def main():
     recorder = SimRecorder(SAVE_DIR)
     # home_pose = np.array([0.5236, -0.3491, 0.3491, 0.0000, 0.5236, 1.0472]) # (30, -20, 20, 0, 30, 60)
     home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.4, -0.3), np.random.uniform(0.3, 0.4),  0.0000,np.random.uniform(0.45, 0.55), np.random.uniform(0.95, 1.05)]) # (30, -20, 20, 0, 30, 60)
-    current_speed = np.random.uniform(0.3, 0.6)
+    current_speed = 0.5 # np.random.uniform(0.3, 0.6)
 
     def get_ee_pose_6d_scaled():
         """Get 6_link world pose (x, y, z, rx, ry, rz)."""
@@ -314,7 +315,12 @@ def main():
             if task_state == 1:  # State 1: Align (정렬)
                 if not traj_initialized:
                     traj_start_time, start_tip_pos, start_back_pos, traj_initialized = t_curr, curr_tip.copy(), curr_back.copy(), True
-                progress = smooth_step((t_curr - traj_start_time) / TRAJ_DURATION)
+                    # 거리 기반 동적 duration 계산: duration = distance / speed
+                    axis_dir_init = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
+                    goal_tip_init = p_entry - (axis_dir_init * 0.0001)
+                    align_distance = np.linalg.norm(goal_tip_init - start_tip_pos)
+                    dynamic_duration = align_distance / ALIGN_SPEED
+                progress = smooth_step((t_curr - traj_start_time) / dynamic_duration) if dynamic_duration > 0 else 1.0
                 axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
                 goal_tip, goal_back = p_entry - (axis_dir * 0.0001), p_entry - (axis_dir * (0.0001 + needle_len))
                 target_tip_pos, target_back_pos = (1 - progress) * start_tip_pos + progress * goal_tip, (1 - progress) * start_back_pos + progress * goal_back
@@ -330,7 +336,7 @@ def main():
 
                 # 삽입이 완료되지 않은 경우: 계속 삽입
                 if accumulated_depth < TARGET_INSERTION_DEPTH:
-                    accumulated_depth += 0.0000025
+                    accumulated_depth += INSERTION_SPEED * model.opt.timestep
                     target_tip_pos = phase3_base_tip + (axis_dir * accumulated_depth)
                     target_back_pos = target_tip_pos - (axis_dir * needle_len)
                     # 목표 깊이 도달 시 대기 타이머 시작
