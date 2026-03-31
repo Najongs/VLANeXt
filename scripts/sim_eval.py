@@ -336,15 +336,21 @@ def smooth_step(t):
 
 def randomize_phantom_pos(model_mj, data_mj, phantom_id, rot_id):
     offset_x = np.random.uniform(-0.05, 0.05)
-    offset_y = np.random.uniform(-0.03, 0.03)
+    offset_y = np.random.uniform(-0.4, 0.0)
     offset_z = 0.0
     model_mj.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
 
-    random_angle_deg = np.random.uniform(-15, 15)
+    # Position-dependent rotation (matches Save_dataset.py)
+    if offset_y >= -0.25:
+        random_angle_deg = np.random.uniform(-15, 15)
+    else:
+        random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
     model_mj.body_quat[rot_id] = new_quat
 
+    print(f">>> Randomize: Pos=({offset_x:.2f}, {offset_y:.2f}), Angle={random_angle_deg:.1f} deg")
     mujoco.mj_forward(model_mj, data_mj)
     return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32)
 
@@ -858,6 +864,7 @@ def run_eval(cfg):
         metrics_history = []
 
         success = False
+        last_phase_pred = 0.0  # track phase prediction for gripper state
 
         for ctrl_step in range(max_steps):
             # ── 1. Observe ────────────────────────────────────────────────────
@@ -878,9 +885,11 @@ def run_eval(cfg):
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)  # (H, W*3, 3)
 
             # Proprioception: ee_pose(6) + gripper_proxy(1) + proximity(1)
+            # gripper: matches training data (phase >= 2 → 1.0, else 0.0)
+            # At eval time, use spatial head's phase prediction as proxy
             ee_pose = env.get_ee_pose()  # (6,)
             sensor_dist = env.get_sensor_dist()
-            gripper_state = 1.0 if (0 < sensor_dist < 30) else 0.0
+            gripper_state = 1.0 if last_phase_pred > 0.5 else 0.0
             proximity = 1.0 if (0 <= sensor_dist < 10) else 0.0
             proprio = np.concatenate([ee_pose, [gripper_state, proximity]])  # (8,)
             state_history.append(proprio)
@@ -905,6 +914,7 @@ def run_eval(cfg):
                 steps_exec = min(num_steps_execute, len(raw_chunk))
                 action_buffer = list(raw_chunk[:steps_exec])
             if spatial_pred is not None:
+                last_phase_pred = spatial_pred["phase"]
                 metrics["spatial_pred"] = spatial_pred
                 if ctrl_step % 100 == 0:
                     kp = spatial_pred["kp_wrist"]

@@ -1,7 +1,7 @@
 wandb
 __pycache__
 checkpoints/
-New1/
+New_1/
 New2/
 output*/
 *.mp4

@@ -51,6 +51,7 @@ TARGET_INSERTION_DEPTH = 0.0275
 ALIGN_SPEED = 0.01      # 정렬 단계 속도: 0.015 m/s (초당 1.5cm)
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Align the needle and insert it into the trocar opening"
+ACTION_CLIP_MM = 2.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
 class SimRecorder:
@@ -399,7 +400,12 @@ def main():
                 current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
                 current_ee_pose_mm = get_ee_pose_6d_scaled()
                 delta_ee_action = current_ee_pose_mm - last_ee_pose
-                
+
+                # Phase 전환 시 IK spike 방지: position delta 클리핑
+                pos_mag = np.linalg.norm(delta_ee_action[:3])
+                if pos_mag > ACTION_CLIP_MM:
+                    delta_ee_action[:3] *= ACTION_CLIP_MM / pos_mag
+
                 frames = {}
                 for cam_name in ["side_camera", "tool_camera", "top_camera"]:
                     renderer.update_scene(data, camera=cam_name)

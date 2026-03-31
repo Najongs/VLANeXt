@@ -1,13 +1,13 @@
 project:
-  name: "VLANeXt_finetune_sim_spatial_sensor"
-  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
+  name: "VLANeXt_finetune_sim_spatial_sensor_new_data"
+  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 0
+  save_interval: 2000
   use_wandb: true
 
 data:
   dataset_name: "sim"
-  data_root: "/home/najo/NAS/VLANeXt/dataset/New2/collected_data_merged"
+  data_root: "/data/public/NAS/VLANeXt/dataset/New_1/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
 
@@ -15,7 +15,7 @@ data:
   future_len: 8
   buffer_size: 1000
 
-  batch_size: 50
+  batch_size: 51
   max_steps: 10000
   num_workers: 4
 
@@ -102,7 +102,7 @@ model:
 
 train:
   seed: 2026
-  resume_path: "/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/spatial"
+  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/spatial_sensor_new_data"
   pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
