@@ -109,22 +109,18 @@ class SimAct(IterableDataset):
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) + proximity (N, 1) ---
-            proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)
+            # --- Proprioception: ee_pose (N, 7) ---
+            proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
+
+            # --- Sensor distance (for instruction augmentation & action weight) ---
             sensor_dist_np = None
+            proximity_np = None
             if "sensor_dist" in f["observations"]:
                 sensor_dist_np = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,)
-                proximity = ((sensor_dist_np >= 0) & (sensor_dist_np < 10.0)).astype(np.float32)
-                proprio_np = np.concatenate([proprio_np, proximity.reshape(-1, 1)], axis=-1)  # (N, 8)
+                proximity_np = ((sensor_dist_np >= 0) & (sensor_dist_np < 10.0))  # (N,) bool
 
-            # --- Language instruction ---
-            raw = f["language_instruction"][()]
-            if isinstance(raw, bytes):
-                instruction = raw.decode("utf-8")
-            else:
-                instruction = str(raw)
-            # Override with VLM-friendly description (frozen VLM may not know "trocar")
-            instruction = "Align the needle with the hollow cylindrical opening and insert it"
+            # --- Language instruction (base) ---
+            base_instruction = "Align the needle with the hollow cylindrical opening and insert it"
 
             # --- Spatial auxiliary targets (backward compatible) ---
             # Layout (8D): kp_wrist(4) + visibility(2) + dist(1) + phase(1)
@@ -175,7 +171,7 @@ class SimAct(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
+        return traj_len, actions_np, proprio_np, base_instruction, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np, proximity_np
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -209,7 +205,7 @@ class SimAct(IterableDataset):
 
         for ep_path in episode_paths:
             try:
-                traj_len, actions_np, proprio_np, instruction, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                traj_len, actions_np, proprio_np, base_instruction, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np, proximity_np = self._load_episode(ep_path)
             except Exception as e:
                 print(f"[Warn] Skipping {ep_path}: {e}")
                 continue
@@ -258,6 +254,12 @@ class SimAct(IterableDataset):
                 if np.any(valid_mask_fut):
                     fut_acts_np[valid_mask_fut] = actions_np[fut_indices[valid_mask_fut]]
                 fut_acts = torch.from_numpy(fut_acts_np)
+
+                # --- Per-timestep instruction with proximity context ---
+                if proximity_np is not None and proximity_np[t]:
+                    instruction = base_instruction + ". Object detected nearby"
+                else:
+                    instruction = base_instruction
 
                 sample = {
                     "proprioception": hist_proprio,

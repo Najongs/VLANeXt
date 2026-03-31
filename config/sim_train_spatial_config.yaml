@@ -50,7 +50,7 @@ model:
   backbone_mode: "frozen"
 
   action_dim: 7
-  proprio_dim: 8  # ee_pose(7) + proximity(1): object within 10mm
+  proprio_dim: 7  # ee_pose(7); proximity moved to instruction text
 
   loss_type: "diffusion"
   num_train_timesteps: 1000

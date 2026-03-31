@@ -884,15 +884,21 @@ def run_eval(cfg):
             # Concat all 3 views side-by-side for replay video (overlay drawn after prediction)
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)  # (H, W*3, 3)
 
-            # Proprioception: ee_pose(6) + gripper_proxy(1) + proximity(1)
+            # Proprioception: ee_pose(6) + gripper_proxy(1)
             # gripper: matches training data (phase >= 2 → 1.0, else 0.0)
             # At eval time, use spatial head's phase prediction as proxy
             ee_pose = env.get_ee_pose()  # (6,)
             sensor_dist = env.get_sensor_dist()
             gripper_state = 1.0 if last_phase_pred > 0.5 else 0.0
-            proximity = 1.0 if (0 <= sensor_dist < 10) else 0.0
-            proprio = np.concatenate([ee_pose, [gripper_state, proximity]])  # (8,)
+            proprio = np.concatenate([ee_pose, [gripper_state]])  # (7,)
             state_history.append(proprio)
+
+            # Proximity info → instruction text (matches training)
+            proximity = (0 <= sensor_dist < 10)
+            if proximity:
+                task_instruction = TASK_INSTRUCTION + ". Object detected nearby"
+            else:
+                task_instruction = TASK_INSTRUCTION
 
             observation = {
                 "full_image": img_ext,
@@ -908,7 +914,7 @@ def run_eval(cfg):
             # ── 2. Get action from model (or from buffer) ────────────────────
             spatial_pred = None
             if len(action_buffer) == 0:
-                raw_chunk, spatial_pred = predict_action(model, processor, observation, TASK_INSTRUCTION)
+                raw_chunk, spatial_pred = predict_action(model, processor, observation, task_instruction)
                 if raw_chunk.ndim == 1:
                     raw_chunk = raw_chunk[None, :]
                 steps_exec = min(num_steps_execute, len(raw_chunk))
