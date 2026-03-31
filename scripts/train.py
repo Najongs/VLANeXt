@@ -488,11 +488,14 @@ def train(config):
             spatial_loss_weight=config['model'].get('spatial_loss_weight', 0.0),
             proprio_dim=config['model'].get('proprio_dim', None),
         ).to(device, dtype=torch.bfloat16)
+    # Load pretrained checkpoint BEFORE DeepSpeed init (so state_dict shapes
+    # are visible), but load to CPU first to avoid GPU memory duplication.
     if has_pretrained_ckpt:
         if global_rank == 0:
             print(f"Loading pretrained VLA checkpoint: {pretrained_ckpt_path}")
-        checkpoint = torch.load(pretrained_ckpt_path, map_location=device)
+        checkpoint = torch.load(pretrained_ckpt_path, map_location='cpu')
         state_dict = checkpoint['model_state_dict']
+        del checkpoint
         if list(state_dict.keys())[0].startswith('module.'):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         # Filter out shape-mismatched keys
@@ -503,6 +506,7 @@ def train(config):
                 print(f"  Shape mismatch, skipping: {k} ckpt={state_dict[k].shape} model={model_sd[k].shape}")
             del state_dict[k]
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        del state_dict
         if global_rank == 0:
             print(f"Loaded weights. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
     else:
