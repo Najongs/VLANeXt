@@ -2,7 +2,7 @@ project:
   name: "VLANeXt_finetune_sim_spatial_sensor_new_data"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 0
+  save_interval: 2000
   use_wandb: true
 
 data:
@@ -15,7 +15,7 @@ data:
   future_len: 8
   buffer_size: 1000
 
-  batch_size: 3
+  batch_size: 51
   max_steps: 10000
   num_workers: 4
 
@@ -102,8 +102,8 @@ model:
 
 train:
   seed: 2026
-  resume_path: ""
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_droid.pt"
+  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/spatial_sensor_new_data"
+  pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 100

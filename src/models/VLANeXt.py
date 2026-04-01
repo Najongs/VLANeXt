@@ -309,7 +309,7 @@ class VLANeXt(nn.Module):
         else:
             raise ValueError(f"Unknown backbone_mode: {backbone_mode}")
 
-        if gradient_checkpointing and backbone_mode != "frozen":
+        if gradient_checkpointing:
             model_to_configure = self.lmm
             if hasattr(model_to_configure, "gradient_checkpointing_enable"):
                 model_to_configure.gradient_checkpointing_enable()
@@ -549,20 +549,16 @@ class VLANeXt(nn.Module):
         return loss
 
     def get_vlm_condition(self, input_ids, attention_mask, proprioception=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None):
-        use_no_grad = not any(p.requires_grad for p in self.lmm.parameters())
-        ctx = torch.no_grad() if use_no_grad else nullcontext()
-        with ctx:
-            if self.model_family == "paligemma":
-                connector_out, hidden_states = self._get_vlm_condition_paligemma(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values)
-            elif self.model_family == "llama":
-                connector_out, hidden_states = self._get_vlm_condition_llama(input_ids, attention_mask, pixel_values, proprioception, proprio_attention_mask)
-            elif self.model_family == "qwen":
-                connector_out, hidden_states = self._get_vlm_condition_qwen(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw)
-        if use_no_grad:
-            if connector_out is not None:
-                connector_out = connector_out.detach().requires_grad_(True)
-            if hidden_states is not None:
-                hidden_states = tuple(h.detach().requires_grad_(True) for h in hidden_states)
+        # NOTE: Even with frozen VLM (requires_grad=False on lmm params),
+        # we do NOT wrap in torch.no_grad() so that gradient can flow back
+        # to trainable inputs: meta_queries and action_projector.
+        # Gradient checkpointing on the VLM keeps VRAM manageable.
+        if self.model_family == "paligemma":
+            connector_out, hidden_states = self._get_vlm_condition_paligemma(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values)
+        elif self.model_family == "llama":
+            connector_out, hidden_states = self._get_vlm_condition_llama(input_ids, attention_mask, pixel_values, proprioception, proprio_attention_mask)
+        elif self.model_family == "qwen":
+            connector_out, hidden_states = self._get_vlm_condition_qwen(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw)
         return connector_out, hidden_states
 
     def _build_qwen_mm_token_type_ids(self, input_ids):
