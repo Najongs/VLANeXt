@@ -122,10 +122,13 @@ class DataCollatorForVLANeXt:
             return self._uniform(-x, x)
         return self._uniform(float(self.rh[0]), float(self.rh[1]))
 
-    def _augment_frames_uint8(self, frames: np.ndarray) -> np.ndarray:
-        """Apply augmentation to frames (T,H,W,C) or (H,W,C)."""
+    def _augment_frames_uint8(self, frames: np.ndarray, return_crop_params: bool = False):
+        """Apply augmentation to frames (T,H,W,C) or (H,W,C).
+        If return_crop_params=True, returns (augmented_frames, crop_params)
+        where crop_params is (i, j, h, w, H, W) or None if no crop applied.
+        """
         if (not self.aug_enabled) or (not self.augment_order):
-            return frames
+            return (frames, None) if return_crop_params else frames
 
         is_video = (frames.ndim == 4)
         pil_frames = [self._to_pil(f) for f in (frames if is_video else [frames])]
@@ -134,7 +137,7 @@ class DataCollatorForVLANeXt:
         crop_params = None
         if "random_resized_crop" in self.augment_order and self.aug.get("random_resized_crop", None) is not None:
             i, j, h, w = RandomResizedCrop.get_params(pil_frames[0], scale=self.rrc_scale, ratio=self.rrc_ratio)
-            crop_params = (i, j, h, w)
+            crop_params = (i, j, h, w, out_h, out_w)
 
         b_fac = self._sample_brightness_factor() if "random_brightness" in self.augment_order else 1.0
         c_fac = self._sample_contrast_factor() if "random_contrast" in self.augment_order else 1.0
@@ -146,7 +149,7 @@ class DataCollatorForVLANeXt:
         for pil in pil_frames:
             for op in self.augment_order:
                 if op == "random_resized_crop" and crop_params is not None:
-                    i, j, h, w = crop_params
+                    i, j, h, w, _, _ = crop_params
                     pil = TVF.resized_crop(pil, i, j, h, w, size=(out_h, out_w))
                 elif op == "random_brightness":
                     pil = TVF.adjust_brightness(pil, b_fac)
@@ -161,7 +164,32 @@ class DataCollatorForVLANeXt:
             out.append(np.asarray(pil, dtype=np.uint8))
 
         out = np.stack(out, axis=0)
-        return out if is_video else out[0]
+        result = out if is_video else out[0]
+        return (result, crop_params) if return_crop_params else result
+
+    @staticmethod
+    def _transform_spatial_target(spatial_target: np.ndarray, crop_params) -> np.ndarray:
+        """Transform spatial target keypoints to match crop augmentation.
+        spatial_target layout: [tip_u, tip_v, trocar_u, trocar_v, tip_vis, trocar_vis, dist, phase]
+        Keypoint coords are normalized [0,1] in wrist camera space.
+        crop_params: (i, j, h, w, H, W) where i=top, j=left, h/w=crop size, H/W=original image size.
+        """
+        if crop_params is None:
+            return spatial_target
+        i, j, h, w, H, W = crop_params
+        out = spatial_target.copy()
+        # Transform tip keypoint (u, v)
+        out[0] = (spatial_target[0] * W - j) / w  # tip_u
+        out[1] = (spatial_target[1] * H - i) / h  # tip_v
+        # Transform trocar keypoint (u, v)
+        out[2] = (spatial_target[2] * W - j) / w  # trocar_u
+        out[3] = (spatial_target[3] * H - i) / h  # trocar_v
+        # Update visibility: 0 if keypoint falls outside [0, 1] after crop
+        if not (0.0 <= out[0] <= 1.0 and 0.0 <= out[1] <= 1.0):
+            out[4] = 0.0  # tip_vis
+        if not (0.0 <= out[2] <= 1.0 and 0.0 <= out[3] <= 1.0):
+            out[5] = 0.0  # trocar_vis
+        return out
 
     def __call__(self, batch):
         texts = []
@@ -183,12 +211,14 @@ class DataCollatorForVLANeXt:
 
         for sample in batch:
             instruction = sample["instruction"]
+            has_spatial = "spatial_target" in sample and sample["spatial_target"] is not None
+            wrist_crop_params = None  # track wrist camera crop for spatial target transform
 
             if is_paligemma:
                 im0 = self._augment_frames_uint8(sample["image"])
                 num_imgs = 1
                 if self.view_mode == "multi":
-                    im1 = self._augment_frames_uint8(sample["image_wrist"])
+                    im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
                     images.extend([im0, im1])
                     num_imgs = 2
                     if "image_top" in sample:
@@ -203,7 +233,7 @@ class DataCollatorForVLANeXt:
             elif is_llama:
                 im0 = self._augment_frames_uint8(sample["image"])
                 if self.view_mode == "multi":
-                    im1 = self._augment_frames_uint8(sample["image_wrist"])
+                    im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
                     images.extend([im0, im1])
                     if "image_top" in sample:
                         im2 = self._augment_frames_uint8(sample["image_top"])
@@ -218,7 +248,7 @@ class DataCollatorForVLANeXt:
                 if self.input_modality == "video":
                     v0 = self._augment_frames_uint8(sample["video"])
                     if self.view_mode == "multi":
-                        v1 = self._augment_frames_uint8(sample["video_wrist"])
+                        v1, wrist_crop_params = self._augment_frames_uint8(sample["video_wrist"], return_crop_params=has_spatial)
                         content.extend([{"type": "video", "video": v0}, {"type": "video", "video": v1}])
                         videos.extend([v0, v1])
                         if "video_top" in sample:
@@ -232,7 +262,7 @@ class DataCollatorForVLANeXt:
                 elif self.input_modality == "image":
                     im0 = self._augment_frames_uint8(sample["image"])
                     if self.view_mode == "multi":
-                        im1 = self._augment_frames_uint8(sample["image_wrist"])
+                        im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
                         content.extend([{"type": "image", "image": im0}, {"type": "image", "image": im1}])
                         images.extend([im0, im1])
                         if "image_top" in sample:
@@ -255,8 +285,10 @@ class DataCollatorForVLANeXt:
             proprio_list.append(sample["proprioception"])
             hist_actions_list.append(sample["history_actions"])
 
-            if "spatial_target" in sample and sample["spatial_target"] is not None:
-                spatial_target_list.append(sample["spatial_target"])
+            if has_spatial:
+                spatial_target_list.append(
+                    self._transform_spatial_target(sample["spatial_target"], wrist_crop_params)
+                )
             if "action_weight" in sample:
                 action_weight_list.append(sample["action_weight"])
 

@@ -745,31 +745,7 @@ def draw_overlay(frame, metrics, ctrl_step):
         cv2.putText(frame, line, (5, 14 + i * 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Draw predicted keypoints on the wrist camera panel (2nd panel)
-    if sp is not None:
-        kp = sp["kp_wrist"]
-        panel_w = w // 3  # each panel width
-        wrist_offset_x = panel_w  # wrist is 2nd panel
-
-        def _clamp_draw(u_norm, v_norm, label, vis_val, color):
-            """Draw keypoint clamped to wrist panel bounds."""
-            px_raw = int(u_norm * panel_w) + wrist_offset_x
-            py_raw = int(v_norm * h)
-            # Clamp to wrist panel region
-            px = max(wrist_offset_x + 2, min(wrist_offset_x + panel_w - 2, px_raw))
-            py = max(2, min(h - 2, py_raw))
-            oob = not (0.0 <= u_norm <= 1.0 and 0.0 <= v_norm <= 1.0)
-            marker = "x" if oob else ""
-            cv2.circle(frame, (px, py), 6, color, 2)
-            txt = f"{label}({vis_val:.2f}){marker}"
-            # Keep text inside frame
-            tx = min(px + 8, wrist_offset_x + panel_w - 100)
-            ty = max(py - 4, 14)
-            cv2.putText(frame, txt, (tx, ty),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
-
-        _clamp_draw(kp[0], kp[1], "P:tip", sp["tip_visible"], (255, 0, 0))
-        _clamp_draw(kp[2], kp[3], "P:tro", sp["trocar_visible"], (0, 255, 0))
+    # (keypoint visualization removed — spatial head no longer predicts u,v coordinates)
 
     # Draw GT keypoints on wrist panel (cyan/yellow circles)
     tip_uv = metrics.get("tip_uv")
@@ -923,12 +899,9 @@ def run_eval(cfg):
                 last_phase_pred = spatial_pred["phase"]
                 metrics["spatial_pred"] = spatial_pred
                 if ctrl_step % 100 == 0:
-                    kp = spatial_pred["kp_wrist"]
-                    print(f"  [step {ctrl_step}] spatial_pred: kp=({kp[0]:.3f},{kp[1]:.3f},{kp[2]:.3f},{kp[3]:.3f}) "
+                    print(f"  [step {ctrl_step}] spatial_pred: "
                           f"tip_vis={spatial_pred['tip_visible']:.3f} tro_vis={spatial_pred['trocar_visible']:.3f} "
-                          f"dist={spatial_pred['dist_norm']:.3f} phase={spatial_pred['phase']:.3f} | "
-                          f"GT tip_uv=({metrics['tip_uv'][0]:.3f},{metrics['tip_uv'][1]:.3f}) "
-                          f"tro_uv=({metrics['trocar_uv'][0]:.3f},{metrics['trocar_uv'][1]:.3f})")
+                          f"dist={spatial_pred['dist_norm']:.3f} phase={spatial_pred['phase']:.3f}")
 
             # Draw overlay AFTER spatial prediction is available
             draw_overlay(replay_frame, metrics, ctrl_step)

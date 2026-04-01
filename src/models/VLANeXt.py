@@ -42,14 +42,13 @@ class LlamaProcessorWrapper:
 class SpatialCrossAttentionHead(nn.Module):
     """Cross-attention based spatial head.
 
-    Keypoint queries attend ONLY to wrist camera tokens for precise 2D prediction.
+    Spatial queries attend to wrist camera tokens for visibility prediction.
     Global queries (dist/phase) attend to ALL image tokens across views.
 
-    Output layout (8D):
-        [0:4] kp_wrist: tip_u, tip_v, trocar_u, trocar_v
-        [4:6] visibility: tip_visible, trocar_visible (logits)
-        [6]   dist: normalized 3D distance
-        [7]   phase: align/insert (logit)
+    Output layout (4D):
+        [0:2] visibility: tip_visible, trocar_visible (logits)
+        [2]   dist: normalized 3D distance
+        [3]   phase: align/insert (logit)
     """
 
     def __init__(self, hidden_size, num_layers_to_use=4, num_heads=4):
@@ -58,7 +57,7 @@ class SpatialCrossAttentionHead(nn.Module):
         self.num_layers_to_use = num_layers_to_use
         self.num_heads = num_heads
 
-        # Learnable spatial queries: tip + trocar (keypoints, wrist-only)
+        # Learnable spatial queries: tip + trocar (visibility, wrist-only)
         self.spatial_queries = nn.Parameter(torch.randn(2, hidden_size) * 0.02)
         # Learnable global queries: dist + phase (all views)
         self.global_queries = nn.Parameter(torch.randn(2, hidden_size) * 0.02)
@@ -74,11 +73,11 @@ class SpatialCrossAttentionHead(nn.Module):
         self.norm_q = nn.LayerNorm(hidden_size)
         self.norm_kv = nn.LayerNorm(hidden_size)
 
-        # Per-query output: [u, v, visibility] = 3 per query → 6 total
-        self.keypoint_head = nn.Sequential(
+        # Per-query output: visibility logit only (1 per query → 2 total)
+        self.visibility_head = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.GELU(),
-            nn.Linear(256, 3),  # u, v, visibility_logit
+            nn.Linear(256, 1),  # visibility_logit
         )
 
         # Global output from both queries: dist + phase = 2
@@ -175,16 +174,16 @@ class SpatialCrossAttentionHead(nn.Module):
                         wrist_positions = img_positions[offset:end]
                         wrist_mask[b, wrist_positions] = True
 
-        # --- Keypoint cross-attention: wrist-only tokens ---
-        kp_token_mask = wrist_mask if wrist_mask is not None else image_token_mask
-        kp_kv, kp_attn_mask = self._extract_and_pad(fused, kp_token_mask, B)
+        # --- Visibility cross-attention: wrist-only tokens ---
+        vis_token_mask = wrist_mask if wrist_mask is not None else image_token_mask
+        vis_kv, vis_attn_mask = self._extract_and_pad(fused, vis_token_mask, B)
 
-        kp_queries = self.spatial_queries.unsqueeze(0).expand(B, -1, -1)
-        kp_queries = self.norm_q(kp_queries)
-        kp_out = self._cross_attend(kp_queries, kp_kv, kp_attn_mask, B)  # (B, 2, H)
+        vis_queries = self.spatial_queries.unsqueeze(0).expand(B, -1, -1)
+        vis_queries = self.norm_q(vis_queries)
+        vis_out = self._cross_attend(vis_queries, vis_kv, vis_attn_mask, B)  # (B, 2, H)
 
-        tip_out = self.keypoint_head(kp_out[:, 0])    # (B, 3): u, v, vis_logit
-        trocar_out = self.keypoint_head(kp_out[:, 1])  # (B, 3): u, v, vis_logit
+        tip_vis = self.visibility_head(vis_out[:, 0])      # (B, 1): vis_logit
+        trocar_vis = self.visibility_head(vis_out[:, 1])    # (B, 1): vis_logit
 
         # --- Global cross-attention: all image tokens ---
         all_kv, all_attn_mask = self._extract_and_pad(fused, image_token_mask, B)
@@ -196,14 +195,12 @@ class SpatialCrossAttentionHead(nn.Module):
         global_feat = torch.cat([global_out[:, 0], global_out[:, 1]], dim=-1)  # (B, 2H)
         global_pred = self.global_head(global_feat)  # (B, 2): dist, phase_logit
 
-        # Assemble: [tip_u, tip_v, trocar_u, trocar_v, tip_vis, trocar_vis, dist, phase]
+        # Assemble: [tip_vis, trocar_vis, dist, phase]
         spatial_pred = torch.cat([
-            tip_out[:, :2],       # tip u, v
-            trocar_out[:, :2],    # trocar u, v
-            tip_out[:, 2:3],      # tip visibility logit
-            trocar_out[:, 2:3],   # trocar visibility logit
+            tip_vis,              # tip visibility logit
+            trocar_vis,           # trocar visibility logit
             global_pred,          # dist, phase logit
-        ], dim=-1)  # (B, 8)
+        ], dim=-1)  # (B, 4)
 
         return spatial_pred
 
@@ -773,51 +770,41 @@ class VLANeXt(nn.Module):
     def _compute_spatial_loss(self, hidden_states, spatial_targets):
         """Compute auxiliary spatial loss from VLM hidden states.
 
-        spatial_targets layout (8D):
-            [0:4] kp_wrist: needle_tip_u, needle_tip_v, trocar_u, trocar_v
+        spatial_targets layout (8D from data, we use [4:8]):
             [4:6] visibility: needle_tip_visible, trocar_visible (0 or 1)
             [6]   dist: normalized 3D distance
             [7]   phase: 0=align, 1=insert
+
+        spatial_pred layout (4D):
+            [0:2] visibility logits
+            [2]   dist
+            [3]   phase logit
         """
         image_token_mask = getattr(self, '_image_token_mask', None)
         if image_token_mask is None:
-            # Fallback: use all tokens
             B, S, H = hidden_states[-1].shape
             image_token_mask = torch.ones(B, S, dtype=torch.bool, device=hidden_states[-1].device)
         image_grid_thw = getattr(self, '_image_grid_thw', None)
-        spatial_pred = self.spatial_head(hidden_states, image_token_mask, image_grid_thw=image_grid_thw)  # (B, 8)
+        spatial_pred = self.spatial_head(hidden_states, image_token_mask, image_grid_thw=image_grid_thw)  # (B, 4)
         spatial_targets = spatial_targets.to(spatial_pred.dtype)
 
         # --- Visibility loss (BCE) ---
-        vis_pred = spatial_pred[:, 4:6]       # (B, 2): tip_vis, trocar_vis logits
+        vis_pred = spatial_pred[:, 0:2]       # (B, 2): tip_vis, trocar_vis logits
         vis_target = spatial_targets[:, 4:6]  # (B, 2): 0 or 1
         loss_vis = F.binary_cross_entropy_with_logits(vis_pred, vis_target)
 
-        # --- Keypoint loss with GT visibility masking ---
-        kp_pred = spatial_pred[:, :4]       # (B, 4): tip_u, tip_v, trocar_u, trocar_v
-        kp_target = spatial_targets[:, :4]
-        tip_vis = spatial_targets[:, 4]     # (B,)
-        trocar_vis = spatial_targets[:, 5]  # (B,)
-
-        vis_mask = torch.stack([tip_vis, tip_vis, trocar_vis, trocar_vis], dim=-1)  # (B, 4)
-        kp_diff = (kp_pred - kp_target) ** 2  # (B, 4)
-        kp_masked = kp_diff * vis_mask
-        num_visible = vis_mask.sum().clamp(min=1.0)
-        loss_kp = kp_masked.sum() / num_visible
-
         # --- Distance loss (always valid, uses 3D coords) ---
-        dist_pred = spatial_pred[:, 6]
+        dist_pred = spatial_pred[:, 2]
         dist_target = spatial_targets[:, 6]
         loss_dist = F.mse_loss(dist_pred, dist_target)
 
         # --- Phase loss (BCE) ---
-        phase_pred = spatial_pred[:, 7]
+        phase_pred = spatial_pred[:, 3]
         phase_target = spatial_targets[:, 7]
         loss_phase = F.binary_cross_entropy_with_logits(phase_pred, phase_target)
 
-        spatial_loss = 100.0 * loss_kp + loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
+        spatial_loss = loss_dist + 0.1 * loss_vis + 0.1 * loss_phase
         spatial_detail = {
-            "spatial/keypoint": loss_kp.item(),
             "spatial/distance": loss_dist.item(),
             "spatial/visibility": loss_vis.item(),
             "spatial/phase": loss_phase.item(),
@@ -1106,16 +1093,15 @@ class VLANeXt(nn.Module):
             B, S, H = hidden_states[-1].shape
             image_token_mask = torch.ones(B, S, dtype=torch.bool, device=hidden_states[-1].device)
         image_grid_thw = getattr(self, '_image_grid_thw', None)
-        raw = self.spatial_head(hidden_states, image_token_mask, image_grid_thw=image_grid_thw)  # (B, 8)
+        raw = self.spatial_head(hidden_states, image_token_mask, image_grid_thw=image_grid_thw)  # (B, 4)
         pred = raw[0].float().cpu().numpy()  # single sample
-        tip_vis = torch.sigmoid(raw[0, 4]).item()
-        trocar_vis = torch.sigmoid(raw[0, 5]).item()
-        phase = torch.sigmoid(raw[0, 7]).item()
+        tip_vis = torch.sigmoid(raw[0, 0]).item()
+        trocar_vis = torch.sigmoid(raw[0, 1]).item()
+        phase = torch.sigmoid(raw[0, 3]).item()
         return {
-            "kp_wrist": pred[:4],          # tip_u, tip_v, trocar_u, trocar_v
             "tip_visible": tip_vis,         # probability
             "trocar_visible": trocar_vis,   # probability
-            "dist_norm": pred[6],           # normalized distance
+            "dist_norm": pred[2],           # normalized distance
             "phase": phase,                 # probability (0=align, 1=insert)
         }
 
