@@ -177,7 +177,7 @@ class DataCollatorForVLANeXt:
         if crop_params is None:
             return spatial_target
         i, j, h, w, H, W = crop_params
-        out = spatial_target.copy()
+        out = spatial_target.clone() if hasattr(spatial_target, 'clone') else spatial_target.copy()
         # Transform tip keypoint (u, v)
         out[0] = (spatial_target[0] * W - j) / w  # tip_u
         out[1] = (spatial_target[1] * H - i) / h  # tip_v
