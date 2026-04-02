@@ -1,0 +1,19 @@
+data:
+  augmentation:
+    center_crop: false
+    center_crop_ratio: 1.0
+
+model:
+  diffusion_steps: 10
+  scheduler_type: "flow_match"
+
+eval:
+  finetuned_checkpoint: ""  # Path to the finetuned model checkpoint
+  num_episodes: 50
+  max_steps_per_episode: 200        # fine alignment은 짧으므로 200으로 충분
+  num_steps_execute: 1
+  seed: 42
+  image_size: 256
+  sim_steps_per_control: 67
+  save_video: true
+  video_fps: 15

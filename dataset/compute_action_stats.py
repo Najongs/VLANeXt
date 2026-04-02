@@ -2,7 +2,7 @@
 Compute action normalization statistics (min/max) from HDF5 episode files.
 
 Usage:
-    python dataset/compute_action_stats.py --data_dir dataset/New_1/collected_data_merged
+    python dataset/compute_action_stats.py --data_dir /data/public/NAS/VLANeXt/dataset/fine_align/collected_data_merged
 """
 
 import argparse

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 
-python /home/najo/NAS/VLANeXt/dataset/visualize_all_trajectories_3d.py --dataset_path "/home/najo/NAS/VLANeXt/dataset/New2/collected_data_merged"
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/collected_data_merged"
 
 Visualize all trajectories from Eye_trocar dataset in 3D space
 Shows all trajectories with their start and end points marked
