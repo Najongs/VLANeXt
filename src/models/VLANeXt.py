@@ -13,6 +13,7 @@ from transformers import (
     PaliGemmaForConditionalGeneration,
     Qwen3VLForConditionalGeneration
 )
+from peft import LoraConfig, get_peft_model
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
@@ -232,7 +233,8 @@ class VLANeXt(nn.Module):
         use_transformer_connector=True,
         connector_depth=2,
         connector_num_heads=4,
-        backbone_mode="finetune", # Options: "frozen", "finetune"
+        backbone_mode="finetune", # Options: "frozen", "finetune", "lora"
+        lora_config=None,
         gradient_checkpointing=True,
         num_bins=256,
         action_vqvae=None,
@@ -300,8 +302,24 @@ class VLANeXt(nn.Module):
             else:
                 self.hidden_size = self.lmm.config.hidden_size
         
+        self.backbone_mode = backbone_mode
         if backbone_mode == "frozen":
             self.lmm.requires_grad_(False)
+            if self.model_family == "llama":
+                self.vision_encoder.requires_grad_(False)
+        elif backbone_mode == "lora":
+            lora_config = lora_config or {}
+            peft_config = LoraConfig(
+                r=lora_config.get("r", 16),
+                lora_alpha=lora_config.get("lora_alpha", 32),
+                lora_dropout=lora_config.get("lora_dropout", 0.05),
+                target_modules=lora_config.get("target_modules", ["q_proj", "v_proj"]),
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            self.lmm = get_peft_model(self.lmm, peft_config)
+            if hasattr(self.lmm, "print_trainable_parameters"):
+                self.lmm.print_trainable_parameters()
             if self.model_family == "llama":
                 self.vision_encoder.requires_grad_(False)
         elif backbone_mode == "finetune":
@@ -565,6 +583,19 @@ class VLANeXt(nn.Module):
             connector_out, hidden_states = self._get_vlm_condition_qwen(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw)
         return connector_out, hidden_states
 
+    @property
+    def _backbone(self):
+        """Return the underlying transformer backbone, unwrapping PeftModel if present.
+
+        LoRA replaces Linear layers in-place, so forward through this backbone
+        still goes through LoRA adapters.
+        """
+        from peft import PeftModel
+        lmm = self.lmm
+        if isinstance(lmm, PeftModel):
+            lmm = lmm.base_model.model  # unwrap LoRA wrapper
+        return lmm.model  # the actual transformer backbone (e.g. Qwen3_5Model)
+
     def _build_qwen_mm_token_type_ids(self, input_ids):
         mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int)
 
@@ -585,7 +616,7 @@ class VLANeXt(nn.Module):
     def _get_vlm_condition_qwen(self, input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw):
         B = input_ids.shape[0]
         
-        backbone = self.lmm.model
+        backbone = self._backbone
         lmm_config = self.lmm.config
         pad_token_id = getattr(lmm_config, "pad_token_id", None)
         pad_token_id = pad_token_id if pad_token_id is not None else 0
@@ -670,7 +701,7 @@ class VLANeXt(nn.Module):
             image_embeds = image_embeds.view(B, num_views, -1, image_embeds.shape[-1])
             image_embeds = image_embeds.flatten(1, 2)
         
-        text_embeds = self.lmm.model.embed_tokens(input_ids)
+        text_embeds = self._backbone.embed_tokens(input_ids)
 
         proprio_embeds = None
         if self.use_proprio_input_vlm and proprioception is not None:
@@ -701,7 +732,7 @@ class VLANeXt(nn.Module):
         combined_attention_mask = torch.cat(mask_list, dim=1)
 
         output_hidden_states_flag = (self.enable_future_image_loss or self.condition_type in ["tight", "soft"] or self.spatial_loss_weight > 0)
-        outputs = self.lmm.model(
+        outputs = self._backbone(
             inputs_embeds=inputs_embeds,
             attention_mask=combined_attention_mask,
             output_hidden_states=output_hidden_states_flag
@@ -717,8 +748,8 @@ class VLANeXt(nn.Module):
     def _get_vlm_condition_paligemma(self, input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values):
         B = input_ids.shape[0]
         
-        backbone = self.lmm.model
-        
+        backbone = self._backbone
+
         inputs_embeds = backbone.get_input_embeddings()(input_ids)
 
         if pixel_values is not None:

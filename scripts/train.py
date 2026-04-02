@@ -1,9 +1,4 @@
 import os
-# os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"
-# os.environ['OMP_NUM_THREADS'] = '1'
-# os.environ['MKL_NUM_THREADS'] = '1'
-# os.environ['OPENBLAS_NUM_THREADS'] = '1'
-
 import yaml
 import argparse
 import wandb
@@ -13,14 +8,6 @@ from PIL import Image
 
 import torch
 torch.set_num_threads(4)
-
-# Disable strict tensor metadata validation in gradient checkpointing.
-# ZeRO-3 partitions parameters (shape [0] on non-owning ranks), but gathers
-# them on-the-fly via hooks during recomputation. torch 2.8+ added a strict
-# shape check that fires before gathering, causing false failures.
-import torch.utils.checkpoint as _cp
-if hasattr(_cp, "CheckpointFrame"):
-    _cp.CheckpointFrame.check_recomputed_tensors_match = lambda self, gid: None
 
 import numpy as np
 import torch.distributed as dist
@@ -423,8 +410,9 @@ def train(config):
         raise ImportError("DeepSpeed is enabled in the config, but the deepspeed package is not installed.")
 
     if is_distributed:
-        dist.init_process_group(backend=config['train']['dist_backend'])
         local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend=config['train']['dist_backend'], device_id=torch.device("cuda", local_rank))
         global_rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         torch.cuda.set_device(local_rank)
@@ -513,6 +501,7 @@ def train(config):
             connector_depth=config['model']['connector_depth'],
             connector_num_heads=config['model']['connector_num_heads'],
             backbone_mode=config['model'].get('backbone_mode', 'finetune'),
+            lora_config=config['model'].get('lora', None),
             gradient_checkpointing=config['model'].get('gradient_checkpointing', False),
             num_bins=config['model'].get('num_bins', 256),
             generator_hidden_size=config['model'].get('generator_hidden_size', 768),
@@ -996,6 +985,15 @@ def train(config):
             'scheduler_state_dict': lr_scheduler.state_dict(),
             'config': config
         }, os.path.join(save_dir, "checkpoint_final.pt"))
+
+    # Save LoRA adapter separately for easy loading
+    if global_rank == 0 and config['model'].get('backbone_mode') == 'lora':
+        from peft import PeftModel
+        lmm = model_unwrapped.lmm
+        if isinstance(lmm, PeftModel):
+            lora_save_path = os.path.join(save_dir, "lora_adapter")
+            lmm.save_pretrained(lora_save_path)
+            print(f"Saved LoRA adapter to {lora_save_path}")
 
     if global_rank == 0 and config['project'].get('use_wandb', False):
         wandb.finish()
