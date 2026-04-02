@@ -140,6 +140,7 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         connector_depth=mc["connector_depth"],
         connector_num_heads=mc["connector_num_heads"],
         backbone_mode=mc.get("backbone_mode", "finetune"),
+        lora_config=mc.get("lora", None),
         gradient_checkpointing=False,
         num_bins=mc.get("num_bins", 256),
         action_vqvae=mc.get("action_vqvae", None),
