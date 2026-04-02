@@ -2,7 +2,6 @@
 python Save_dataset.py --no-randomize-phantom-pos
 """
 
-
 import os
 os.environ['MUJOCO_GL'] = 'egl'
 

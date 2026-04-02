@@ -9,10 +9,8 @@ from torch.utils.data import IterableDataset
 
 # Action normalization stats (computed over 9,984 clean episodes, 4,246,613 steps — outliers removed)
 # delta_pose(6) + gripper(1)
-action_min_sim = [-0.7714075446128845, -2.5631182193756104, -0.5680814385414124,
-                  -0.024533260613679886, -0.07352259010076523, -0.051400259137153625, -1.0]
-action_max_sim = [1.5511466264724731, 1.4748575687408447, 0.1918737143278122,
-                  0.004710988607257605, 0.0015634826850146055, 0.021533237770199776, 1.0]
+action_min_sim = [-0.7714075446128845, -2.5631182193756104, -0.5680814385414124, -0.024533260613679886, -0.07352259010076523, -0.051400259137153625, -1.0]
+action_max_sim = [1.5511466264724731, 1.4748575687408447, 0.1918737143278122, 0.004710988607257605, 0.0015634826850146055, 0.021533237770199776, 1.0]
 
 
 class SimAct(IterableDataset):
@@ -56,6 +54,7 @@ class SimAct(IterableDataset):
         cam_exterior="side_camera",
         cam_wrist="tool_camera",
         cam_top="top_camera",
+        skip_history_padding=False,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -63,6 +62,7 @@ class SimAct(IterableDataset):
         self.length = length
         self.history_len = history_len
         self.future_len = future_len
+        self.skip_history_padding = skip_history_padding
         self.full_sequence = full_sequence
         self.input_modality = input_modality
         self.view_mode = view_mode
@@ -214,7 +214,8 @@ class SimAct(IterableDataset):
 
             # --- Sample indices ---
             if self.full_sequence:
-                sample_indices = np.arange(traj_len)
+                start_idx = (self.history_len - 1) if self.skip_history_padding else 0
+                sample_indices = np.arange(start_idx, traj_len)
             else:
                 num_samples = max(1, traj_len // (15 * 5))
                 sample_indices = np.random.choice(traj_len, size=num_samples, replace=False)

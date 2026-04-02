@@ -9,7 +9,7 @@ import argparse
 # Supports real-time viewing and video export with metadata overlay
 # ==============================================================
 
-#  python /data/public/NAS/VLANeXt/Sim/data_replay_sim.py /data/public/NAS/VLANeXt/dataset/New_1/collected_data_merged/_outliers/worker0_episode_20260331_004100.h5
+#  python /data/public/NAS/VLANeXt/Sim/data_replay_sim.py /data/public/NAS/VLANeXt/Sim/collected_data_fine_align/episode_20260403_025422.h5
 
 # Phase mapping for display
 PHASE_NAMES = {

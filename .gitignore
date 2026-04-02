@@ -6,3 +6,5 @@ New2/
 output*/
 *.mp4
 sim_eval_step*/
+*.h5
+fine_align/

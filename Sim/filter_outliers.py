@@ -6,7 +6,7 @@ at phase transitions (align → insert).
 
 Usage:
     # Dry run (just report, don't move files):
-    python Sim/filter_outliers.py --data-dir dataset/New_1/collected_data_merged
+    python Sim/filter_outliers.py --data-dir dataset/New_1/collected_data_merged --spike-ratio 2.0
 
     # Actually move outliers to quarantine folder:
     python Sim/filter_outliers.py --data-dir dataset/New_1/collected_data_merged --execute

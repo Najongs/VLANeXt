@@ -10,6 +10,7 @@ data:
   data_root: "/data/public/NAS/VLANeXt/dataset/New_1/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
+  skip_history_padding: true
 
   history_len: 8
   future_len: 8
@@ -109,9 +110,9 @@ train:
   seed: 2026
   resume_path: ""
   pretrained_checkpoint: ""
-  learning_rate: 1.0e-4
+  learning_rate: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 100
+  warmup_steps: 500
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
