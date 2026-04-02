@@ -140,12 +140,8 @@ class SimAct(IterableDataset):
                     [kp_wrist, kp_vis, dist_normalized, phase_binary], axis=-1
                 )  # (N, 8)
 
-            # --- Action weight: critical zone = phase 1 (align) + sensor within 30mm ---
+            # --- Action weight: uniform (no critical zone boosting) ---
             action_weight_np = np.ones(traj_len, dtype=np.float32)
-            if sensor_dist_np is not None:
-                phase_raw = f["phase"][:].astype(np.float32)
-                critical = (phase_raw == 1) & (sensor_dist_np >= 0) & (sensor_dist_np < 30.0)
-                action_weight_np[critical] = 5.0  # 5x weight in critical zone
 
             # --- Images: decode all frames for selected cameras ---
             img_grp = f["observations"]["images"]

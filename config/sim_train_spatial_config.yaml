@@ -45,7 +45,7 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3-VL-2B-Instruct"
+  lmm_path: "Qwen/Qwen3.5-2B" # "Qwen/Qwen3-VL-2B-Instruct"
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
 
@@ -102,7 +102,7 @@ model:
 
 train:
   seed: 2026
-  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/spatial_sensor_new_data"
+  resume_path: ""
   pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
@@ -114,6 +114,6 @@ train:
   dist_backend: "nccl"
   deepspeed:
     enabled: true
-    zero_stage: 3
-    offload_optimizer_device: "cpu"
+    zero_stage: 2
+    offload_optimizer_device: "none"
     offload_param_device: "none"

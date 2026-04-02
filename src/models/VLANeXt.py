@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (
-    AutoProcessor, AutoTokenizer,
-    SiglipVisionModel, SiglipImageProcessor, LlamaForCausalLM, 
-    PaliGemmaForConditionalGeneration, 
+    AutoProcessor, AutoTokenizer, AutoModelForImageTextToText,
+    SiglipVisionModel, SiglipImageProcessor, LlamaForCausalLM,
+    PaliGemmaForConditionalGeneration,
     Qwen3VLForConditionalGeneration
 )
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
@@ -286,9 +286,14 @@ class VLANeXt(nn.Module):
             )
         elif "qwen" in lmm_path.lower():
             self.model_family = "qwen"
-            self.lmm = Qwen3VLForConditionalGeneration.from_pretrained(
-                lmm_path, dtype=torch.bfloat16, _attn_implementation=attn_implementation
-            )
+            if "qwen3.5" in lmm_path.lower() or "qwen3_5" in lmm_path.lower():
+                self.lmm = AutoModelForImageTextToText.from_pretrained(
+                    lmm_path, dtype=torch.bfloat16, trust_remote_code=True
+                )
+            else:
+                self.lmm = Qwen3VLForConditionalGeneration.from_pretrained(
+                    lmm_path, dtype=torch.bfloat16, _attn_implementation=attn_implementation
+                )
             self.processor = AutoProcessor.from_pretrained(lmm_path, trust_remote_code=True)
             if hasattr(self.lmm.config, "text_config"):
                 self.hidden_size = self.lmm.config.text_config.hidden_size
@@ -309,7 +314,9 @@ class VLANeXt(nn.Module):
         if gradient_checkpointing:
             model_to_configure = self.lmm
             if hasattr(model_to_configure, "gradient_checkpointing_enable"):
-                model_to_configure.gradient_checkpointing_enable()
+                model_to_configure.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
             if hasattr(self.lmm, "enable_input_require_grads"):
                 self.lmm.enable_input_require_grads()
             config = self.lmm.config

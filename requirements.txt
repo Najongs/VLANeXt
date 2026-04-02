@@ -22,3 +22,9 @@ bddl
 easydict
 cloudpickle
 gym
+
+
+# pip install flash-linear-attention
+# uninstall both packages first to ensure a successful upgrade
+# pip uninstall fla-core flash-linear-attention -y && pip install -U git+https://github.com/fla-org/flash-linear-attention
+# pip install torch==2.8.0 torchvision torchaudio

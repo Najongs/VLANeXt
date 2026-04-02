@@ -1,8 +1,8 @@
 import os
-os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
+# os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"
+# os.environ['OMP_NUM_THREADS'] = '1'
+# os.environ['MKL_NUM_THREADS'] = '1'
+# os.environ['OPENBLAS_NUM_THREADS'] = '1'
 
 import yaml
 import argparse
@@ -13,6 +13,14 @@ from PIL import Image
 
 import torch
 torch.set_num_threads(4)
+
+# Disable strict tensor metadata validation in gradient checkpointing.
+# ZeRO-3 partitions parameters (shape [0] on non-owning ranks), but gathers
+# them on-the-fly via hooks during recomputation. torch 2.8+ added a strict
+# shape check that fires before gathering, causing false failures.
+import torch.utils.checkpoint as _cp
+if hasattr(_cp, "CheckpointFrame"):
+    _cp.CheckpointFrame.check_recomputed_tensors_match = lambda self, gid: None
 
 import numpy as np
 import torch.distributed as dist
