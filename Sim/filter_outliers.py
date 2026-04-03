@@ -29,11 +29,12 @@ Usage:
 python Sim/filter_outliers.py \
     --data-dir dataset/fine_align/collected_data_merged \
     --spike-ratio 2.0 \
+    --pos-sigma 2.5 \
     --max-range 100 \
     --max-detour 3.0 \
     --max-path-length 50 \
     --execute
-    --pos-sigma 2.5 \
+    
 """
 
 import os
@@ -42,6 +43,35 @@ import shutil
 import argparse
 import numpy as np
 import h5py
+
+
+def _print_action_stats(h5_files, prefix=""):
+    """Load all actions and print min/max, p99, p95 normalization stats."""
+    print(f"\nRecomputing action normalization on {len(h5_files)} {prefix} episodes...")
+    all_actions = []
+    for f_path in h5_files:
+        with h5py.File(f_path, 'r') as f:
+            all_actions.append(f['action'][:].astype(np.float32))
+    all_actions = np.concatenate(all_actions, axis=0)
+
+    new_min = np.min(all_actions, axis=0)
+    new_max = np.max(all_actions, axis=0)
+    p1 = np.percentile(all_actions, 1, axis=0)
+    p5 = np.percentile(all_actions, 5, axis=0)
+    p95 = np.percentile(all_actions, 95, axis=0)
+    p99 = np.percentile(all_actions, 99, axis=0)
+
+    print(f"Total {prefix} steps: {len(all_actions)}")
+    print(f"\n--- 100% (min/max) ---")
+    print(f"action_min = {new_min.tolist()}")
+    print(f"action_max = {new_max.tolist()}")
+    print(f"\n--- 99th percentile ---")
+    print(f"action_min = {p1.tolist()}")
+    print(f"action_max = {p99.tolist()}")
+    print(f"\n--- 95th percentile ---")
+    print(f"action_min = {p5.tolist()}")
+    print(f"action_max = {p95.tolist()}")
+    print("\n>>> Update these values in src/datasets/sim_act_align.py <<<")
 
 
 def analyze_episode(h5_path):
@@ -244,21 +274,14 @@ def main():
 
         # Recompute action stats on clean data
         clean_files = sorted(glob.glob(os.path.join(args.data_dir, '*.h5')))
-        print(f"\nRecomputing action normalization on {len(clean_files)} clean episodes...")
-        all_actions = []
-        for f_path in clean_files:
-            with h5py.File(f_path, 'r') as f:
-                all_actions.append(f['action'][:].astype(np.float32))
-        all_actions = np.concatenate(all_actions, axis=0)
-
-        new_min = np.min(all_actions, axis=0)
-        new_max = np.max(all_actions, axis=0)
-        print(f"Total clean steps: {len(all_actions)}")
-        print(f"\naction_min_sim = {new_min.tolist()}")
-        print(f"action_max_sim = {new_max.tolist()}")
-        print("\n>>> Update these values in src/datasets/sim_act.py <<<")
+        _print_action_stats(clean_files, prefix="clean")
     elif not args.execute and outliers:
         print(f"\nDry run complete. Add --execute to actually move files.")
+
+    # Always print stats for all data (dry run or execute)
+    if all_stats and not args.execute:
+        all_files = sorted(glob.glob(os.path.join(args.data_dir, '*.h5')))
+        _print_action_stats(all_files, prefix="all")
 
 
 if __name__ == '__main__':
