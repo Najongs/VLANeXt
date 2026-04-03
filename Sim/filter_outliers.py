@@ -25,6 +25,15 @@ Usage:
         --pos-sigma 2.5 \
         --max-range 100 \
         --execute
+
+python Sim/filter_outliers.py \
+    --data-dir dataset/fine_align/collected_data_merged \
+    --spike-ratio 2.0 \
+    --max-range 100 \
+    --max-detour 3.0 \
+    --max-path-length 50 \
+    --execute
+    --pos-sigma 2.5 \
 """
 
 import os
@@ -61,6 +70,16 @@ def analyze_episode(h5_path):
     pos_range = np.max(all_pos, axis=0) - np.min(all_pos, axis=0)  # trajectory 범위
     max_range = float(np.max(pos_range))  # 가장 큰 축의 범위
 
+    # Path length: 총 이동 거리 (mm) — 돌아가는 trajectory는 이 값이 큼
+    diffs = np.diff(all_pos, axis=0)
+    path_length = float(np.sum(np.linalg.norm(diffs, axis=1)))
+
+    # Direct distance: 시작→끝 직선 거리 (mm)
+    direct_dist = float(np.linalg.norm(all_pos[-1] - all_pos[0]))
+
+    # Detour ratio: path_length / direct_dist — 1에 가까우면 직선, 클수록 돌아감
+    detour_ratio = path_length / max(direct_dist, 1e-6)
+
     return {
         'path': h5_path,
         'n_steps': n_steps,
@@ -71,6 +90,9 @@ def analyze_episode(h5_path):
         'spike_ratio': spike_ratio,
         'start_pos': start_pos,
         'max_range': max_range,
+        'path_length': path_length,
+        'direct_dist': direct_dist,
+        'detour_ratio': detour_ratio,
     }
 
 
@@ -85,6 +107,10 @@ def main():
                         help="Flag episodes with start position > N sigma from median. 0=disable (default: 0)")
     parser.add_argument('--max-range', type=float, default=0.0,
                         help="Flag episodes with trajectory range > this (mm). 0=disable (default: 0)")
+    parser.add_argument('--max-detour', type=float, default=0.0,
+                        help="Flag episodes with detour_ratio (path_length/direct_dist) > this. 0=disable (default: 0)")
+    parser.add_argument('--max-path-length', type=float, default=0.0,
+                        help="Flag episodes with total path length > this (mm). 0=disable (default: 0)")
     parser.add_argument('--execute', action='store_true',
                         help="Actually move files. Without this flag, only reports.")
     args = parser.parse_args()
@@ -97,9 +123,14 @@ def main():
     print(f"Scanning {len(files)} episodes...")
     print(f"Criteria:")
     print(f"  1. Action spike: spike_ratio > {args.spike_ratio} AND peak_mag > {args.min_peak_mag}")
-    print(f"  2. Position outlier: start_pos > {args.pos_sigma} sigma from median")
+    if args.pos_sigma > 0:
+        print(f"  2. Position outlier: start_pos > {args.pos_sigma} sigma from median")
     if args.max_range > 0:
         print(f"  3. Trajectory range: max_range > {args.max_range} mm")
+    if args.max_detour > 0:
+        print(f"  4. Detour ratio: path_length/direct_dist > {args.max_detour}")
+    if args.max_path_length > 0:
+        print(f"  5. Path length: total > {args.max_path_length} mm")
     print()
 
     all_stats = []
@@ -113,6 +144,21 @@ def main():
         except Exception as e:
             print(f"  [WARN] Failed to read {f_path}: {e}")
             errors.append({'path': f_path, 'reason': f'read_error: {e}'})
+
+    # Print trajectory stats for threshold tuning
+    if all_stats:
+        path_lengths = [s['path_length'] for s in all_stats]
+        detour_ratios = [s['detour_ratio'] for s in all_stats]
+        print(f"Trajectory stats ({len(all_stats)} episodes):")
+        print(f"  path_length: median={np.median(path_lengths):.1f}mm, "
+              f"mean={np.mean(path_lengths):.1f}mm, "
+              f"std={np.std(path_lengths):.1f}mm, "
+              f"max={np.max(path_lengths):.1f}mm")
+        print(f"  detour_ratio: median={np.median(detour_ratios):.2f}, "
+              f"mean={np.mean(detour_ratios):.2f}, "
+              f"std={np.std(detour_ratios):.2f}, "
+              f"max={np.max(detour_ratios):.2f}")
+        print()
 
     # --- 1. Action spike filter ---
     outliers = list(errors)
@@ -145,6 +191,22 @@ def main():
         for s in all_stats:
             if s['max_range'] > args.max_range and s['path'] not in outlier_paths:
                 s['reason'] = f'large_range ({s["max_range"]:.1f}mm > {args.max_range}mm)'
+                outliers.append(s)
+
+    # --- 4. Detour ratio filter (갔다가 돌아오는 trajectory) ---
+    if all_stats and args.max_detour > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            if s['detour_ratio'] > args.max_detour and s['path'] not in outlier_paths:
+                s['reason'] = f'detour (ratio={s["detour_ratio"]:.1f}x, path={s["path_length"]:.0f}mm, direct={s["direct_dist"]:.0f}mm)'
+                outliers.append(s)
+
+    # --- 5. Absolute path length filter ---
+    if all_stats and args.max_path_length > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            if s['path_length'] > args.max_path_length and s['path'] not in outlier_paths:
+                s['reason'] = f'long_path ({s["path_length"]:.0f}mm > {args.max_path_length}mm)'
                 outliers.append(s)
 
     print(f"\nResults: {len(outliers)} outliers / {len(files)} total ({len(outliers)/len(files)*100:.2f}%)")

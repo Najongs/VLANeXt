@@ -58,7 +58,7 @@ IMG_HEIGHT = 480
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.01     # 미세 정렬 속도 (m/s) — 녹화 중
+FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 15.0    # XY 평면 perturbation 범위 (±mm)
@@ -72,8 +72,11 @@ ALIGN_HOLD_STEPS = 20       # threshold 이내 연속 유지 횟수
 # --- Task Instruction ---
 TASK_INSTRUCTION = "Align the needle to the trocar opening"
 
+# --- Holding (정렬 완료 후 자세 유지 녹화) ---
+HOLD_RECORD_STEPS = 5           # 정렬 완료 후 녹화 control steps
+
 # --- 기타 ---
-ACTION_CLIP_MM = 2.0        # IK spike 방지용 delta position 클리핑 (mm)
+ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
 TIMEOUT_SEC = 10.0          # 에피소드 전체 타임아웃 (초)
 
 # ============================================================
@@ -420,6 +423,7 @@ def main():
 
         record_start_time = data.time
         step_count = 0
+        ctrl_step_count = 0
         align_timer = 0
         success = False
 
@@ -431,6 +435,7 @@ def main():
 
         while True:
             progress = smooth_step((data.time - fine_traj_start) / fine_duration) if fine_duration > 0 else 1.0
+
             target_tip_pos = (1 - progress) * start_tip_pos + progress * goal_tip
             target_back_pos = (1 - progress) * start_back_pos + progress * goal_back
 
@@ -496,6 +501,55 @@ def main():
             # 타임아웃
             if data.time - record_start_time > TIMEOUT_SEC:
                 break
+
+        # ============================================================
+        # Phase 3: Holding — 정렬 완료 후 자세 유지 녹화 (깨끗한 expert data)
+        # ============================================================
+        if success:
+            for hold_step in range(HOLD_RECORD_STEPS):
+                for _ in range(67):
+                    run_ik_step(goal_tip, goal_back)
+                    mujoco.mj_step(model, data)
+
+                curr_tip = data.site_xpos[tip_id].copy()
+                curr_back = data.site_xpos[back_id].copy()
+                needle_dir = (curr_tip - curr_back) / (np.linalg.norm(curr_tip - curr_back) + 1e-10)
+                dist_to_surface = mujoco.mj_ray(model, data, curr_tip, needle_dir, None, 1, link6_id, np.zeros(1, dtype=np.int32))
+                current_sensor_dist = dist_to_surface * 1000.0 if dist_to_surface >= 0 else -1.0
+
+                current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
+                current_ee_pose_mm = get_ee_pose_6d_scaled()
+                delta_ee_action = current_ee_pose_mm - last_ee_pose
+
+                pos_mag = np.linalg.norm(delta_ee_action[:3])
+                if pos_mag > ACTION_CLIP_MM:
+                    delta_ee_action[:3] *= ACTION_CLIP_MM / pos_mag
+
+                frames = {}
+                for cam_name in ["side_camera", "tool_camera", "top_camera"]:
+                    renderer.update_scene(data, camera=cam_name)
+                    frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
+
+                needle_tip_mm = data.site_xpos[tip_id].copy() * 1000
+                trocar_entry_mm = data.site_xpos[target_entry_id].copy() * 1000
+
+                tip_uv_wrist = project_to_2d(data.site_xpos[tip_id], model, data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
+                trocar_uv_wrist = project_to_2d(data.site_xpos[target_entry_id], model, data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
+                keypoints_wrist = np.concatenate([tip_uv_wrist, trocar_uv_wrist]).astype(np.float32)
+
+                tip_visible = float(0.0 <= tip_uv_wrist[0] <= 1.0 and 0.0 <= tip_uv_wrist[1] <= 1.0)
+                trocar_visible = float(0.0 <= trocar_uv_wrist[0] <= 1.0 and 0.0 <= trocar_uv_wrist[1] <= 1.0)
+                keypoints_visibility = np.array([tip_visible, trocar_visible], dtype=np.float32)
+
+                recorder.add(
+                    frames, current_qpos_deg, current_ee_pose_mm, delta_ee_action,
+                    data.time, 1,  # phase=1 (유지)
+                    current_sensor_dist,
+                    needle_tip_mm=needle_tip_mm, trocar_entry_mm=trocar_entry_mm,
+                    keypoints_wrist=keypoints_wrist, keypoints_visibility=keypoints_visibility,
+                    instruction=TASK_INSTRUCTION,
+                )
+                last_ee_pose = current_ee_pose_mm.copy()
 
         if success and len(recorder.buffer) > 0:
             recorder.save_async()

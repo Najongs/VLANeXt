@@ -6,7 +6,7 @@ project:
   use_wandb: true
 
 data:
-  dataset_name: "sim"
+  dataset_name: "sim_align"
   data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
@@ -21,12 +21,13 @@ data:
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "multi"
+  view_mode: "single"
 
   # camera name mapping (HDF5 key names)
-  cam_exterior: "side_camera"
+  # wrist camera as primary — side/top too far for fine alignment
+  cam_exterior: "tool_camera"
   cam_wrist: "tool_camera"
-  cam_top: "top_camera"
+  cam_top: ""
 
   augmentation:
     enabled: true
@@ -110,7 +111,7 @@ train:
   pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 500
+  warmup_steps: 250
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"

@@ -9,13 +9,13 @@
 #     --checkpoint checkpoints/VLANeXt_droid.pt
 
 # Sim eval
-CUDA_VISIBLE_DEVICES=2 python -m scripts.sim_eval \
-    --config config/sim_eval_config.yaml \
-    --checkpoint /data/public/NAS/VLANeXt/output_dir_step_4000 \
-    --train-config config/sim_train_spatial_config.yaml
+# CUDA_VISIBLE_DEVICES=2 python -m scripts.sim_eval \
+#     --config config/sim_eval_config.yaml \
+#     --checkpoint /data/public/NAS/VLANeXt/output_dir_step_4000 \
+#     --train-config config/sim_train_spatial_config.yaml
 
 # sim_eval_align_only
 CUDA_VISIBLE_DEVICES=0 python -m scripts.sim_eval_align_only \
       --config config/sim_eval_align_config.yaml \
-      --checkpoint /path/to/checkpoint \
-      --train-config config/sim_train_spatial_config.yaml
+      --checkpoint /data/public/NAS/VLANeXt/output_dir_align \
+      --train-config config/sim_train_align_config.yaml

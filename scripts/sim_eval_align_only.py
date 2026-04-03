@@ -36,7 +36,7 @@ from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
-from src.datasets.sim_act import action_min_sim, action_max_sim
+from src.datasets.sim_act_align import action_min_sim_align as action_min_sim, action_max_sim_align as action_max_sim
 
 # Reuse model loading / inference from sim_eval
 from scripts.sim_eval import (
@@ -52,9 +52,9 @@ from scripts.sim_eval import (
 TASK_INSTRUCTION = "Align the needle to the trocar opening"
 
 # Perturbation (same as data collection)
-PERTURB_POS_XY_MM = 15.0
-PERTURB_POS_Z_MM = 10.0
-PERTURB_ANGLE_DEG = 10.0
+PERTURB_POS_XY_MM = 10.0
+PERTURB_POS_Z_MM = 7.0
+PERTURB_ANGLE_DEG = 7.0
 
 # Success: needle tip within this distance of trocar entry
 ALIGN_SUCCESS_THRESHOLD_M = 0.002   # 2mm
@@ -187,51 +187,69 @@ class AlignSimEnv:
         self._p_depth = p_depth
         print("Pre-alignment cached.")
 
-    def reset(self):
-        """Reset to aligned state + random perturbation."""
+    def reset(self, max_retries=10):
+        """Reset to aligned state + random perturbation.
+        Retries if IK fails to converge to the perturbed position."""
         self._ensure_aligned_state()
 
-        mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[:self.n_motors] = self._aligned_qpos
-        self.data.qvel[:self.n_motors] = self._aligned_qvel
-        mujoco.mj_forward(self.model, self.data)
+        for attempt in range(max_retries):
+            mujoco.mj_resetData(self.model, self.data)
+            self.data.qpos[:self.n_motors] = self._aligned_qpos
+            self.data.qvel[:self.n_motors] = self._aligned_qvel
+            mujoco.mj_forward(self.model, self.data)
 
-        # Random perturbation
-        perturb_xyz = np.array([
-            np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-            np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-            np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
-        ])
-        perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
-        random_axis = np.random.randn(3)
-        random_axis = random_axis / (np.linalg.norm(random_axis) + 1e-10)
-
-        perturbed_tip = self._goal_tip + perturb_xyz
-        rot_mat_perturb = np.eye(3)
-        if abs(perturb_angle_rad) > 1e-6:
-            K = np.array([
-                [0, -random_axis[2], random_axis[1]],
-                [random_axis[2], 0, -random_axis[0]],
-                [-random_axis[1], random_axis[0], 0],
+            # Random perturbation
+            perturb_xyz = np.array([
+                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
             ])
-            rot_mat_perturb = np.eye(3) + np.sin(perturb_angle_rad) * K + (1 - np.cos(perturb_angle_rad)) * (K @ K)
-        perturbed_back_dir = rot_mat_perturb @ (self._goal_back - self._goal_tip)
-        perturbed_back = perturbed_tip + perturbed_back_dir
+            perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
+            random_axis = np.random.randn(3)
+            random_axis = random_axis / (np.linalg.norm(random_axis) + 1e-10)
 
-        # IK to perturbed position
-        for _ in range(3000):
-            self._run_ik_step(perturbed_tip, perturbed_back)
-            mujoco.mj_step(self.model, self.data)
-            if np.linalg.norm(self.data.site_xpos[self.tip_id] - perturbed_tip) < 0.001:
-                for _ in range(200):
-                    self._run_ik_step(perturbed_tip, perturbed_back)
-                    mujoco.mj_step(self.model, self.data)
+            perturbed_tip = self._goal_tip + perturb_xyz
+            rot_mat_perturb = np.eye(3)
+            if abs(perturb_angle_rad) > 1e-6:
+                K = np.array([
+                    [0, -random_axis[2], random_axis[1]],
+                    [random_axis[2], 0, -random_axis[0]],
+                    [-random_axis[1], random_axis[0], 0],
+                ])
+                rot_mat_perturb = np.eye(3) + np.sin(perturb_angle_rad) * K + (1 - np.cos(perturb_angle_rad)) * (K @ K)
+            perturbed_back_dir = rot_mat_perturb @ (self._goal_back - self._goal_tip)
+            perturbed_back = perturbed_tip + perturbed_back_dir
+
+            # IK to perturbed position
+            converged = False
+            for _ in range(3000):
+                self._run_ik_step(perturbed_tip, perturbed_back)
+                mujoco.mj_step(self.model, self.data)
+                if np.linalg.norm(self.data.site_xpos[self.tip_id] - perturbed_tip) < 0.001:
+                    for _ in range(200):
+                        self._run_ik_step(perturbed_tip, perturbed_back)
+                        mujoco.mj_step(self.model, self.data)
+                    converged = True
+                    break
+
+            # Verify: actual tip distance to trocar entry should be reasonable
+            actual_dist = np.linalg.norm(self.data.site_xpos[self.tip_id] - self._p_entry) * 1000.0
+            max_expected = np.sqrt(PERTURB_POS_XY_MM**2 * 2 + PERTURB_POS_Z_MM**2) + 5.0  # margin
+
+            if converged and actual_dist < max_expected:
+                perturb_dist = np.linalg.norm(perturb_xyz) * 1000
+                print(f"  Perturbation: pos={perturb_dist:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg, "
+                      f"actual_dist={actual_dist:.1f}mm")
                 break
+            else:
+                print(f"  Perturbation attempt {attempt+1} failed (converged={converged}, "
+                      f"actual_dist={actual_dist:.1f}mm), retrying...")
+
+        if not converged or actual_dist >= max_expected:
+            print(f"  WARNING: Could not find valid perturbation after {max_retries} retries, "
+                  f"using last attempt (dist={actual_dist:.1f}mm)")
 
         self.align_hold_counter = 0
-
-        perturb_dist = np.linalg.norm(perturb_xyz) * 1000
-        print(f"  Perturbation: pos={perturb_dist:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg")
 
     def get_ee_pose(self):
         pos = self.data.xpos[self.link6_id].copy() * 1000.0
@@ -439,7 +457,10 @@ def run_eval(cfg):
             img_wrist = preprocess_image(frames["tool_camera"], (image_size, image_size))
             img_top = preprocess_image(frames["top_camera"], (image_size, image_size))
 
-            image_history.append(img_ext)
+            # Use wrist as primary view (configured via train config view_mode)
+            img_primary = img_wrist
+
+            image_history.append(img_primary)
             image_history_wrist.append(img_wrist)
             image_history_top.append(img_top)
 
@@ -453,7 +474,7 @@ def run_eval(cfg):
             state_history.append(proprio)
 
             observation = {
-                "full_image": img_ext,
+                "full_image": img_primary,
                 "full_image_wrist": img_wrist,
                 "full_image_top": img_top,
                 "image_history": image_history,
