@@ -171,12 +171,12 @@ class SimActAlign(IterableDataset):
         if self.length is not None:
             episode_paths = episode_paths[: self.length]
 
-        # Shuffle episode order
-        np.random.shuffle(episode_paths)
-
         shuffle_buffer = []
 
-        for ep_path in episode_paths:
+        while True:  # Infinite loop — no epoch boundary, no buffer flush
+            np.random.shuffle(episode_paths)
+
+            for ep_path in episode_paths:
             try:
                 traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
             except Exception as e:
@@ -289,7 +289,4 @@ class SimActAlign(IterableDataset):
                 del spatial_targets_np
             gc.collect()
 
-        # Flush remaining buffer
-        np.random.shuffle(shuffle_buffer)
-        for sample in shuffle_buffer:
-            yield sample
+        # No flush — loop back and keep filling the buffer

@@ -4,7 +4,7 @@ Parallel Fine-Alignment Data Collection
 
 Usage:
 
-python run_parallel_align_only.py --workers 25 --episodes 400 \
+python run_parallel_align_only.py --workers 10 --episodes 1000 \
     --base_dir /data/public/NAS/VLANeXt/dataset/fine_align
 
 """

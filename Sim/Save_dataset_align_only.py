@@ -61,8 +61,8 @@ ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
 FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
-PERTURB_POS_XY_MM = 15.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MM = 10.0     # Z축 perturbation 범위 (±mm)
+PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
+PERTURB_POS_Z_MM = 20.0     # Z축 perturbation 범위 (±mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
 
 # --- 성공 조건 ---
@@ -77,7 +77,7 @@ HOLD_RECORD_STEPS = 5           # 정렬 완료 후 녹화 control steps
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
-TIMEOUT_SEC = 10.0          # 에피소드 전체 타임아웃 (초)
+TIMEOUT_SEC = 15.0          # 에피소드 전체 타임아웃 (초)
 
 # ============================================================
 
