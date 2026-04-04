@@ -17,5 +17,5 @@
 # sim_eval_align_only
 CUDA_VISIBLE_DEVICES=0 python -m scripts.sim_eval_align_only \
       --config config/sim_eval_align_config.yaml \
-      --checkpoint /data/public/NAS/VLANeXt/output_dir_align \
+      --checkpoint /data/public/NAS/VLANeXt/output_dir_align_new \
       --train-config config/sim_train_align_config.yaml

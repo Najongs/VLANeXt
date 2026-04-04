@@ -7,13 +7,15 @@ import h5py
 import torch
 from torch.utils.data import IterableDataset
 
-# Action normalization stats for align-only dataset (99th percentile)
+# Action normalization stats for align-only dataset (99th percentile, symmetric)
 # delta_pose(6) + gripper(1)
-# action_min_sim_align = [-0.677914559841156, -0.503309965133667, -0.48736560344696045, -0.0034193717874586582, -0.0009486089111305773, -0.005416739732027054, -1.0]
-# action_max_sim_align = [0.535260796546936, 0.5127751231193542, 0.46008020639419556, 0.0029174319934099913, 0.0012368694879114628, 0.0032630872447043657, -1.0]
+# Each dimension uses max(abs(p1), abs(p99)) so that normalized 0 = no movement.
+# Original p99 (asymmetric):
+#   min = [-0.6779, -0.5033, -0.4874, -0.00342, -0.000949, -0.00542, -1.0]
+#   max = [+0.5353, +0.5128, +0.4601, +0.00292, +0.001237, +0.00326, -1.0]
 
-action_min_sim_align = [-0.677914559841156, -0.503309965133667, -0.48736560344696045, -0.0034193717874586582, -0.0009486089111305773, -0.005416739732027054, -1.0]
-action_max_sim_align = [0.535260796546936, 0.5127751231193542, 0.46008020639419556, 0.0029174319934099913, 0.0012368694879114628, 0.0032630872447043657, -1.0]
+action_min_sim_align = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
+action_max_sim_align = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, -1.0]
 
 
 # Must match Save_dataset_align_only.py and sim_eval_align_only.py
@@ -177,116 +179,116 @@ class SimActAlign(IterableDataset):
             np.random.shuffle(episode_paths)
 
             for ep_path in episode_paths:
-            try:
-                traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
-            except Exception as e:
-                print(f"[Warn] Skipping {ep_path}: {e}")
-                continue
+                try:
+                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                except Exception as e:
+                    print(f"[Warn] Skipping {ep_path}: {e}")
+                    continue
 
-            if traj_len < self.history_len + 1:
-                del images_np, actions_np, proprio_np
+                if traj_len < self.history_len + 1:
+                    del images_np, actions_np, proprio_np
+                    if wrist_np is not None:
+                        del wrist_np
+                    continue
+
+                # --- Sample indices ---
+                if self.full_sequence:
+                    start_idx = (self.history_len - 1) if self.skip_history_padding else 0
+                    sample_indices = np.arange(start_idx, traj_len)
+                else:
+                    num_samples = max(1, traj_len // (15 * 5))
+                    sample_indices = np.random.choice(traj_len, size=num_samples, replace=False)
+
+                for t in sample_indices:
+                    # History observation indices (for image / proprio)
+                    start_hist_obs = t - self.history_len + 1
+                    hist_indices_obs = np.arange(start_hist_obs, t + 1)
+                    hist_indices_obs = np.clip(hist_indices_obs, 0, traj_len - 1)
+
+                    # History action indices (shifted by 1)
+                    start_hist_act = t - self.history_len
+                    hist_indices_act = np.arange(start_hist_act, t)
+
+                    # Future action indices
+                    end_fut = t + self.future_len
+                    fut_indices = np.arange(t, end_fut)
+
+                    # --- Proprioception ---
+                    hist_proprio = torch.from_numpy(proprio_np[hist_indices_obs])
+
+                    # --- History actions ---
+                    hist_actions = np.zeros((self.history_len, actions_np.shape[1]), dtype=np.float32)
+                    valid_mask = hist_indices_act >= 0
+                    if np.any(valid_mask):
+                        valid_indices = np.clip(hist_indices_act[valid_mask], 0, traj_len - 1)
+                        hist_actions[valid_mask] = actions_np[valid_indices]
+                    hist_actions = torch.from_numpy(hist_actions)
+
+                    # --- Future actions ---
+                    fut_acts_np = np.zeros((self.future_len, actions_np.shape[1]), dtype=np.float32)
+                    valid_mask_fut = fut_indices < traj_len
+                    if np.any(valid_mask_fut):
+                        fut_acts_np[valid_mask_fut] = actions_np[fut_indices[valid_mask_fut]]
+                    fut_acts = torch.from_numpy(fut_acts_np)
+
+                    # --- Instruction (fixed, matches eval) ---
+                    instruction = TASK_INSTRUCTION
+
+                    sample = {
+                        "proprioception": hist_proprio,
+                        "history_actions": hist_actions,
+                        "future_actions": fut_acts,
+                        "instruction": instruction,
+                    }
+
+                    # Spatial target for auxiliary loss (current timestep)
+                    if spatial_targets_np is not None:
+                        sample["spatial_target"] = torch.from_numpy(spatial_targets_np[t].copy())
+                    else:
+                        sample["spatial_target"] = None
+
+                    # Action loss weight
+                    sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)
+
+                    # --- Future image (optional) ---
+                    if self.load_future_image:
+                        if self.future_image_mode == "last":
+                            target_idx = traj_len - 1
+                        else:
+                            target_idx = min(t + self.future_len, traj_len - 1)
+                        sample["future_image"] = images_np[target_idx].copy()
+
+                    # --- Visual input ---
+                    if self.input_modality == "video":
+                        sample["video"] = images_np[hist_indices_obs]
+                        if self.view_mode == "multi":
+                            sample["video_wrist"] = wrist_np[hist_indices_obs] if wrist_np is not None else images_np[hist_indices_obs]
+                            if top_np is not None:
+                                sample["video_top"] = top_np[hist_indices_obs]
+                    elif self.input_modality == "image":
+                        sample["image"] = images_np[t].copy()
+                        if self.view_mode == "multi":
+                            sample["image_wrist"] = wrist_np[t].copy() if wrist_np is not None else images_np[t].copy()
+                            if top_np is not None:
+                                sample["image_top"] = top_np[t].copy()
+                    else:
+                        raise ValueError(f"Unknown input_modality: {self.input_modality}")
+
+                    # --- Shuffle buffer ---
+                    shuffle_buffer.append(sample)
+                    if len(shuffle_buffer) >= self.buffer_size:
+                        idx = np.random.randint(len(shuffle_buffer))
+                        shuffle_buffer[idx], shuffle_buffer[-1] = shuffle_buffer[-1], shuffle_buffer[idx]
+                        yield shuffle_buffer.pop()
+
+                # Cleanup per episode
+                del images_np, actions_np, proprio_np, action_weight_np
                 if wrist_np is not None:
                     del wrist_np
-                continue
-
-            # --- Sample indices ---
-            if self.full_sequence:
-                start_idx = (self.history_len - 1) if self.skip_history_padding else 0
-                sample_indices = np.arange(start_idx, traj_len)
-            else:
-                num_samples = max(1, traj_len // (15 * 5))
-                sample_indices = np.random.choice(traj_len, size=num_samples, replace=False)
-
-            for t in sample_indices:
-                # History observation indices (for image / proprio)
-                start_hist_obs = t - self.history_len + 1
-                hist_indices_obs = np.arange(start_hist_obs, t + 1)
-                hist_indices_obs = np.clip(hist_indices_obs, 0, traj_len - 1)
-
-                # History action indices (shifted by 1)
-                start_hist_act = t - self.history_len
-                hist_indices_act = np.arange(start_hist_act, t)
-
-                # Future action indices
-                end_fut = t + self.future_len
-                fut_indices = np.arange(t, end_fut)
-
-                # --- Proprioception ---
-                hist_proprio = torch.from_numpy(proprio_np[hist_indices_obs])
-
-                # --- History actions ---
-                hist_actions = np.zeros((self.history_len, actions_np.shape[1]), dtype=np.float32)
-                valid_mask = hist_indices_act >= 0
-                if np.any(valid_mask):
-                    valid_indices = np.clip(hist_indices_act[valid_mask], 0, traj_len - 1)
-                    hist_actions[valid_mask] = actions_np[valid_indices]
-                hist_actions = torch.from_numpy(hist_actions)
-
-                # --- Future actions ---
-                fut_acts_np = np.zeros((self.future_len, actions_np.shape[1]), dtype=np.float32)
-                valid_mask_fut = fut_indices < traj_len
-                if np.any(valid_mask_fut):
-                    fut_acts_np[valid_mask_fut] = actions_np[fut_indices[valid_mask_fut]]
-                fut_acts = torch.from_numpy(fut_acts_np)
-
-                # --- Instruction (fixed, matches eval) ---
-                instruction = TASK_INSTRUCTION
-
-                sample = {
-                    "proprioception": hist_proprio,
-                    "history_actions": hist_actions,
-                    "future_actions": fut_acts,
-                    "instruction": instruction,
-                }
-
-                # Spatial target for auxiliary loss (current timestep)
+                if top_np is not None:
+                    del top_np
                 if spatial_targets_np is not None:
-                    sample["spatial_target"] = torch.from_numpy(spatial_targets_np[t].copy())
-                else:
-                    sample["spatial_target"] = None
-
-                # Action loss weight
-                sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)
-
-                # --- Future image (optional) ---
-                if self.load_future_image:
-                    if self.future_image_mode == "last":
-                        target_idx = traj_len - 1
-                    else:
-                        target_idx = min(t + self.future_len, traj_len - 1)
-                    sample["future_image"] = images_np[target_idx].copy()
-
-                # --- Visual input ---
-                if self.input_modality == "video":
-                    sample["video"] = images_np[hist_indices_obs]
-                    if self.view_mode == "multi":
-                        sample["video_wrist"] = wrist_np[hist_indices_obs] if wrist_np is not None else images_np[hist_indices_obs]
-                        if top_np is not None:
-                            sample["video_top"] = top_np[hist_indices_obs]
-                elif self.input_modality == "image":
-                    sample["image"] = images_np[t].copy()
-                    if self.view_mode == "multi":
-                        sample["image_wrist"] = wrist_np[t].copy() if wrist_np is not None else images_np[t].copy()
-                        if top_np is not None:
-                            sample["image_top"] = top_np[t].copy()
-                else:
-                    raise ValueError(f"Unknown input_modality: {self.input_modality}")
-
-                # --- Shuffle buffer ---
-                shuffle_buffer.append(sample)
-                if len(shuffle_buffer) >= self.buffer_size:
-                    idx = np.random.randint(len(shuffle_buffer))
-                    shuffle_buffer[idx], shuffle_buffer[-1] = shuffle_buffer[-1], shuffle_buffer[idx]
-                    yield shuffle_buffer.pop()
-
-            # Cleanup per episode
-            del images_np, actions_np, proprio_np, action_weight_np
-            if wrist_np is not None:
-                del wrist_np
-            if top_np is not None:
-                del top_np
-            if spatial_targets_np is not None:
-                del spatial_targets_np
-            gc.collect()
+                    del spatial_targets_np
+                gc.collect()
 
         # No flush — loop back and keep filling the buffer
