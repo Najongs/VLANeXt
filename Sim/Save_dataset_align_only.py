@@ -7,6 +7,21 @@ Fine-alignment only dataset collection.
 4. 미세 정렬만 녹화 (삽입 X)
 5. 정렬 완료 시 에피소드 종료
 
+# 기존 방식 (uniform, 변경 없음)
+python Sim/Save_dataset_align_only.py
+
+# X 음수 방향 편향 수집 (2000개, 별도 폴더)
+python Sim/Save_dataset_align_only.py \
+    --save-dir dataset/fine_align/bias_x_neg \
+    --num-episodes 2000 \
+    --bias x_neg
+
+# Y 음수 방향 편향 수집
+python Sim/Save_dataset_align_only.py \
+    --save-dir dataset/fine_align/bias_y_neg \
+    --num-episodes 2000 \
+    --bias y_neg
+
 Usage:
     python Save_dataset_align_only.py
 """
@@ -78,6 +93,10 @@ HOLD_RECORD_STEPS = 5           # 정렬 완료 후 녹화 control steps
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
 TIMEOUT_SEC = 15.0          # 에피소드 전체 타임아웃 (초)
+
+# --- Bias collection (set via CLI --bias) ---
+BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
+BIAS_RATIO = 0.8            # fraction of episodes with biased perturbation
 
 # ============================================================
 
@@ -379,6 +398,16 @@ def main():
             np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
             np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
         ])
+        # Apply directional bias if configured (supports "x_neg", "x_neg,y_neg", etc.)
+        if BIAS_DIRECTION is not None and np.random.random() < BIAS_RATIO:
+            for bias_part in BIAS_DIRECTION.split(","):
+                axis, sign = bias_part.strip().split("_")
+                idx = {"x": 0, "y": 1, "z": 2}[axis]
+                limit = PERTURB_POS_Z_MM if axis == "z" else PERTURB_POS_XY_MM
+                if sign == "neg":
+                    perturb_xyz[idx] = np.random.uniform(-limit, -limit * 0.15) / 1000.0
+                else:
+                    perturb_xyz[idx] = np.random.uniform(limit * 0.15, limit) / 1000.0
         perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
         random_axis = np.random.randn(3)
         random_axis = random_axis / (np.linalg.norm(random_axis) + 1e-10)
@@ -566,4 +595,23 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fine-alignment dataset collection")
+    parser.add_argument("--save-dir", type=str, default=SAVE_DIR,
+                        help="Output directory for h5 files")
+    parser.add_argument("--num-episodes", type=int, default=MAX_EPISODES,
+                        help="Number of episodes to collect")
+    parser.add_argument("--bias", type=str, default=None,
+                        help="Bias perturbation direction(s). Single: 'x_neg', Combined: 'x_neg,y_neg'")
+    parser.add_argument("--bias-ratio", type=float, default=0.8,
+                        help="Fraction of perturbations in biased direction (default: 0.8)")
+    args = parser.parse_args()
+
+    # Override globals from CLI args
+    SAVE_DIR = args.save_dir
+    MAX_EPISODES = args.num_episodes
+
+    # Store bias config as global for use in main()
+    BIAS_DIRECTION = args.bias
+    BIAS_RATIO = args.bias_ratio
+
     main()

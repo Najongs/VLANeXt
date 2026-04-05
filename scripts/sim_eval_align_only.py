@@ -251,6 +251,16 @@ class AlignSimEnv:
 
         self.align_hold_counter = 0
 
+        # Store perturbation info for analysis
+        self.last_perturb_info = {
+            "perturb_x_mm": perturb_xyz[0] * 1000,
+            "perturb_y_mm": perturb_xyz[1] * 1000,
+            "perturb_z_mm": perturb_xyz[2] * 1000,
+            "perturb_angle_deg": np.rad2deg(perturb_angle_rad),
+            "perturb_dist_mm": np.linalg.norm(perturb_xyz) * 1000,
+            "initial_dist_mm": actual_dist,
+        }
+
     def get_ee_pose(self):
         pos = self.data.xpos[self.link6_id].copy() * 1000.0
         mat = self.data.xmat[self.link6_id].reshape(3, 3)
@@ -397,7 +407,14 @@ def run_eval(cfg):
     checkpoint_path = cfg.eval.finetuned_checkpoint
     assert checkpoint_path, "eval.finetuned_checkpoint must be set!"
 
-    set_seed(cfg.eval.seed)
+    # Shard support for parallel eval
+    shard_id = getattr(cfg, "shard_id", None)
+    num_shards = getattr(cfg, "num_shards", None)
+
+    seed = cfg.eval.seed
+    if shard_id is not None:
+        seed = seed + shard_id * 1000
+    set_seed(seed)
 
     diff_steps = getattr(cfg.model, "diffusion_steps", 10)
     sched_type = getattr(cfg.model, "scheduler_type", "flow_match")
@@ -413,13 +430,21 @@ def run_eval(cfg):
     save_video = getattr(cfg.eval, "save_video", True)
     video_fps = getattr(cfg.eval, "video_fps", 15)
 
+    # Build episode list
+    all_episodes = list(range(1, num_episodes + 1))
+    if shard_id is not None and num_shards is not None:
+        all_episodes = [ep for ep in all_episodes if (ep - 1) % num_shards == shard_id]
+        shard_suffix = f"_shard{shard_id}"
+    else:
+        shard_suffix = ""
+
     # Output directory
     ckpt_path = pathlib.Path(checkpoint_path)
     try:
         step_str = ckpt_path.stem.split("_")[-1]
     except (ValueError, IndexError):
         step_str = "unknown"
-    eval_dir = ckpt_path.parent / f"align_eval_step{step_str}_exec{num_steps_execute}_diff{diff_steps}"
+    eval_dir = ckpt_path.parent / f"align_eval_step{step_str}_exec{num_steps_execute}_diff{diff_steps}{shard_suffix}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     log_path = eval_dir / "log.txt"
@@ -435,9 +460,11 @@ def run_eval(cfg):
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["episode", "success", "steps", "final_dist_mm",
-                         "final_lateral_mm", "final_angle_deg", "min_dist_mm"])
+                         "final_lateral_mm", "final_angle_deg", "min_dist_mm",
+                         "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
+                         "perturb_angle_deg", "perturb_dist_mm", "initial_dist_mm"])
 
-    for ep in range(1, num_episodes + 1):
+    for ep in all_episodes:
         env.reset()
 
         image_history = []
@@ -515,22 +542,26 @@ def run_eval(cfg):
         if success:
             total_successes += 1
 
-        sr = total_successes / ep * 100
+        ep_done = all_episodes.index(ep) + 1
+        sr = total_successes / ep_done * 100
         final_m = metrics_history[-1]
         min_dist = min(m["dist_mm"] for m in metrics_history)
         msg = (f"Episode {ep}/{num_episodes} | {'SUCCESS' if success else 'FAIL'} | "
-               f"Steps: {ctrl_step + 1} | SR: {sr:.1f}% ({total_successes}/{ep}) | "
+               f"Steps: {ctrl_step + 1} | SR: {sr:.1f}% ({total_successes}/{ep_done}) | "
                f"dist={final_m['dist_mm']:.1f}mm lateral={final_m['lateral_mm']:.1f}mm "
                f"angle={final_m['angle_deg']:.1f}deg min_dist={min_dist:.1f}mm")
         print(msg)
         log_file.write(msg + "\n")
         log_file.flush()
 
+        pi = env.last_perturb_info
         csv_writer.writerow([
             ep, int(success), ctrl_step + 1,
             f"{final_m['dist_mm']:.2f}",
             f"{final_m['lateral_mm']:.2f}", f"{final_m['angle_deg']:.2f}",
             f"{min_dist:.2f}",
+            f"{pi['perturb_x_mm']:.2f}", f"{pi['perturb_y_mm']:.2f}", f"{pi['perturb_z_mm']:.2f}",
+            f"{pi['perturb_angle_deg']:.2f}", f"{pi['perturb_dist_mm']:.2f}", f"{pi['initial_dist_mm']:.2f}",
         ])
         csv_file.flush()
 
@@ -541,18 +572,22 @@ def run_eval(cfg):
 
     csv_file.close()
 
-    final_sr = total_successes / num_episodes * 100
-    summary = f"\n{'='*60}\nFinal Alignment Success Rate: {final_sr:.2f}% ({total_successes}/{num_episodes})\n{'='*60}"
+    final_sr = total_successes / len(all_episodes) * 100
+    summary = f"\n{'='*60}\nFinal Alignment Success Rate: {final_sr:.2f}% ({total_successes}/{len(all_episodes)})\n{'='*60}"
     print(summary)
     log_file.write(summary + "\n")
     log_file.close()
 
-    new_dir = eval_dir.parent / f"{eval_dir.name}_SR{final_sr:.2f}"
-    try:
-        eval_dir.rename(new_dir)
-        print(f"Results saved to: {new_dir}")
-    except Exception as e:
-        print(f"Could not rename directory: {e}")
+    # Only rename directory when NOT running as a shard (merge handles final naming)
+    if shard_id is None:
+        new_dir = eval_dir.parent / f"{eval_dir.name}_SR{final_sr:.2f}"
+        try:
+            eval_dir.rename(new_dir)
+            print(f"Results saved to: {new_dir}")
+        except Exception as e:
+            print(f"Could not rename directory: {e}")
+    else:
+        print(f"Results saved to: {eval_dir}")
 
 
 if __name__ == "__main__":
@@ -560,6 +595,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="config/sim_eval_align_config.yaml")
     parser.add_argument("--checkpoint", type=str, default="", help="Override eval.finetuned_checkpoint")
     parser.add_argument("--train-config", type=str, default=None, help="Path to train config")
+    parser.add_argument("--shard-id", type=int, default=None, help="Shard index for parallel eval (0-based)")
+    parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -570,4 +607,6 @@ if __name__ == "__main__":
 
     cfg = DictConfig(config_dict)
     cfg.train_config_path = args.train_config
+    cfg.shard_id = args.shard_id
+    cfg.num_shards = args.num_shards
     run_eval(cfg)

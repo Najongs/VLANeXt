@@ -67,10 +67,10 @@ class SimActAlign(IterableDataset):
         self.action_min = np.array(action_min_sim_align, dtype=np.float32)
         self.action_max = np.array(action_max_sim_align, dtype=np.float32)
 
-        # Collect all h5 files
-        self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "*.h5")))
+        # Collect all h5 files (recursive — searches subdirectories too)
+        self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
         if not self.episode_paths:
-            raise FileNotFoundError(f"No .h5 files found in {data_dir}")
+            raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
 
     @staticmethod
     def _decode_jpeg(jpeg_data):
