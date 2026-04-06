@@ -26,6 +26,12 @@
 #               analyze_eval.py에서 특정 방향 SR이 낮게 나왔을 때
 #               해당 방향들을 한번에 보강.
 #
+#   grid        그리드 기반 균등 수집 (stratified sampling).
+#               XYZ 공간을 격자로 나눠 빈틈 없이 커버.
+#               bins_xy x bins_xy x bins_z 개의 에피소드 생성.
+#               2번째 인자: workers, 3번째: bins_xy, 4번째: bins_z
+#               예: bash Run_Collect.sh grid 10 8 6  → 8x8x6=384 에피소드
+#
 #   full        전체 파이프라인 수집 (Save_dataset.py).
 #               정렬뿐 아니라 삽입까지 포함된 full trajectory.
 #               align-only와는 다른 데이터셋.
@@ -42,24 +48,37 @@
 #   하위 폴더의 모든 .h5를 recursive로 로드함.
 #
 # 예시:
-#   bash Run_Collect.sh uniform 10 1000      # 균등 10,000개
+#   bash Run_Collect.sh uniform 20 1000      # 균등 10,000개
 #   bash Run_Collect.sh bias_x_neg 10 500    # X- 편향 5,000개
 #   bash Run_Collect.sh bias_all 10 500      # X-,Y- 각 5,000개씩
+#   bash Run_Collect.sh grid 10 8 6         # 8x8x6=384 그리드 에피소드
+#   bash Run_Collect.sh grid 10 12 8        # 12x12x8=1152 촘촘한 그리드
 #   bash Run_Collect.sh full 5 500           # full pipeline 2,500개
 #
 # =============================================================
 
 MODE=${1:-uniform}
 WORKERS=${2:-10}
-EPISODES=${3:-1000}
+EPISODES=${3:-1000}   # grid 모드에서는 3번째=bins_xy, 4번째=bins_z로 사용
 BASE=/data/public/NAS/VLANeXt/dataset/fine_align
 
-echo "============================================================="
-echo "  Mode: ${MODE}"
-echo "  Workers: ${WORKERS}"
-echo "  Episodes/worker: ${EPISODES}"
-echo "  Total: $((WORKERS * EPISODES))"
-echo "============================================================="
+if [ "$MODE" = "grid" ]; then
+    BINS_XY=${3:-8}
+    BINS_Z=${4:-6}
+    TOTAL=$((BINS_XY * BINS_XY * BINS_Z))
+    echo "============================================================="
+    echo "  Mode: ${MODE}"
+    echo "  Workers: ${WORKERS}"
+    echo "  Grid: ${BINS_XY} x ${BINS_XY} x ${BINS_Z} = ${TOTAL} cells"
+    echo "============================================================="
+else
+    echo "============================================================="
+    echo "  Mode: ${MODE}"
+    echo "  Workers: ${WORKERS}"
+    echo "  Episodes/worker: ${EPISODES}"
+    echo "  Total: $((WORKERS * EPISODES))"
+    echo "============================================================="
+fi
 
 case $MODE in
     uniform)
@@ -98,6 +117,13 @@ case $MODE in
             --bias y_neg
         ;;
 
+    grid)
+        python Sim/run_parallel.py \
+            --script align --workers $WORKERS \
+            --base-dir ${BASE}/grid \
+            --grid --grid-bins-xy $BINS_XY --grid-bins-z $BINS_Z
+        ;;
+
     full)
         python Sim/run_parallel.py \
             --script full --workers $WORKERS --episodes $EPISODES \
@@ -112,6 +138,7 @@ case $MODE in
         echo "  bias_x_neg  - X 음수 방향 편향"
         echo "  bias_y_neg  - Y 음수 방향 편향"
         echo "  bias_all    - X-, Y- 순차 수집"
+        echo "  grid        - 그리드 기반 균등 수집 (args: workers bins_xy bins_z)"
         echo "  full        - 전체 파이프라인 (삽입 포함)"
         exit 1
         ;;

@@ -29,6 +29,7 @@ Usage:
 import os
 os.environ['MUJOCO_GL'] = 'egl'
 
+import json
 import mujoco
 import numpy as np
 import cv2
@@ -97,6 +98,9 @@ TIMEOUT_SEC = 15.0          # 에피소드 전체 타임아웃 (초)
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
 BIAS_RATIO = 0.8            # fraction of episodes with biased perturbation
+
+# --- Grid collection (set via CLI --grid-cells-file) ---
+GRID_CELLS = None           # list of [x_lo, x_hi, y_lo, y_hi, z_lo, z_hi] in mm
 
 # ============================================================
 
@@ -382,6 +386,10 @@ def main():
     # 에피소드 루프: reset → perturb → 녹화 (pre-alignment 스킵)
     # ============================================================
     episode_count = 0
+    grid_cell_index = 0          # Grid mode: 항상 다음 셀로 진행 (실패해도 스킵)
+    grid_fail_cells = []         # Grid mode: 실패한 셀 기록
+    grid_max_retries = 3         # Grid mode: 셀당 최대 재시도 횟수
+    grid_retry_count = 0
     while episode_count < MAX_EPISODES:
         # 정렬된 상태로 즉시 리셋
         mujoco.mj_resetData(model, data)
@@ -393,21 +401,34 @@ def main():
         # Phase 1: Perturbation 적용 (녹화 X)
         # ============================================================
 
-        perturb_xyz = np.array([
-            np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-            np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-            np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
-        ])
-        # Apply directional bias if configured (supports "x_neg", "x_neg,y_neg", etc.)
-        if BIAS_DIRECTION is not None and np.random.random() < BIAS_RATIO:
-            for bias_part in BIAS_DIRECTION.split(","):
-                axis, sign = bias_part.strip().split("_")
-                idx = {"x": 0, "y": 1, "z": 2}[axis]
-                limit = PERTURB_POS_Z_MM if axis == "z" else PERTURB_POS_XY_MM
-                if sign == "neg":
-                    perturb_xyz[idx] = np.random.uniform(-limit, -limit * 0.15) / 1000.0
-                else:
-                    perturb_xyz[idx] = np.random.uniform(limit * 0.15, limit) / 1000.0
+        # --- Perturbation 생성 ---
+        if GRID_CELLS is not None:
+            # Grid mode: 셀 범위 내 랜덤 샘플링
+            if grid_cell_index >= len(GRID_CELLS):
+                break  # 모든 셀 소진
+            cell = GRID_CELLS[grid_cell_index]
+            perturb_xyz = np.array([
+                np.random.uniform(cell[0], cell[1]) / 1000.0,  # x: [x_lo, x_hi] mm
+                np.random.uniform(cell[2], cell[3]) / 1000.0,  # y: [y_lo, y_hi] mm
+                np.random.uniform(cell[4], cell[5]) / 1000.0,  # z: [z_lo, z_hi] mm
+            ])
+        else:
+            # Random mode (기존)
+            perturb_xyz = np.array([
+                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
+            ])
+            # Apply directional bias if configured
+            if BIAS_DIRECTION is not None and np.random.random() < BIAS_RATIO:
+                for bias_part in BIAS_DIRECTION.split(","):
+                    axis, sign = bias_part.strip().split("_")
+                    idx = {"x": 0, "y": 1, "z": 2}[axis]
+                    limit = PERTURB_POS_Z_MM if axis == "z" else PERTURB_POS_XY_MM
+                    if sign == "neg":
+                        perturb_xyz[idx] = np.random.uniform(-limit, -limit * 0.15) / 1000.0
+                    else:
+                        perturb_xyz[idx] = np.random.uniform(limit * 0.15, limit) / 1000.0
         perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
         random_axis = np.random.randn(3)
         random_axis = random_axis / (np.linalg.norm(random_axis) + 1e-10)
@@ -424,19 +445,39 @@ def main():
         perturbed_back_dir = rot_mat_perturb @ (goal_back - goal_tip)
         perturbed_back = perturbed_tip + perturbed_back_dir
 
-        # IK로 perturbed 위치까지 이동
-        for ps in range(3000):
-            run_ik_step(perturbed_tip, perturbed_back)
+        # IK로 perturbed 위치까지 이동 (aligned → perturbed smooth interpolation)
+        perturb_reached = False
+        move_speed = 0.05  # m/s — perturbation 이동 속도
+        move_dist = np.linalg.norm(perturbed_tip - goal_tip)
+        move_duration = max(move_dist / move_speed, 0.1)
+        move_start_time = data.time
+
+        for ps in range(5000):
+            t = (data.time - move_start_time) / move_duration
+            alpha = smooth_step(min(t, 1.0))
+            interp_tip = (1 - alpha) * goal_tip + alpha * perturbed_tip
+            interp_back = (1 - alpha) * goal_back + alpha * perturbed_back
+
+            run_ik_step(interp_tip, interp_back)
             mujoco.mj_step(model, data)
-            if np.linalg.norm(data.site_xpos[tip_id] - perturbed_tip) < 0.001:
-                for _ in range(200):
-                    run_ik_step(perturbed_tip, perturbed_back)
-                    mujoco.mj_step(model, data)
-                break
+
+            if t >= 1.0:
+                if np.linalg.norm(data.site_xpos[tip_id] - perturbed_tip) < 0.001:
+                    # 안정화
+                    for _ in range(200):
+                        run_ik_step(perturbed_tip, perturbed_back)
+                        mujoco.mj_step(model, data)
+                    perturb_reached = True
+                    break
+                # 보간 끝났는데 아직 도달 못함 → 조금 더 시도
+                if ps > 4500:
+                    break
 
         perturb_dist_mm = np.linalg.norm(perturb_xyz) * 1000
+        ik_err_mm = np.linalg.norm(data.site_xpos[tip_id] - perturbed_tip) * 1000
+        reach_tag = "OK" if perturb_reached else f"IK_FAIL(err={ik_err_mm:.1f}mm)"
         print(f"  Episode {episode_count}: perturbation applied "
-              f"(pos={perturb_dist_mm:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg)")
+              f"(pos={perturb_dist_mm:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg) [{reach_tag}]")
 
         # ============================================================
         # Phase 2: 미세 정렬 녹화
@@ -584,14 +625,42 @@ def main():
             recorder.save_async()
             episode_count += 1
             pbar.update(1)
+            if GRID_CELLS is not None:
+                grid_cell_index += 1
+                grid_retry_count = 0
         else:
-            reason = "Timeout" if not success else "Empty buffer"
-            print(f"  Episode {episode_count} discarded. Reason: {reason}")
+            fail_reason = "IK_FAIL" if not perturb_reached else "Timeout"
             recorder.discard()
+            if GRID_CELLS is not None:
+                grid_retry_count += 1
+                if grid_retry_count >= grid_max_retries:
+                    cell_center = [(cell[0]+cell[1])/2, (cell[2]+cell[3])/2, (cell[4]+cell[5])/2]
+                    grid_fail_cells.append({
+                        "center": cell_center,
+                        "reason": fail_reason,
+                    })
+                    print(f"  Cell {grid_cell_index} SKIPPED [{fail_reason}] after {grid_max_retries} retries "
+                          f"(center={cell_center[0]:.1f},{cell_center[1]:.1f},{cell_center[2]:.1f}mm)")
+                    grid_cell_index += 1
+                    grid_retry_count = 0
+                else:
+                    print(f"  Episode {episode_count} retry {grid_retry_count}/{grid_max_retries} "
+                          f"(cell {grid_cell_index}) [{fail_reason}]")
+            else:
+                print(f"  Episode {episode_count} discarded. Reason: {fail_reason}")
 
     pbar.close()
     recorder.wait_for_all()
-    print(f"\nAll collections finished! ({episode_count} episodes saved to {SAVE_DIR})")
+
+    if GRID_CELLS is not None and grid_fail_cells:
+        fail_path = pathlib.Path(SAVE_DIR) / "grid_failed_cells.json"
+        import json as _json
+        with open(fail_path, 'w') as f:
+            _json.dump(grid_fail_cells, f, indent=2)
+        print(f"\n{len(grid_fail_cells)} cells failed (saved to {fail_path})")
+        print(f"Succeeded: {episode_count}/{len(GRID_CELLS)} cells")
+    else:
+        print(f"\nAll collections finished! ({episode_count} episodes saved to {SAVE_DIR})")
 
 
 if __name__ == "__main__":
@@ -604,6 +673,8 @@ if __name__ == "__main__":
                         help="Bias perturbation direction(s). Single: 'x_neg', Combined: 'x_neg,y_neg'")
     parser.add_argument("--bias-ratio", type=float, default=0.8,
                         help="Fraction of perturbations in biased direction (default: 0.8)")
+    parser.add_argument("--grid-cells-file", type=str, default=None,
+                        help="JSON file with grid cells [[x_lo,x_hi,y_lo,y_hi,z_lo,z_hi], ...]")
     args = parser.parse_args()
 
     # Override globals from CLI args
@@ -613,5 +684,12 @@ if __name__ == "__main__":
     # Store bias config as global for use in main()
     BIAS_DIRECTION = args.bias
     BIAS_RATIO = args.bias_ratio
+
+    # Grid mode
+    if args.grid_cells_file:
+        with open(args.grid_cells_file, 'r') as f:
+            GRID_CELLS = json.load(f)
+        MAX_EPISODES = len(GRID_CELLS)
+        print(f"Grid mode: {len(GRID_CELLS)} cells loaded from {args.grid_cells_file}")
 
     main()

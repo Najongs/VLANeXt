@@ -9,3 +9,4 @@ sim_eval_step*/
 *.h5
 fine_align/
 align_eval*/
+grid_data/
