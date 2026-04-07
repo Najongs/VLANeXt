@@ -7,7 +7,7 @@ project:
 
 data:
   dataset_name: "sim_align"
-  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/collected_data_merged"
+  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true
@@ -26,7 +26,7 @@ data:
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
   cam_exterior: "tool_camera"
-  cam_wrist: "tool_camera"
+  cam_wrist: ""
   cam_top: ""
 
   augmentation:
@@ -47,7 +47,7 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3.5-2B"
+  lmm_path: "Qwen/Qwen3.5-0.8B"
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:

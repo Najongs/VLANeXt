@@ -87,9 +87,19 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
                 shard_path = os.path.join(checkpoint_path, shard)
                 state_dict.update(torch.load(shard_path, map_location="cpu"))
             print(f"Loaded {len(state_dict)} keys from {len(shard_files)} shards")
+        elif os.path.exists(os.path.join(checkpoint_path, "pytorch_model.bin")):
+            # Single-file checkpoint (small models like 0.8B)
+            single_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+            state_dict = torch.load(single_path, map_location="cpu")
+            print(f"Loaded {len(state_dict)} keys from single pytorch_model.bin")
         else:
-            raise FileNotFoundError(f"No pytorch_model.bin.index.json in {checkpoint_path}")
-        if train_config_path is None:
+            raise FileNotFoundError(f"No pytorch_model.bin.index.json or pytorch_model.bin in {checkpoint_path}")
+        # Check for config saved alongside checkpoint first
+        embedded_config = os.path.join(checkpoint_path, "train_config.yaml")
+        if os.path.exists(embedded_config):
+            train_config_path = embedded_config
+            print(f"Using embedded config: {embedded_config}")
+        elif train_config_path is None:
             train_config_path = _default_train_config_path()
         print(f"Loading config from {train_config_path}")
         train_config = OmegaConf.to_container(OmegaConf.load(train_config_path), resolve=True)

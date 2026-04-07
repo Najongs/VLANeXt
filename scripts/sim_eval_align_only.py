@@ -49,15 +49,16 @@ from scripts.sim_eval import (
 # ═══════════════════════════════════════════════════════════════════════════════
 # Fine-alignment eval config
 # ═══════════════════════════════════════════════════════════════════════════════
-TASK_INSTRUCTION = "Align the needle to the trocar opening"
+TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # Perturbation (same as data collection)
 PERTURB_POS_XY_MM = 10.0
 PERTURB_POS_Z_MM = 7.0
 PERTURB_ANGLE_DEG = 7.0
 
-# Success: needle tip within this distance of trocar entry
-ALIGN_SUCCESS_THRESHOLD_M = 0.002   # 2mm
+# Success: needle tip within distance + angle threshold
+ALIGN_SUCCESS_THRESHOLD_M = 0.003   # 3mm
+ALIGN_SUCCESS_ANGLE_DEG = 15.0      # needle-trocar axis angle < 15deg
 ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
 
 
@@ -65,12 +66,12 @@ class AlignSimEnv:
     """MuJoCo env for fine-alignment evaluation.
 
     Reset:
-      1. Pre-align needle to trocar (IK, one-time cached)
+      1. Pre-align needle to trocar (IK, cached per phantom position)
       2. Apply random perturbation
     Success: needle tip within threshold of trocar entry
     """
 
-    def __init__(self, model_xml_path: str):
+    def __init__(self, model_xml_path: str, randomize_phantom: bool = False):
         self.model = mujoco.MjModel.from_xml_path(model_xml_path)
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -83,7 +84,12 @@ class AlignSimEnv:
         self.n_motors = self.model.nu
         self.dof = self.model.nv
 
-        # Cached aligned state (computed once)
+        # Phantom randomization
+        self.randomize_phantom = randomize_phantom
+        self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
+        self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
+
+        # Cached aligned state
         self._aligned_qpos = None
         self._aligned_qvel = None
         self._goal_tip = None
@@ -92,6 +98,7 @@ class AlignSimEnv:
         self._p_depth = None
 
         self.align_hold_counter = 0
+        self.last_phantom_info = None
 
     def _run_ik_step(self, target_tip_pos, target_back_pos, speed=0.5):
         """One IK step (same as data collection)."""
@@ -134,16 +141,44 @@ class AlignSimEnv:
 
         self.data.ctrl[:n] = self.data.qpos[:n] + (dq_p1 + dq_p2 + dq_p3) * speed
 
+    def _randomize_phantom(self):
+        """Randomize phantom position and rotation (same logic as Save_dataset.py)."""
+        offset_x = np.random.uniform(-0.05, 0.05)
+        offset_y = np.random.uniform(-0.4, 0.0)
+        offset_z = 0.0
+        self.model.body_pos[self._phantom_body_id] = np.array([offset_x, offset_y, offset_z])
+
+        if offset_y >= -0.25:
+            random_angle_deg = np.random.uniform(-15, 15)
+        else:
+            random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+
+        new_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
+        self.model.body_quat[self._rotating_id] = new_quat
+        mujoco.mj_forward(self.model, self.data)
+
+        self.last_phantom_info = {
+            "phantom_x": offset_x,
+            "phantom_y": offset_y,
+            "phantom_angle_deg": random_angle_deg,
+        }
+        print(f"  Phantom: pos=({offset_x:.3f}, {offset_y:.3f}), angle={random_angle_deg:.1f}deg")
+
     def _ensure_aligned_state(self):
-        """Pre-align once and cache the result."""
-        if self._aligned_qpos is not None:
+        """Pre-align and cache. Re-runs if phantom is randomized."""
+        if self._aligned_qpos is not None and not self.randomize_phantom:
             return
 
-        print("Running initial pre-alignment (one-time)...")
+        label = "Re-aligning for new phantom..." if self._aligned_qpos is not None else "Running initial pre-alignment..."
+        print(label)
         mujoco.mj_resetData(self.model, self.data)
         home_pose = np.array([0.5, -0.35, 0.35, 0.0, 0.5, 1.0])
         self.data.qpos[:6] = home_pose
         mujoco.mj_forward(self.model, self.data)
+
+        if self.randomize_phantom:
+            self._randomize_phantom()
 
         p_entry = self.data.site_xpos[self.target_entry_id].copy()
         p_depth = self.data.site_xpos[self.target_depth_id].copy()
@@ -190,6 +225,9 @@ class AlignSimEnv:
     def reset(self, max_retries=10):
         """Reset to aligned state + random perturbation.
         Retries if IK fails to converge to the perturbed position."""
+        if self.randomize_phantom:
+            # Invalidate cache so _ensure_aligned_state re-runs
+            self._aligned_qpos = None
         self._ensure_aligned_state()
 
         for attempt in range(max_retries):
@@ -220,17 +258,31 @@ class AlignSimEnv:
             perturbed_back_dir = rot_mat_perturb @ (self._goal_back - self._goal_tip)
             perturbed_back = perturbed_tip + perturbed_back_dir
 
-            # IK to perturbed position
+            # IK to perturbed position (smooth interpolation to avoid singularity)
             converged = False
-            for _ in range(3000):
-                self._run_ik_step(perturbed_tip, perturbed_back)
+            move_speed = 0.05  # m/s
+            move_dist = np.linalg.norm(perturbed_tip - self._goal_tip)
+            move_duration = max(move_dist / move_speed, 0.1)
+            move_start_time = self.data.time
+
+            for ps in range(5000):
+                t = (self.data.time - move_start_time) / move_duration
+                alpha = smooth_step(min(t, 1.0))
+                interp_tip = (1 - alpha) * self._goal_tip + alpha * perturbed_tip
+                interp_back = (1 - alpha) * self._goal_back + alpha * perturbed_back
+
+                self._run_ik_step(interp_tip, interp_back)
                 mujoco.mj_step(self.model, self.data)
-                if np.linalg.norm(self.data.site_xpos[self.tip_id] - perturbed_tip) < 0.001:
-                    for _ in range(200):
-                        self._run_ik_step(perturbed_tip, perturbed_back)
-                        mujoco.mj_step(self.model, self.data)
-                    converged = True
-                    break
+
+                if t >= 1.0:
+                    if np.linalg.norm(self.data.site_xpos[self.tip_id] - perturbed_tip) < 0.001:
+                        for _ in range(200):
+                            self._run_ik_step(perturbed_tip, perturbed_back)
+                            mujoco.mj_step(self.model, self.data)
+                        converged = True
+                        break
+                    if ps > 4500:
+                        break
 
             # Verify: actual tip distance to trocar entry should be reasonable
             actual_dist = np.linalg.norm(self.data.site_xpos[self.tip_id] - self._p_entry) * 1000.0
@@ -308,12 +360,26 @@ class AlignSimEnv:
             mujoco.mj_step(self.model, self.data)
 
     def check_success(self):
-        """Check if needle tip is aligned to trocar entry."""
+        """Check if needle tip is aligned to trocar entry (distance + angle)."""
         tip_pos = self.data.site_xpos[self.tip_id].copy()
+        back_pos = self.data.site_xpos[self.back_id].copy()
         entry_pos = self.data.site_xpos[self.target_entry_id].copy()
+        depth_pos = self.data.site_xpos[self.target_depth_id].copy()
+
         dist = np.linalg.norm(tip_pos - entry_pos)
 
-        if dist < ALIGN_SUCCESS_THRESHOLD_M:
+        # Needle-trocar axis angle
+        needle_dir = tip_pos - back_pos
+        needle_len = np.linalg.norm(needle_dir)
+        axis_dir = depth_pos - entry_pos
+        axis_len = np.linalg.norm(axis_dir)
+        if needle_len > 1e-8 and axis_len > 1e-8:
+            cos_angle = abs(np.dot(needle_dir / needle_len, axis_dir / axis_len))
+            angle_deg = np.degrees(np.arccos(np.clip(cos_angle, 0.0, 1.0)))
+        else:
+            angle_deg = 90.0
+
+        if dist < ALIGN_SUCCESS_THRESHOLD_M and angle_deg < ALIGN_SUCCESS_ANGLE_DEG:
             self.align_hold_counter += 1
         else:
             self.align_hold_counter = 0
@@ -452,17 +518,21 @@ def run_eval(cfg):
     print(f"Logging to {log_path}")
 
     model_xml = os.path.abspath(SIM_MODEL_PATH)
-    env = AlignSimEnv(model_xml)
+    randomize_phantom = getattr(cfg, "randomize_phantom", False)
+    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom)
 
     total_successes = 0
 
     csv_path = eval_dir / "metrics_summary.csv"
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["episode", "success", "steps", "final_dist_mm",
-                         "final_lateral_mm", "final_angle_deg", "min_dist_mm",
-                         "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
-                         "perturb_angle_deg", "perturb_dist_mm", "initial_dist_mm"])
+    csv_header = ["episode", "success", "steps", "final_dist_mm",
+                   "final_lateral_mm", "final_angle_deg", "min_dist_mm",
+                   "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
+                   "perturb_angle_deg", "perturb_dist_mm", "initial_dist_mm"]
+    if randomize_phantom:
+        csv_header.extend(["phantom_x", "phantom_y", "phantom_angle_deg"])
+    csv_writer.writerow(csv_header)
 
     for ep in all_episodes:
         env.reset()
@@ -555,14 +625,18 @@ def run_eval(cfg):
         log_file.flush()
 
         pi = env.last_perturb_info
-        csv_writer.writerow([
+        row = [
             ep, int(success), ctrl_step + 1,
             f"{final_m['dist_mm']:.2f}",
             f"{final_m['lateral_mm']:.2f}", f"{final_m['angle_deg']:.2f}",
             f"{min_dist:.2f}",
             f"{pi['perturb_x_mm']:.2f}", f"{pi['perturb_y_mm']:.2f}", f"{pi['perturb_z_mm']:.2f}",
             f"{pi['perturb_angle_deg']:.2f}", f"{pi['perturb_dist_mm']:.2f}", f"{pi['initial_dist_mm']:.2f}",
-        ])
+        ]
+        if randomize_phantom and env.last_phantom_info:
+            ph = env.last_phantom_info
+            row.extend([f"{ph['phantom_x']:.4f}", f"{ph['phantom_y']:.4f}", f"{ph['phantom_angle_deg']:.1f}"])
+        csv_writer.writerow(row)
         csv_file.flush()
 
         save_episode_plot(metrics_history, ep, success, str(eval_dir))
@@ -597,6 +671,8 @@ if __name__ == "__main__":
     parser.add_argument("--train-config", type=str, default=None, help="Path to train config")
     parser.add_argument("--shard-id", type=int, default=None, help="Shard index for parallel eval (0-based)")
     parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
+    parser.add_argument("--randomize-phantom", action="store_true",
+                        help="Randomize phantom position/rotation each episode")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -609,4 +685,5 @@ if __name__ == "__main__":
     cfg.train_config_path = args.train_config
     cfg.shard_id = args.shard_id
     cfg.num_shards = args.num_shards
+    cfg.randomize_phantom = args.randomize_phantom
     run_eval(cfg)

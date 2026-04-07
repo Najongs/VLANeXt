@@ -3,6 +3,7 @@ __pycache__
 checkpoints/
 New_1/
 New2/
+Evals
 output*/
 *.mp4
 sim_eval_step*/

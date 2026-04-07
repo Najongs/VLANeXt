@@ -86,7 +86,7 @@ ALIGN_THRESHOLD_M = 0.002   # needle tip - trocar entry 거리 (m)
 ALIGN_HOLD_STEPS = 20       # threshold 이내 연속 유지 횟수
 
 # --- Task Instruction ---
-TASK_INSTRUCTION = "Align the needle to the trocar opening"
+TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # --- Holding (정렬 완료 후 자세 유지 녹화) ---
 HOLD_RECORD_STEPS = 5           # 정렬 완료 후 녹화 control steps
