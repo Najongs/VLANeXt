@@ -47,7 +47,7 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3.5-0.8B"
+  lmm_path: "Qwen/Qwen3.5-2B"
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:

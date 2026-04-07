@@ -27,7 +27,7 @@ Usage:
         --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/Sim/dataset/fine_align/bias_xn_yp_zn/collected_data_merged \
+    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
     --max-range 100 \
