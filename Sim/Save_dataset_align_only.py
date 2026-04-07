@@ -237,7 +237,12 @@ def smooth_step(t):
     return t * t * (3 - 2 * t)
 
 
+RANDOM_SEED = None
+
 def main():
+    if RANDOM_SEED is not None:
+        np.random.seed(RANDOM_SEED)
+        print(f"Random seed: {RANDOM_SEED}")
     print(f"Loading Model: {MODEL_PATH}")
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
@@ -675,6 +680,8 @@ if __name__ == "__main__":
                         help="Fraction of perturbations in biased direction (default: 0.8)")
     parser.add_argument("--grid-cells-file", type=str, default=None,
                         help="JSON file with grid cells [[x_lo,x_hi,y_lo,y_hi,z_lo,z_hi], ...]")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducible perturbations")
     args = parser.parse_args()
 
     # Override globals from CLI args
@@ -684,6 +691,9 @@ if __name__ == "__main__":
     # Store bias config as global for use in main()
     BIAS_DIRECTION = args.bias
     BIAS_RATIO = args.bias_ratio
+
+    # Seed
+    RANDOM_SEED = args.seed
 
     # Grid mode
     if args.grid_cells_file:

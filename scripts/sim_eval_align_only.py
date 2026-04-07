@@ -567,7 +567,10 @@ def run_eval(cfg):
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)
 
             ee_pose = env.get_ee_pose()
-            proprio = np.concatenate([ee_pose, [0.0]])  # gripper always open
+            sensor_dist = env.get_sensor_dist()
+            # 20mm 클리핑: 20mm 이내만 유효, 그 이상 또는 미감지(-1)는 20으로 클리핑
+            sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
+            proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist
             state_history.append(proprio)
 
             observation = {

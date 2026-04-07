@@ -54,6 +54,8 @@ def main():
                         help="Grid bins per XY axis (default: 8)")
     parser.add_argument("--grid-bins-z", type=int, default=6,
                         help="Grid bins for Z axis (default: 6)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Base random seed (worker i gets seed + i)")
     args = parser.parse_args()
 
     module_name = SCRIPT_MAP[args.script]
@@ -142,6 +144,9 @@ def main():
         worker_dir = base_path / f"worker_{i}"
         worker_dir.mkdir(parents=True, exist_ok=True)
 
+        # Seed line for worker
+        seed_line = f"{module_name}.RANDOM_SEED = {args.seed + i}" if args.seed is not None else ""
+
         # Grid mode: 워커별 셀 파일 경로로 스크립트 생성
         if i in grid_worker_files:
             grid_json = grid_worker_files[i]
@@ -157,6 +162,7 @@ import {module_name}
 with open(r'{grid_json}', 'r') as _f:
     {module_name}.GRID_CELLS = json.load(_f)
 {module_name}.MAX_EPISODES = len({module_name}.GRID_CELLS)
+{seed_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {n_cells} grid cells -> {worker_dir}")
@@ -175,6 +181,7 @@ import {module_name}
 {module_name}.SAVE_DIR = r'{worker_dir}'
 {module_name}.MAX_EPISODES = {args.episodes}
 {bias_lines}
+{seed_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {args.episodes} episodes -> {worker_dir}")

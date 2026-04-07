@@ -14,20 +14,20 @@ data:
 
   history_len: 8
   future_len: 8
-  buffer_size: 1000
+  buffer_size: 4000
 
-  batch_size: 51
-  max_steps: 20000
+  batch_size: 99
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "single"
+  view_mode: "multi"
 
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
-  cam_exterior: "tool_camera"
-  cam_wrist: ""
-  cam_top: ""
+  cam_exterior: "side_camera"
+  cam_wrist: "tool_camera"
+  cam_top: "top_camera"
 
   augmentation:
     enabled: true
@@ -57,7 +57,7 @@ model:
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
   action_dim: 7
-  proprio_dim: 7
+  proprio_dim: 8
 
   loss_type: "diffusion"
   num_train_timesteps: 1000

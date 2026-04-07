@@ -5,10 +5,10 @@
 #
 # Examples:
 #   bash Run_Eval_Parallel.sh                                    # 기본 (고정 phantom)
-#   bash Run_Eval_Parallel.sh /data/public/NAS/VLANeXt/output_dir_align_0407                   # 특정 체크포인트
-#   bash Run_Eval_Parallel.sh /data/public/NAS/VLANeXt/output_dir_align_0.8B --randomize-phantom # 랜덤 phantom
+#   bash Run_Eval_Parallel.sh /data/public/NAS/VLANeXt/output_dir_align_0408                   # 특정 체크포인트
+#   bash Run_Eval_Parallel.sh /data/public/NAS/VLANeXt/output_dir_align_0408 --randomize-phantom # 랜덤 phantom
 
-CHECKPOINT=${1:-/data/public/NAS/VLANeXt/output_dir_align_0407}
+CHECKPOINT=${1:-/data/public/NAS/VLANeXt/output_dir_align_0408}
 CONFIG=config/sim_eval_align_config.yaml
 TRAIN_CONFIG=config/sim_train_align_config.yaml
 NUM_SHARDS=3

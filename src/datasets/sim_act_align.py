@@ -101,8 +101,15 @@ class SimActAlign(IterableDataset):
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) ---
+            # --- Proprioception: ee_pose (N, 7) + sensor_dist (N, 1) → (N, 8) ---
             proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
+            if "sensor_dist" in f["observations"]:
+                sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
+                if sensor_dist.ndim == 1:
+                    sensor_dist = sensor_dist[:, None]  # (N, 1)
+                # 20mm 클리핑: 20mm 이내만 유효, 그 이상 또는 미감지(-1)는 20으로 클리핑
+                sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
+                proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None
