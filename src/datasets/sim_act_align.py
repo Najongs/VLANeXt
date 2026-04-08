@@ -17,8 +17,8 @@ from torch.utils.data import IterableDataset
 #action_min_sim_align = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
 #action_max_sim_align = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, -1.0]
 
-action_min_sim_align = [-0.5957266092300415, -0.6034851670265198, -0.5240848660469055, -0.002589409239590168, -0.0008707013912498951, -0.003319802926853299, -1.0]
-action_max_sim_align = [0.5957266092300415, 0.6034851670265198, 0.5240848660469055, 0.002589409239590168, 0.0008707013912498951, 0.003319802926853299, -1.0]
+action_min_sim_align = [-0.38991427421569824, -0.05123097822070122, -0.37570905685424805, -0.0019127572886645794, -0.0008466076687909663, 7.329344953177497e-05, -1.0]
+action_max_sim_align = [0.2393515408039093, 0.5194841623306274, 0.27770981192588806, 0.003510331502184272, 0.0007455003215000033, 0.006129839923232794, -1.0]
 
 # Must match Save_dataset_align_only.py and sim_eval_align_only.py
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
@@ -143,13 +143,11 @@ class SimActAlign(IterableDataset):
             wrist_np = None
             top_np = None
             if self.view_mode == "multi":
-                if self.cam_wrist in img_grp:
+                if self.cam_wrist and self.cam_wrist in img_grp:
                     wrist_np = np.stack(
                         [self._decode_jpeg(img_grp[self.cam_wrist][i]) for i in range(traj_len)],
                         axis=0,
                     )
-                else:
-                    wrist_np = images_np.copy()
                 if self.cam_top and self.cam_top in img_grp:
                     top_np = np.stack(
                         [self._decode_jpeg(img_grp[self.cam_top][i]) for i in range(traj_len)],
@@ -272,13 +270,15 @@ class SimActAlign(IterableDataset):
                     if self.input_modality == "video":
                         sample["video"] = images_np[hist_indices_obs]
                         if self.view_mode == "multi":
-                            sample["video_wrist"] = wrist_np[hist_indices_obs] if wrist_np is not None else images_np[hist_indices_obs]
+                            if wrist_np is not None:
+                                sample["video_wrist"] = wrist_np[hist_indices_obs]
                             if top_np is not None:
                                 sample["video_top"] = top_np[hist_indices_obs]
                     elif self.input_modality == "image":
                         sample["image"] = images_np[t].copy()
                         if self.view_mode == "multi":
-                            sample["image_wrist"] = wrist_np[t].copy() if wrist_np is not None else images_np[t].copy()
+                            if wrist_np is not None:
+                                sample["image_wrist"] = wrist_np[t].copy()
                             if top_np is not None:
                                 sample["image_top"] = top_np[t].copy()
                     else:

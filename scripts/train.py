@@ -214,13 +214,15 @@ class DataCollatorForVLANeXt:
                 im0 = self._augment_frames_uint8(sample["image"])
                 num_imgs = 1
                 if self.view_mode == "multi":
-                    im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
-                    images.extend([im0, im1])
-                    num_imgs = 2
+                    images.append(im0)
+                    if "image_wrist" in sample:
+                        im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
+                        images.append(im1)
+                        num_imgs += 1
                     if "image_top" in sample:
                         im2 = self._augment_frames_uint8(sample["image_top"])
                         images.append(im2)
-                        num_imgs = 3
+                        num_imgs += 1
                 else:
                     images.append(im0)
 
@@ -229,8 +231,10 @@ class DataCollatorForVLANeXt:
             elif is_llama:
                 im0 = self._augment_frames_uint8(sample["image"])
                 if self.view_mode == "multi":
-                    im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
-                    images.extend([im0, im1])
+                    images.append(im0)
+                    if "image_wrist" in sample:
+                        im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
+                        images.append(im1)
                     if "image_top" in sample:
                         im2 = self._augment_frames_uint8(sample["image_top"])
                         images.append(im2)
@@ -244,9 +248,12 @@ class DataCollatorForVLANeXt:
                 if self.input_modality == "video":
                     v0 = self._augment_frames_uint8(sample["video"])
                     if self.view_mode == "multi":
-                        v1, wrist_crop_params = self._augment_frames_uint8(sample["video_wrist"], return_crop_params=has_spatial)
-                        content.extend([{"type": "video", "video": v0}, {"type": "video", "video": v1}])
-                        videos.extend([v0, v1])
+                        content.append({"type": "video", "video": v0})
+                        videos.append(v0)
+                        if "video_wrist" in sample:
+                            v1, wrist_crop_params = self._augment_frames_uint8(sample["video_wrist"], return_crop_params=has_spatial)
+                            content.append({"type": "video", "video": v1})
+                            videos.append(v1)
                         if "video_top" in sample:
                             v2 = self._augment_frames_uint8(sample["video_top"])
                             content.append({"type": "video", "video": v2})
@@ -258,9 +265,12 @@ class DataCollatorForVLANeXt:
                 elif self.input_modality == "image":
                     im0 = self._augment_frames_uint8(sample["image"])
                     if self.view_mode == "multi":
-                        im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
-                        content.extend([{"type": "image", "image": im0}, {"type": "image", "image": im1}])
-                        images.extend([im0, im1])
+                        content.append({"type": "image", "image": im0})
+                        images.append(im0)
+                        if "image_wrist" in sample:
+                            im1, wrist_crop_params = self._augment_frames_uint8(sample["image_wrist"], return_crop_params=has_spatial)
+                            content.append({"type": "image", "image": im1})
+                            images.append(im1)
                         if "image_top" in sample:
                             im2 = self._augment_frames_uint8(sample["image_top"])
                             content.append({"type": "image", "image": im2})

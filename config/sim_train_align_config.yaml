@@ -1,5 +1,5 @@
 project:
-  name: "VLANeXt_Qwen3.5_fine_align"
+  name: "VLANeXt_Qwen3.5_fine_approach"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
@@ -7,27 +7,27 @@ project:
 
 data:
   dataset_name: "sim_align"
-  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
+  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/approach_test/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true
 
   history_len: 8
   future_len: 8
-  buffer_size: 4000
+  buffer_size: 2000
 
   batch_size: 100
   max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "single"
+  view_mode: "multi"
 
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
   cam_exterior: "tool_camera"
   cam_wrist: ""
-  cam_top: ""
+  cam_top: "top_camera"
 
   augmentation:
     enabled: true
@@ -112,7 +112,7 @@ train:
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 250
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true
