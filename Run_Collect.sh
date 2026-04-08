@@ -4,13 +4,14 @@
 # =============================================================
 #
 # 사용법:
-#   bash Run_Collect.sh [mode] [workers] [episodes_per_worker]
+#   bash Run_Collect.sh [mode] [workers] [episodes_per_worker] [4th] [randomize_phantom]
 #
 # 인자:
 #   mode      수집 모드 (기본: uniform)
 #   workers   병렬 워커 수 (기본: 10)
 #   episodes  워커당 에피소드 수 (기본: 1000)
 #             총 수집량 = workers x episodes
+#   5th arg   팬텀 랜덤화 (true/false, 기본: false)
 #
 # 모드 설명:
 #   uniform     기본 수집. 모든 방향으로 균등한 random perturbation.
@@ -48,19 +49,59 @@
 #   하위 폴더의 모든 .h5를 recursive로 로드함.
 #
 # 예시:
-#   bash Run_Collect.sh uniform 20 1000      # 균등 10,000개
-#   bash Run_Collect.sh bias_x_neg 10 500    # X- 편향 5,000개
-#   bash Run_Collect.sh bias_all 10 500      # X-,Y- 각 5,000개씩
-#   bash Run_Collect.sh grid 10 8 6         # 8x8x6=384 그리드 에피소드
-#   bash Run_Collect.sh grid 10 12 8        # 12x12x8=1152 촘촘한 그리드
-#   bash Run_Collect.sh full 5 500           # full pipeline 2,500개
+#   bash Run_Collect.sh uniform 20 1000           # 균등 10,000개
+#   bash Run_Collect.sh uniform 10 1000 _ true    # 균등 + 팬텀 랜덤
+#   bash Run_Collect.sh bias_x_neg 10 500         # X- 편향 5,000개
+#   bash Run_Collect.sh bias_all 10 500            # X-,Y- 각 5,000개씩
+#   bash Run_Collect.sh grid 10 8 6               # 8x8x6=384 그리드 에피소드
+#   bash Run_Collect.sh grid 10 12 8              # 12x12x8=1152 촘촘한 그리드
+#   bash Run_Collect.sh multi_phantom 10 2000       # Y축 5위치 × 10w × 2000ep
+#   bash Run_Collect.sh approach 10 2000           # approach+align (no insertion), Y축 5위치
+#   bash Run_Collect.sh full 5 500                 # full pipeline 2,500개
 #
 # =============================================================
+
+# Phase 1: Micro-Alignment (가까이에서 정렬)
+
+# 고정 팬텀 (현재 완료)
+# bash Run_Collect.sh uniform 10 1000          # 10,000개, 팬텀 고정
+# - 스크립트: Save_dataset_align_only.py
+# - 가까운 perturbation(±30mm XY, ±20mm Z)에서 trocar 정렬
+
+# Phase 2: Spatial Generalization (랜덤 팬텀 정렬)
+
+# Y축 5위치에서 micro-alignment
+# bash Run_Collect.sh multi_phantom 10 2000    # 5위치 × 20,000 = 100,000개
+# - 스크립트: Save_dataset_align_only.py + --phantom-pos
+# - 팬텀 위치별: Y=0.0, -0.1, -0.2, -0.3, -0.4 (X=0 고정)
+# - 각 위치에서 가까운 perturbation → 정렬 녹화
+
+# Phase 3: Out-of-view Approach (먼 거리 접근)
+
+# Y축 5위치에서 approach+align (insertion 제외)
+# bash Run_Collect.sh approach 10 2000         # 5위치 × 20,000 = 100,000개
+# - 스크립트: Save_dataset.py + --phantom-pos + --no-insertion
+# - 먼 거리(home pose)에서 trocar까지 접근 + 정렬, 삽입 직전에 종료
+
+# Phase 4: Insertion (삽입)
+
+# Y축 5위치에서 full pipeline
+# bash Run_Collect.sh full 10 2000             # 5위치 × 20,000 = 100,000개
+# - 스크립트: Save_dataset.py + --phantom-pos
+# - approach + align + insert 전체 trajectory
+
 
 MODE=${1:-uniform}
 WORKERS=${2:-10}
 EPISODES=${3:-1000}   # grid 모드에서는 3번째=bins_xy, 4번째=bins_z로 사용
-BASE=/data/public/NAS/VLANeXt/dataset/fine_align
+RANDOMIZE_PHANTOM=${5:-false}  # true로 설정하면 팬텀 위치 랜덤화
+BASE=/data/public/NAS/VLANeXt/dataset/fine_align_Random
+
+# Phantom randomization flag
+PHANTOM_FLAG=""
+if [ "$RANDOMIZE_PHANTOM" = "true" ]; then
+    PHANTOM_FLAG="--randomize-phantom-pos"
+fi
 
 if [ "$MODE" = "grid" ]; then
     BINS_XY=${3:-8}
@@ -84,21 +125,21 @@ case $MODE in
     uniform)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
-            --base-dir ${BASE}/uniform_new
+            --base-dir ${BASE}/uniform_new $PHANTOM_FLAG
         ;;
 
     bias_x_neg)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_x_neg \
-            --bias x_neg
+            --bias x_neg $PHANTOM_FLAG
         ;;
 
     bias_y_neg)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_y_neg \
-            --bias y_neg
+            --bias y_neg $PHANTOM_FLAG
         ;;
 
     bias_all)
@@ -107,27 +148,69 @@ case $MODE in
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_x_neg \
-            --bias x_neg
+            --bias x_neg $PHANTOM_FLAG
 
         echo ""
         echo "=== [2/2] Y negative bias ==="
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_y_neg \
-            --bias y_neg
+            --bias y_neg $PHANTOM_FLAG
         ;;
 
     grid)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS \
             --base-dir ${BASE}/grid \
-            --grid --grid-bins-xy $BINS_XY --grid-bins-z $BINS_Z
+            --grid --grid-bins-xy $BINS_XY --grid-bins-z $BINS_Z $PHANTOM_FLAG
+        ;;
+
+    multi_phantom)
+        # Y축 5개 고정 위치 (X=0)에서 순차 수집
+        POSITIONS=("0.0 0.0" "0.0 -0.1" "0.0 -0.2" "0.0 -0.3" "0.0 -0.4")
+        LABELS=("y000" "y010" "y020" "y030" "y040")
+        for idx in "${!POSITIONS[@]}"; do
+            POS=(${POSITIONS[$idx]})
+            LABEL=${LABELS[$idx]}
+            echo ""
+            echo "=== [$((idx+1))/${#POSITIONS[@]}] Phantom pos=(${POS[0]}, ${POS[1]}) ==="
+            python Sim/run_parallel.py \
+                --script align --workers $WORKERS --episodes $EPISODES \
+                --base-dir ${BASE}/phantom_${LABEL} \
+                --phantom-pos ${POS[0]} ${POS[1]}
+        done
+        ;;
+
+    approach)
+        # Y축 5개 고정 위치에서 approach+align만 수집 (insertion 제외)
+        POSITIONS=("0.0 0.0" "0.0 -0.1" "0.0 -0.2" "0.0 -0.3" "0.0 -0.4")
+        LABELS=("y000" "y010" "y020" "y030" "y040")
+        for idx in "${!POSITIONS[@]}"; do
+            POS=(${POSITIONS[$idx]})
+            LABEL=${LABELS[$idx]}
+            echo ""
+            echo "=== [$((idx+1))/${#POSITIONS[@]}] Approach: Phantom pos=(${POS[0]}, ${POS[1]}) ==="
+            python Sim/run_parallel.py \
+                --script full --workers $WORKERS --episodes $EPISODES \
+                --base-dir ${BASE}/approach_${LABEL} \
+                --phantom-pos ${POS[0]} ${POS[1]} --no-insertion
+        done
         ;;
 
     full)
-        python Sim/run_parallel.py \
-            --script full --workers $WORKERS --episodes $EPISODES \
-            --base-dir ${BASE}/full_new
+        # Y축 5개 고정 위치에서 full pipeline (approach+align+insert)
+        POSITIONS=("0.0 0.0" "0.0 -0.1" "0.0 -0.2" "0.0 -0.3" "0.0 -0.4")
+        LABELS=("y000" "y010" "y020" "y030" "y040")
+        for idx in "${!POSITIONS[@]}"; do
+            POS=(${POSITIONS[$idx]})
+            LABEL=${LABELS[$idx]}
+            echo ""
+            echo "=== [$((idx+1))/${#POSITIONS[@]}] Full: Phantom pos=(${POS[0]}, ${POS[1]}) ==="
+            python Sim/run_parallel.py \
+                --script full --workers $WORKERS --episodes $EPISODES \
+                --base-dir ${BASE}/full_${LABEL} \
+                --phantom-pos ${POS[0]} ${POS[1]}
+        done
         ;;
 
     *)
@@ -139,6 +222,8 @@ case $MODE in
         echo "  bias_y_neg  - Y 음수 방향 편향"
         echo "  bias_all    - X-, Y- 순차 수집"
         echo "  grid        - 그리드 기반 균등 수집 (args: workers bins_xy bins_z)"
+        echo "  multi_phantom - Y축 5개 고정 위치 순차 수집 (X=0, Y=0~-0.4)"
+        echo "  approach    - approach+align 수집, insertion 제외 (Y축 5위치)"
         echo "  full        - 전체 파이프라인 (삽입 포함)"
         exit 1
         ;;

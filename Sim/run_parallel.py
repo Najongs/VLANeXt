@@ -54,6 +54,13 @@ def main():
                         help="Grid bins per XY axis (default: 8)")
     parser.add_argument("--grid-bins-z", type=int, default=6,
                         help="Grid bins for Z axis (default: 6)")
+    parser.add_argument("--randomize-phantom-pos", action="store_true", default=False,
+                        help="Enable phantom position randomization per episode")
+    parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
+                        metavar=("X", "Y"),
+                        help="Fixed phantom position (x, y) for all workers")
+    parser.add_argument("--no-insertion", action="store_true", default=False,
+                        help="(full only) Stop after alignment, skip insertion")
     parser.add_argument("--seed", type=int, default=None,
                         help="Base random seed (worker i gets seed + i)")
     args = parser.parse_args()
@@ -138,6 +145,16 @@ def main():
 {module_name}.BIAS_RATIO = {args.bias_ratio}
 """
 
+    # Phantom randomization / fixed position line
+    phantom_line = ""
+    if args.phantom_pos is not None:
+        phantom_line = f"{module_name}.PHANTOM_POS = ({args.phantom_pos[0]}, {args.phantom_pos[1]})"
+    elif args.randomize_phantom_pos:
+        phantom_line = f"{module_name}.RANDOMIZE_PHANTOM = True"
+
+    # No-insertion line (full script only)
+    no_insertion_line = f"{module_name}.NO_INSERTION = True" if args.no_insertion else ""
+
     # Launch workers
     processes = []
     for i in range(args.workers):
@@ -163,6 +180,8 @@ with open(r'{grid_json}', 'r') as _f:
     {module_name}.GRID_CELLS = json.load(_f)
 {module_name}.MAX_EPISODES = len({module_name}.GRID_CELLS)
 {seed_line}
+{phantom_line}
+{no_insertion_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {n_cells} grid cells -> {worker_dir}")
@@ -182,6 +201,8 @@ import {module_name}
 {module_name}.MAX_EPISODES = {args.episodes}
 {bias_lines}
 {seed_line}
+{phantom_line}
+{no_insertion_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {args.episodes} episodes -> {worker_dir}")

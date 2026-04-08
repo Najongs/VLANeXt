@@ -14,20 +14,20 @@ data:
 
   history_len: 8
   future_len: 8
-  buffer_size: 4000
+  buffer_size: 2000
 
-  batch_size: 99
+  batch_size: 100
   max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "multi"
+  view_mode: "single"
 
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
-  cam_exterior: "side_camera"
-  cam_wrist: "tool_camera"
-  cam_top: "top_camera"
+  cam_exterior: "tool_camera"
+  cam_wrist: ""
+  cam_top: ""
 
   augmentation:
     enabled: true

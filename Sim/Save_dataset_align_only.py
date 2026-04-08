@@ -89,7 +89,7 @@ ALIGN_HOLD_STEPS = 20       # threshold 이내 연속 유지 횟수
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # --- Holding (정렬 완료 후 자세 유지 녹화) ---
-HOLD_RECORD_STEPS = 5           # 정렬 완료 후 녹화 control steps
+HOLD_RECORD_STEPS = 10           # 정렬 완료 후 녹화 control steps
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
@@ -237,7 +237,30 @@ def smooth_step(t):
     return t * t * (3 - 2 * t)
 
 
+def randomize_phantom_pos(model, data, phantom_id, rot_id):
+    """팬텀 위치/회전 랜덤화 (Save_dataset.py와 동일 로직)"""
+    offset_x = np.random.uniform(-0.1, 0.1)
+    offset_y = np.random.uniform(-0.4, 0.0)
+    offset_z = 0.0
+
+    model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
+
+    if offset_y >= -0.25:
+        random_angle_deg = np.random.uniform(-15, 15)
+    else:
+        random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+
+    new_quat = np.zeros(4)
+    mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
+    model.body_quat[rot_id] = new_quat
+    print(f">>> Randomize: Pos=({offset_x:.2f}, {offset_y:.2f}), Angle={random_angle_deg:.1f} deg")
+    mujoco.mj_forward(model, data)
+    return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32), np.float32(random_angle_deg)
+
+
 RANDOM_SEED = None
+RANDOMIZE_PHANTOM = False
+PHANTOM_POS = None  # (x, y) 고정 위치, e.g. (0.0, -0.2)
 
 def main():
     if RANDOM_SEED is not None:
@@ -255,6 +278,10 @@ def main():
     link6_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "6_Link")
     n_motors = model.nu
     dof = model.nv
+
+    # Phantom body IDs (for randomization)
+    phantom_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
+    rotating_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
 
     recorder = SimRecorder(SAVE_DIR)
 
@@ -402,6 +429,82 @@ def main():
         data.qvel[:n_motors] = aligned_qvel
         mujoco.mj_forward(model, data)
 
+        # --- 팬텀 랜덤화: 매 에피소드마다 위치 변경 + 재정렬 ---
+        phantom_offset = np.zeros(3, dtype=np.float32)
+        phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        phantom_angle_deg = np.float32(0.0)
+        if PHANTOM_POS is not None and phantom_body_id >= 0:
+            # 고정 위치에 팬텀 배치
+            px, py = PHANTOM_POS
+            model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
+            # 회전: Y 위치에 따라 적절한 각도
+            if py >= -0.25:
+                random_angle_deg_val = np.random.uniform(-15, 15)
+            else:
+                random_angle_deg_val = np.random.uniform(-15 - 90, 15 - 90)
+            new_quat = np.zeros(4)
+            mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg_val)], "xyz")
+            model.body_quat[rotating_id] = new_quat
+            mujoco.mj_forward(model, data)
+            phantom_offset = np.array([px, py, 0.0], dtype=np.float32)
+            phantom_quat = new_quat.astype(np.float32)
+            phantom_angle_deg = np.float32(random_angle_deg_val)
+            print(f">>> Fixed phantom: Pos=({px:.2f}, {py:.2f}), Angle={random_angle_deg_val:.1f} deg")
+        elif RANDOMIZE_PHANTOM and phantom_body_id >= 0:
+            phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(
+                model, data, phantom_body_id, rotating_id)
+
+        # 팬텀이 이동된 경우 재정렬 필요
+        need_realign = (PHANTOM_POS is not None or RANDOMIZE_PHANTOM) and phantom_body_id >= 0
+        if need_realign:
+            # 팬텀 이동 후 재정렬 (trocar 위치가 바뀌었으므로)
+            p_entry = data.site_xpos[target_entry_id].copy()
+            p_depth = data.site_xpos[target_depth_id].copy()
+            curr_tip = data.site_xpos[tip_id].copy()
+            curr_back = data.site_xpos[back_id].copy()
+            needle_len_local = np.linalg.norm(curr_tip - curr_back)
+            axis_dir_local = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
+            re_goal_tip = p_entry - (axis_dir_local * 0.0001)
+            re_goal_back = p_entry - (axis_dir_local * (0.0001 + needle_len_local))
+
+            start_tip = data.site_xpos[tip_id].copy()
+            start_back = data.site_xpos[back_id].copy()
+            re_dist = np.linalg.norm(re_goal_tip - start_tip)
+            re_duration = max(re_dist / ALIGN_SPEED, 0.1)
+            re_start_time = data.time
+            re_timer = 0
+
+            for _ in range(50000):
+                t_re = (data.time - re_start_time) / re_duration
+                alpha_re = smooth_step(min(t_re, 1.0))
+                target_tip_re = (1 - alpha_re) * start_tip + alpha_re * re_goal_tip
+                target_back_re = (1 - alpha_re) * start_back + alpha_re * re_goal_back
+                run_ik_step(target_tip_re, target_back_re)
+                mujoco.mj_step(model, data)
+
+                if t_re >= 1.0:
+                    if np.linalg.norm(data.site_xpos[tip_id] - re_goal_tip) < ALIGN_THRESHOLD_M:
+                        re_timer += 1
+                    else:
+                        re_timer = 0
+                    if re_timer > ALIGN_HOLD_STEPS:
+                        break
+
+                if data.time - re_start_time > 50.0:
+                    print(f"Re-alignment failed for phantom offset={phantom_offset}, skipping...")
+                    break
+
+            # 재정렬 후 상태를 이번 에피소드 기준으로 갱신
+            aligned_qpos = data.qpos[:n_motors].copy()
+            aligned_qvel = data.qvel[:n_motors].copy()
+
+            # trocar 위치도 갱신
+            p_entry = data.site_xpos[target_entry_id].copy()
+            p_depth = data.site_xpos[target_depth_id].copy()
+            axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
+            goal_tip = p_entry - (axis_dir * 0.0001)
+            goal_back = p_entry - (axis_dir * (0.0001 + needle_len))
+
         # ============================================================
         # Phase 1: Perturbation 적용 (녹화 X)
         # ============================================================
@@ -488,13 +591,18 @@ def main():
         # Phase 2: 미세 정렬 녹화
         # ============================================================
         last_ee_pose = get_ee_pose_6d_scaled()
-        recorder.start({
+        episode_meta = {
             "aligned_qpos": np.rad2deg(aligned_qpos).astype(np.float32),
             "perturb_xyz_mm": (perturb_xyz * 1000).astype(np.float32),
             "perturb_angle_deg": np.array(np.rad2deg(perturb_angle_rad), dtype=np.float32),
             "target_entry_world": p_entry.astype(np.float32),
             "target_depth_world": p_depth.astype(np.float32),
-        })
+        }
+        if RANDOMIZE_PHANTOM:
+            episode_meta["phantom_offset"] = phantom_offset
+            episode_meta["phantom_quat"] = phantom_quat
+            episode_meta["phantom_angle_deg"] = phantom_angle_deg
+        recorder.start(episode_meta)
 
         record_start_time = data.time
         step_count = 0
@@ -682,6 +790,15 @@ if __name__ == "__main__":
                         help="JSON file with grid cells [[x_lo,x_hi,y_lo,y_hi,z_lo,z_hi], ...]")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducible perturbations")
+    parser.add_argument("--randomize-phantom-pos", dest="randomize_phantom_pos",
+                        action="store_true", default=False,
+                        help="Enable phantom position randomization per episode")
+    parser.add_argument("--no-randomize-phantom-pos", dest="randomize_phantom_pos",
+                        action="store_false",
+                        help="Disable phantom position randomization (default)")
+    parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
+                        metavar=("X", "Y"),
+                        help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.2")
     args = parser.parse_args()
 
     # Override globals from CLI args
@@ -694,6 +811,11 @@ if __name__ == "__main__":
 
     # Seed
     RANDOM_SEED = args.seed
+
+    # Phantom randomization / fixed position
+    RANDOMIZE_PHANTOM = args.randomize_phantom_pos
+    if args.phantom_pos is not None:
+        PHANTOM_POS = tuple(args.phantom_pos)
 
     # Grid mode
     if args.grid_cells_file:

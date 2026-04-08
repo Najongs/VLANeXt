@@ -215,6 +215,9 @@ def randomize_phantom_pos(model, data, phantom_id, rot_id):
     return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32), np.float32(random_angle_deg)
 
 # === Args ===
+NO_INSERTION = False
+PHANTOM_POS = None  # (x, y) 고정 위치
+
 def _parse_args():
     parser = argparse.ArgumentParser(description="Record simulation dataset.")
     parser.add_argument(
@@ -230,12 +233,28 @@ def _parse_args():
         action="store_false",
         help="Disable phantom position randomization.",
     )
+    parser.add_argument(
+        "--no-insertion",
+        action="store_true",
+        default=False,
+        help="Stop after alignment (no insertion phase).",
+    )
+    parser.add_argument(
+        "--phantom-pos", type=float, nargs=2, default=None,
+        metavar=("X", "Y"),
+        help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.2",
+    )
     return parser.parse_args()
 
 # === Main Script ===
 def main():
+    global NO_INSERTION, PHANTOM_POS
     args = _parse_args()
-    print(f"🔄 Loading Model: {MODEL_PATH}")
+    if args.no_insertion:
+        NO_INSERTION = True
+    if args.phantom_pos is not None:
+        PHANTOM_POS = tuple(args.phantom_pos)
+    print(f"Loading Model: {MODEL_PATH}")
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -286,7 +305,21 @@ def main():
         phantom_offset = np.zeros(3, dtype=np.float32)
         phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         phantom_angle_deg = np.float32(0.0)
-        if args.randomize_phantom_pos:
+        if PHANTOM_POS is not None and phantom_body_id >= 0:
+            px, py = PHANTOM_POS
+            model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
+            if py >= -0.25:
+                rand_angle = np.random.uniform(-15, 15)
+            else:
+                rand_angle = np.random.uniform(-15 - 90, 15 - 90)
+            new_quat = np.zeros(4)
+            mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(rand_angle)], "xyz")
+            model.body_quat[rotating_id] = new_quat
+            mujoco.mj_forward(model, data)
+            phantom_offset = np.array([px, py, 0.0], dtype=np.float32)
+            phantom_quat = new_quat.astype(np.float32)
+            phantom_angle_deg = np.float32(rand_angle)
+        elif args.randomize_phantom_pos:
             phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(model, data, phantom_body_id, rotating_id)
         mujoco.mj_forward(model, data)
         
@@ -327,7 +360,11 @@ def main():
                 if progress >= 1.0:
                     if np.linalg.norm(curr_tip - goal_tip) < 0.002: align_timer += 1
                     else: align_timer = 0
-                    if align_timer > 20: task_state, insertion_started = 2, False
+                    if align_timer > 20:
+                        if NO_INSERTION:
+                            success = True; break
+                        else:
+                            task_state, insertion_started = 2, False
             elif task_state == 2:  # State 2: Insert + Hold (삽입 + 대기 통합)
                 if not insertion_started:
                     phase3_base_tip, insertion_started, accumulated_depth, hold_start_time = curr_tip.copy(), True, 0.0, None
