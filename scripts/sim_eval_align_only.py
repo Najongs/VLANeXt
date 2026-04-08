@@ -59,7 +59,7 @@ PERTURB_ANGLE_DEG = 7.0
 # Success: needle tip within distance + angle threshold
 ALIGN_SUCCESS_THRESHOLD_M = 0.003   # 3mm
 ALIGN_SUCCESS_ANGLE_DEG = 15.0      # needle-trocar axis angle < 15deg
-ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
+ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
 
 
 class AlignSimEnv:
@@ -568,9 +568,10 @@ def run_eval(cfg):
 
             ee_pose = env.get_ee_pose()
             sensor_dist = env.get_sensor_dist()
-            # 20mm 클리핑: 20mm 이내만 유효, 그 이상 또는 미감지(-1)는 20으로 클리핑
+            # 20mm 클리핑 + 정규화: [0, 20] → [0, 1]
             sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
-            proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist
+            sensor_dist_normalized = sensor_dist_clipped / 20.0
+            proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_normalized]])  # (8,): ee_pose + gripper + sensor_dist(norm)
             state_history.append(proprio)
 
             observation = {

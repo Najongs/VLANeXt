@@ -9,10 +9,10 @@
 #   bash Run_Eval_Parallel.sh /data/public/NAS/VLANeXt/output_dir_align_0408 --randomize-phantom # 랜덤 phantom
 
 
-CHECKPOINT=${1:-/data/public/NAS/VLANeXt/output_dir_align_0408}
+CHECKPOINT=${1:-/data/public/NAS/VLANeXt/output_dir_align_0409}
 CONFIG=config/sim_eval_align_config.yaml
 TRAIN_CONFIG=config/sim_train_align_config.yaml
-NUM_SHARDS=3
+NUM_SHARDS=2
 
 # Parse extra flags (--randomize-phantom)
 EXTRA_FLAGS=""
@@ -29,7 +29,7 @@ else
 fi
 
 # Launch 3 shards in parallel
-for SHARD in 0 1 2; do
+for SHARD in 0 1; do
     GPU_ID=${SHARD}
     echo "Starting shard ${SHARD} on GPU ${GPU_ID}..."
     CUDA_VISIBLE_DEVICES=${GPU_ID} python -m scripts.sim_eval_align_only \

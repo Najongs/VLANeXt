@@ -107,8 +107,9 @@ class SimActAlign(IterableDataset):
                 sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
                 if sensor_dist.ndim == 1:
                     sensor_dist = sensor_dist[:, None]  # (N, 1)
-                # 20mm 클리핑: 20mm 이내만 유효, 그 이상 또는 미감지(-1)는 20으로 클리핑
+                # 20mm 클리핑 + 정규화: [0, 20] → [0, 1]
                 sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
+                sensor_dist = sensor_dist / 20.0  # normalize to [0, 1]
                 proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
 
             # --- Spatial auxiliary targets (backward compatible) ---

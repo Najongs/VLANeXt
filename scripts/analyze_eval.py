@@ -78,7 +78,7 @@ def success_vs_fail(df):
               f"Fail: {fail[col].mean():6.2f} +- {fail[col].std():5.2f}")
 
 
-def near_miss_analysis(df, threshold_mm=2.0):
+def near_miss_analysis(df, threshold_mm=3.0):
     print_section(f"Near-Miss Analysis (min_dist < {threshold_mm + 1}mm but failed)")
     fail = df[df["success"] == 0]
     near = fail[fail["min_dist_mm"] < threshold_mm + 1.0]
@@ -362,7 +362,7 @@ def plot_analysis(df, has_perturb, out_dir):
     ax = axes[0, 0]
     colors = ["green" if s else "red" for s in df["success"]]
     ax.bar(df["episode"], df["min_dist_mm"], color=colors, alpha=0.7, label="min_dist")
-    ax.axhline(y=2.0, color="blue", linestyle="--", linewidth=1, label="threshold (2mm)")
+    ax.axhline(y=3.0, color="blue", linestyle="--", linewidth=1, label="threshold (3mm)")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Min Distance (mm)")
     ax.set_title("Min Distance per Episode (green=success, red=fail)")
@@ -386,7 +386,7 @@ def plot_analysis(df, has_perturb, out_dir):
     # 3. Distribution of min distances
     ax = axes[1, 0]
     ax.hist(df["min_dist_mm"], bins=20, color="steelblue", alpha=0.7, edgecolor="black")
-    ax.axvline(x=2.0, color="red", linestyle="--", linewidth=2, label="threshold (2mm)")
+    ax.axvline(x=3.0, color="red", linestyle="--", linewidth=2, label="threshold (3mm)")
     ax.set_xlabel("Min Distance (mm)")
     ax.set_ylabel("Count")
     ax.set_title("Distribution of Min Distances")

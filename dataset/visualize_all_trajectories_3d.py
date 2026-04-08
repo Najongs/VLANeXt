@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 
-python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/Sim/dataset/fine_align/approach_test/collected_data_merged"
 
 Visualize all trajectories from Eye_trocar dataset in 3D space
 Shows all trajectories with their start and end points marked
@@ -29,10 +29,24 @@ def load_trajectory(h5_file_path):
             if np.abs(position).max() < 10:
                 position = position * 1000.0  # Convert m to mm
 
-            return position
+            # Load needle_tip_pos if available
+            needle_tip = None
+            if 'needle_tip_pos' in f['observations']:
+                needle_tip = f['observations']['needle_tip_pos'][:][:, :3]
+                if np.abs(needle_tip).max() < 10:
+                    needle_tip = needle_tip * 1000.0
+
+            # Load trocar_entry_pos if available
+            trocar_entry = None
+            if 'trocar_entry_pos' in f['observations']:
+                trocar_entry = f['observations']['trocar_entry_pos'][:][:, :3]
+                if np.abs(trocar_entry).max() < 10:
+                    trocar_entry = trocar_entry * 1000.0
+
+            return position, needle_tip, trocar_entry
     except Exception as e:
         print(f"Error loading {h5_file_path}: {e}")
-        return None
+        return None, None, None
 
 def visualize_all_trajectories(dataset_path, output_path=None, max_trajectories=None):
     """
@@ -55,15 +69,21 @@ def visualize_all_trajectories(dataset_path, output_path=None, max_trajectories=
     trajectories = []
     start_points = []
     end_points = []
+    needle_tip_ends = []
+    trocar_positions = []
     folder_labels = []  # Track which folder each trajectory belongs to
 
     print("Loading trajectories...")
     for h5_file in tqdm(h5_files):
-        position = load_trajectory(h5_file)
+        position, needle_tip, trocar_entry = load_trajectory(h5_file)
         if position is not None and len(position) > 0:
             trajectories.append(position)
             start_points.append(position[0])
             end_points.append(position[-1])
+            if needle_tip is not None:
+                needle_tip_ends.append(needle_tip[-1])
+            if trocar_entry is not None:
+                trocar_positions.append(trocar_entry[0])
 
             # Extract folder name hierarchy
             # For real data: date/person (e.g., "260106/1_MIN")
@@ -104,6 +124,12 @@ def visualize_all_trajectories(dataset_path, output_path=None, max_trajectories=
     # Convert to numpy arrays
     start_points = np.array(start_points)
     end_points = np.array(end_points)
+    has_needle_tip = len(needle_tip_ends) > 0
+    has_trocar = len(trocar_positions) > 0
+    if has_needle_tip:
+        needle_tip_ends = np.array(needle_tip_ends)
+    if has_trocar:
+        trocar_positions = np.array(trocar_positions)
 
     # Create folder to color mapping
     unique_folders = sorted(list(set(folder_labels)))

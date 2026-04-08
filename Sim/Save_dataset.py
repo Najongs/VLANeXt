@@ -1,5 +1,11 @@
 """
 python Save_dataset.py --no-randomize-phantom-pos
+
+python run_parallel.py \
+    --script full --workers 20 --episodes 500 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_test \
+    --phantom-pos 0.0 0.0 --no-insertion
+
 """
 
 import os
@@ -274,8 +280,7 @@ def main():
         phantom_body_id = -1
 
     recorder = SimRecorder(SAVE_DIR)
-    # home_pose = np.array([0.5236, -0.3491, 0.3491, 0.0000, 0.5236, 1.0472]) # (30, -20, 20, 0, 30, 60)
-    home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.4, -0.3), np.random.uniform(0.3, 0.4),  0.0000,np.random.uniform(0.45, 0.55), np.random.uniform(0.95, 1.05)]) # (30, -20, 20, 0, 30, 60)
+    # home_pose는 에피소드 루프 안에서 매번 랜덤 생성
     current_speed = 0.5 # np.random.uniform(0.3, 0.6)
 
     def get_ee_pose_6d_scaled():
@@ -301,6 +306,7 @@ def main():
     episode_count = 0
     while episode_count < MAX_EPISODES:
         mujoco.mj_resetData(model, data)
+        home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.6, -0.1), np.random.uniform(0.1, 0.6),  0.0000,np.random.uniform(0.3, 0.7), np.random.uniform(0.8, 1.2)])
         data.qpos[:6] = home_pose
         phantom_offset = np.zeros(3, dtype=np.float32)
         phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)

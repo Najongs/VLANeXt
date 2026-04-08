@@ -14,7 +14,7 @@ data:
 
   history_len: 8
   future_len: 8
-  buffer_size: 2000
+  buffer_size: 4000
 
   batch_size: 100
   max_steps: 10000

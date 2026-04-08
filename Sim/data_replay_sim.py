@@ -3,13 +3,14 @@ import cv2
 import numpy as np
 import os
 import argparse
+import imageio
 
 # ==============================================================
 # Dataset Viewer with MP4 Export
 # Supports real-time viewing and video export with metadata overlay
 # ==============================================================
 
-#  python /data/public/NAS/VLANeXt/Sim/data_replay_sim.py /data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/worker_15/episode_20260406_113034.h5 --output /data/public/NAS/VLANeXt/dataset/test_ep.mp4
+#  python /data/public/NAS/VLANeXt/Sim/data_replay_sim.py /data/public/NAS/VLANeXt/Sim/dataset/fine_align/approach_test/collected_data_merged/w5_episode_20260409_043306.h5 --output /data/public/NAS/VLANeXt/dataset/test_ep2.mp4
 
 # Phase mapping for display
 PHASE_NAMES = {
@@ -104,17 +105,17 @@ def save_to_mp4(hdf5_path, output_path=None, fps=30):
         info_panel = create_info_panel(0, total_steps, qpos_data[0], action_data[0], ee_data[0], phase_data[0], sensor_data[0], w)
         final_h, final_w = h + info_panel.shape[0], w
 
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (final_w, final_h))
+        writer = imageio.get_writer(output_path, fps=fps)
 
         for step in range(total_steps):
             frames = [cv2.imdecode(img_grp[k][step], cv2.IMREAD_COLOR) for k in cam_keys]
             combined_img = np.hstack(frames)
             info_panel = create_info_panel(step, total_steps, qpos_data[step], action_data[step], ee_data[step], phase_data[step], sensor_data[step], w, is_playing=False)
             final_frame = np.vstack([combined_img, info_panel])
-            out.write(final_frame)
+            writer.append_data(cv2.cvtColor(final_frame, cv2.COLOR_BGR2RGB))
             if (step + 1) % 30 == 0: print(f"  Progress: {(step+1)/total_steps*100:.1f}%", end='\r')
 
-        out.release()
+        writer.close()
         print(f"\n✅ Video saved: {output_path}")
 
 def view_interactive(hdf5_path):
