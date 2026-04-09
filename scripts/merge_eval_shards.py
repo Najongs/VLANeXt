@@ -7,8 +7,22 @@ Usage:
 
 import argparse
 import glob
+import shutil
 import pandas as pd
 from pathlib import Path
+
+
+def _collect_shard_files(shard_dirs, merged_dir):
+    """Copy mp4, npz, png files from shard directories into merged directory."""
+    count = 0
+    for shard_dir in shard_dirs:
+        for pattern in ("*.mp4", "*.npz", "*.png"):
+            for f in shard_dir.glob(pattern):
+                dst = merged_dir / f.name
+                if not dst.exists():
+                    shutil.copy2(f, dst)
+                    count += 1
+    print(f"  Collected {count} files (mp4/npz/png) into merged directory")
 
 
 def main():
@@ -17,14 +31,16 @@ def main():
     parser.add_argument("--num-shards", type=int, default=3)
     parser.add_argument("--exec-steps", type=int, default=1)
     parser.add_argument("--diff-steps", type=int, default=10)
+    parser.add_argument("--prefix", type=str, default="align", help="Eval type prefix (align or approach)")
     args = parser.parse_args()
 
     ckpt_path = Path(args.checkpoint)
     step_str = ckpt_path.stem.split("_")[-1]
-    base_name = f"align_eval_step{step_str}_exec{args.exec_steps}_diff{args.diff_steps}"
+    base_name = f"{args.prefix}_eval_step{step_str}_exec{args.exec_steps}_diff{args.diff_steps}"
 
     # Find shard directories (handles _SR rename)
     shard_csvs = []
+    shard_dirs = []
     for shard_id in range(args.num_shards):
         shard_pattern = f"{base_name}_shard{shard_id}"
         # Try exact match first, then glob for _SR suffix
@@ -37,6 +53,7 @@ def main():
         if csv_path.exists():
             df = pd.read_csv(csv_path)
             shard_csvs.append(df)
+            shard_dirs.append(shard_dir)
             print(f"  Loaded shard {shard_id}: {len(df)} episodes ({shard_dir.name})")
         else:
             print(f"  WARNING: shard {shard_id} CSV not found (looked for {shard_pattern}*)")
@@ -55,6 +72,9 @@ def main():
     merged_csv = merged_dir / "metrics_summary.csv"
     merged.to_csv(merged_csv, index=False)
 
+    # Collect all shard files (mp4, npz, png) into merged directory
+    _collect_shard_files(shard_dirs, merged_dir)
+
     n_success = merged["success"].sum()
     n_total = len(merged)
     sr = n_success / n_total * 100
@@ -65,10 +85,74 @@ def main():
     print(f"  Saved to: {merged_csv}")
     print(f"{'='*60}")
 
+    # Generate merged trajectory plot from all npz files
+    _generate_merged_trajectory_plot(merged_dir)
+
     # Auto-run analysis
     print(f"\nRunning analysis...")
     import subprocess
     subprocess.run(["python", "scripts/analyze_eval.py", str(merged_csv)])
+
+
+def _generate_merged_trajectory_plot(merged_dir):
+    """Regenerate trajectory plot from all npz files in merged directory."""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    npz_files = sorted(merged_dir.glob("traj_ep*.npz"))
+    if not npz_files:
+        return
+
+    trajectories = []
+    successes = []
+    for f in npz_files:
+        data = np.load(f)
+        trajectories.append(data["ee_pose"])
+        successes.append("_S." in f.name)
+
+    fig = plt.figure(figsize=(20, 12))
+    n_succ = sum(successes)
+    n_fail = len(successes) - n_succ
+    fig.suptitle(f"Eval Trajectories (n={len(trajectories)}, S={n_succ}, F={n_fail})", fontsize=14)
+
+    ax1 = fig.add_subplot(221, projection='3d')
+    for i, traj in enumerate(trajectories):
+        color = 'green' if successes[i] else 'red'
+        ax1.plot(traj[:, 0], traj[:, 1], traj[:, 2], alpha=0.5, linewidth=0.8, color=color)
+        ax1.scatter(*traj[0], marker='o', s=30, color=color, alpha=0.6)
+        ax1.scatter(*traj[-1], marker='x', s=30, color=color, alpha=0.8)
+    ax1.set_xlabel('X (mm)'); ax1.set_ylabel('Y (mm)'); ax1.set_zlabel('Z (mm)')
+    ax1.set_title('3D View'); ax1.grid(True)
+
+    for subplot, ax_a, ax_b, xlabel, ylabel, title in [
+        (222, 0, 1, 'X (mm)', 'Y (mm)', 'XY (Top View)'),
+        (223, 0, 2, 'X (mm)', 'Z (mm)', 'XZ (Front View)'),
+        (224, 1, 2, 'Y (mm)', 'Z (mm)', 'YZ (Side View)'),
+    ]:
+        ax = fig.add_subplot(subplot)
+        for i, traj in enumerate(trajectories):
+            color = 'green' if successes[i] else 'red'
+            ax.plot(traj[:, ax_a], traj[:, ax_b], alpha=0.5, linewidth=0.8, color=color)
+            ax.scatter(traj[0, ax_a], traj[0, ax_b], marker='o', s=20, color=color, alpha=0.6)
+            ax.scatter(traj[-1, ax_a], traj[-1, ax_b], marker='x', s=20, color=color, alpha=0.8)
+        ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+        ax.set_title(title); ax.grid(True); ax.axis('equal')
+
+    legend_elements = [
+        Line2D([0], [0], color='green', label='Success'),
+        Line2D([0], [0], color='red', label='Fail'),
+        Line2D([0], [0], marker='o', color='gray', label='Start', linestyle='None', markersize=6),
+        Line2D([0], [0], marker='x', color='gray', label='End', linestyle='None', markersize=6),
+    ]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=4, fontsize=10)
+    plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+    out_path = merged_dir / "eval_trajectories.png"
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"  Merged trajectory plot saved: {out_path}")
 
 
 if __name__ == "__main__":

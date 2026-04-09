@@ -107,7 +107,7 @@ model:
 
 train:
   seed: 2026
-  resume_path: ""
+  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen3.5_fine/approach"
   pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
