@@ -474,8 +474,7 @@ def run_eval(cfg):
             if use_sensor:
                 sensor_dist = env.get_sensor_dist()
                 sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
-                sensor_dist_normalized = sensor_dist_clipped / 20.0
-                proprio_parts.append([sensor_dist_normalized])
+                proprio_parts.append([sensor_dist_clipped])
             proprio = np.concatenate(proprio_parts)
             state_history.append(proprio)
 

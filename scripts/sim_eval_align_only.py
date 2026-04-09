@@ -632,10 +632,9 @@ def run_eval(cfg):
 
             ee_pose = env.get_ee_pose()
             sensor_dist = env.get_sensor_dist()
-            # 20mm 클리핑 + 정규화: [0, 20] → [0, 1]
+            # 클리핑만: 음수/무한대 → 20mm, 범위 [0, 20]
             sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
-            sensor_dist_normalized = sensor_dist_clipped / 20.0
-            proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_normalized]])  # (8,): ee_pose + gripper + sensor_dist(norm)
+            proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist(raw mm)
             state_history.append(proprio)
 
             observation = {

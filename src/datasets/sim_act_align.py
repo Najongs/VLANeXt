@@ -1,6 +1,7 @@
 import os
 import gc
 import glob
+from pathlib import Path
 import numpy as np
 import cv2
 import h5py
@@ -109,9 +110,8 @@ class SimActAlign(IterableDataset):
                 sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
                 if sensor_dist.ndim == 1:
                     sensor_dist = sensor_dist[:, None]  # (N, 1)
-                # 20mm 클리핑 + 정규화: [0, 20] → [0, 1]
+                # 클리핑만: 음수/무한대 → 20mm (미감지), 범위 [0, 20]
                 sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
-                sensor_dist = sensor_dist / 20.0  # normalize to [0, 1]
                 proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
 
             # --- Spatial auxiliary targets (backward compatible) ---
@@ -249,6 +249,7 @@ class SimActAlign(IterableDataset):
                         "history_actions": hist_actions,
                         "future_actions": fut_acts,
                         "instruction": instruction,
+                        "source_info": f"{Path(ep_path).stem}:t{t}",
                     }
 
                     # Spatial target for auxiliary loss (current timestep)

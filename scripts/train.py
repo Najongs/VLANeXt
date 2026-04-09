@@ -200,6 +200,7 @@ class DataCollatorForVLANeXt:
         future_images_list = []
         spatial_target_list = []
         action_weight_list = []
+        source_info_list = []
 
         is_paligemma = "PaliGemma" in self.processor.__class__.__name__
         is_qwen = "Qwen" in self.processor.__class__.__name__
@@ -303,6 +304,8 @@ class DataCollatorForVLANeXt:
                 f_img = torch.from_numpy(f_img).permute(2, 0, 1).float() / 127.5 - 1.0
                 future_images_list.append(f_img)
 
+            source_info_list.append(sample.get("source_info", ""))
+
         if is_paligemma:
             inputs = self.processor(
                 text=texts,
@@ -349,7 +352,7 @@ class DataCollatorForVLANeXt:
         spatial_targets = torch.stack(spatial_target_list) if spatial_target_list else None
         action_weights = torch.stack(action_weight_list) if action_weight_list else None
 
-        return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights
+        return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights, source_info_list
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -897,6 +900,7 @@ def train(config):
 
     if global_rank == 0:
         progress_bar = tqdm(total=config['data']['max_steps'], initial=start_step, desc="Finetuning")
+    loss_ema = None  # EMA for loss spike detection
     data_iter = iter(dataloader)
     if not use_deepspeed:
         optimizer.zero_grad()
@@ -907,7 +911,7 @@ def train(config):
             data_iter = iter(dataloader)
             batch = next(data_iter)
             
-        inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights = batch
+        inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights, source_info = batch
         del batch
         model_inputs = {k: v.to(device) for k, v in inputs.items()}
         del inputs
@@ -961,6 +965,15 @@ def train(config):
             did_update = do_update
         
         if did_update:
+            # Compute gradient norm before clipping for monitoring
+            grad_norm = None
+            if global_rank == 0:
+                total_norm_sq = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        total_norm_sq += p.grad.data.float().norm(2).item() ** 2
+                grad_norm = total_norm_sq ** 0.5
+
             if (not use_deepspeed) and config['train']['max_grad_norm'] > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config['train']['max_grad_norm'])
             if not use_deepspeed:
@@ -970,7 +983,25 @@ def train(config):
             step += 1
             if global_rank == 0:
                 progress_bar.update(1)
-                progress_bar.set_postfix({"loss": f"{loss.item() * gradient_accumulation_steps:.4f}"})
+                loss_val = loss.item() * gradient_accumulation_steps
+                postfix = {"loss": f"{loss_val:.4f}"}
+                if grad_norm is not None:
+                    postfix["gnorm"] = f"{grad_norm:.2f}"
+                progress_bar.set_postfix(postfix)
+
+                # Loss spike detection (EMA-based, reset after warmup)
+                spike_mult = config['train'].get('loss_spike_multiplier', 10.0)
+                if step <= 100:
+                    loss_ema = None  # warmup 구간은 무시
+                elif loss_ema is None:
+                    loss_ema = loss_val  # warmup 직후 첫 값으로 초기화
+                else:
+                    is_spike = loss_val > loss_ema * spike_mult
+                    if is_spike:
+                        gn_str = f"{grad_norm:.2f}" if grad_norm is not None else "N/A"
+                        print(f"\n[SPIKE] step={step} loss={loss_val:.4f} (ema={loss_ema:.4f}, x{loss_val/loss_ema:.1f}) gnorm={gn_str} sources={source_info[:3]}")
+                    else:
+                        loss_ema = 0.95 * loss_ema + 0.05 * loss_val  # spike는 EMA에 반영 안 함
             if step % config['project']['log_interval'] == 0 and global_rank == 0:
                 if config['project'].get('use_wandb', False):
                     current_lr = optimizer.param_groups[0]["lr"] if optimizer.param_groups else 0.0
@@ -979,6 +1010,8 @@ def train(config):
                         "train/lr": current_lr,
                         "step": step,
                     }
+                    if grad_norm is not None:
+                        log_data["train/grad_norm"] = grad_norm
                     for k, v in loss_dict.items():
                         log_data[f"train/{k}"] = v
                     wandb.log(log_data)
