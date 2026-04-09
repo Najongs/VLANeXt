@@ -47,6 +47,7 @@ class SimActAlign(IterableDataset):
         cam_wrist="tool_camera",
         cam_top="top_camera",
         skip_history_padding=False,
+        use_sensor=True,
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -64,6 +65,7 @@ class SimActAlign(IterableDataset):
         self.cam_exterior = cam_exterior
         self.cam_wrist = cam_wrist
         self.cam_top = cam_top
+        self.use_sensor = use_sensor
 
         # Action normalization to [-1, 1]
         self.action_min = np.array(action_min_sim_align, dtype=np.float32)
@@ -101,9 +103,9 @@ class SimActAlign(IterableDataset):
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) + sensor_dist (N, 1) → (N, 8) ---
+            # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
             proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
-            if "sensor_dist" in f["observations"]:
+            if self.use_sensor and "sensor_dist" in f["observations"]:
                 sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
                 if sensor_dist.ndim == 1:
                     sensor_dist = sensor_dist[:, None]  # (N, 1)

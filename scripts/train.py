@@ -651,6 +651,7 @@ def train(config):
                 cam_wrist=config['data'].get('cam_wrist', 'tool_camera'),
                 cam_top=config['data'].get('cam_top', ''),
                 skip_history_padding=config['data'].get('skip_history_padding', False),
+                use_sensor=config['model'].get('use_sensor', True),
             )
         else:
             ds = LiberoAct(
