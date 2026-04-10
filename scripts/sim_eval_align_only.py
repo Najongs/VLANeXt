@@ -497,11 +497,14 @@ class AlignSimEnv:
         tip_uv = project_to_2d(tip_pos, self.model, self.data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
         trocar_uv = project_to_2d(entry_pos, self.model, self.data, "tool_camera", IMG_WIDTH, IMG_HEIGHT)
 
+        sensor_dist = self.get_sensor_dist()
+
         return {
             "dist_mm": dist_mm,
             "insertion_depth_mm": insertion_depth_mm,
             "lateral_mm": lateral_mm,
             "angle_deg": angle_deg,
+            "sensor_dist_mm": sensor_dist,
             "tip_uv": tip_uv,
             "trocar_uv": trocar_uv,
         }
@@ -592,6 +595,7 @@ def run_eval(cfg):
     csv_writer = csv.writer(csv_file)
     csv_header = ["episode", "success", "steps", "final_dist_mm",
                    "final_lateral_mm", "final_angle_deg", "min_dist_mm",
+                   "final_sensor_dist_mm",
                    "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
                    "perturb_angle_deg", "perturb_dist_mm", "initial_dist_mm"]
     if randomize_phantom:
@@ -631,10 +635,13 @@ def run_eval(cfg):
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)
 
             ee_pose = env.get_ee_pose()
-            sensor_dist = env.get_sensor_dist()
-            # 클리핑만: 음수/무한대 → 20mm, 범위 [0, 20]
-            sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
-            proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist(raw mm)
+            use_sensor = getattr(cfg.model, "use_sensor", False)
+            if use_sensor:
+                sensor_dist = env.get_sensor_dist()
+                sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
+                proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist(raw mm)
+            else:
+                proprio = np.concatenate([ee_pose, [0.0]])  # (8,): ee_pose + gripper
             state_history.append(proprio)
 
             observation = {
@@ -692,11 +699,13 @@ def run_eval(cfg):
         log_file.flush()
 
         pi = env.last_perturb_info
+        final_sensor = final_m.get('sensor_dist_mm', -1.0)
         row = [
             ep, int(success), ctrl_step + 1,
             f"{final_m['dist_mm']:.2f}",
             f"{final_m['lateral_mm']:.2f}", f"{final_m['angle_deg']:.2f}",
             f"{min_dist:.2f}",
+            f"{final_sensor:.2f}",
             f"{pi['perturb_x_mm']:.2f}", f"{pi['perturb_y_mm']:.2f}", f"{pi['perturb_z_mm']:.2f}",
             f"{pi['perturb_angle_deg']:.2f}", f"{pi['perturb_dist_mm']:.2f}", f"{pi['initial_dist_mm']:.2f}",
         ]

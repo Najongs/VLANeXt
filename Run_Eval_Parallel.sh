@@ -13,7 +13,7 @@
 #   bash Run_Eval_Parallel.sh approach /path/to/checkpoint
 
 MODE=${1:-align}
-CHECKPOINT=${2:-/data/public/NAS/VLANeXt/output_dir_align_0408}
+CHECKPOINT=${2:-/data/public/NAS/VLANeXt/output_dir_align_0410}
 NUM_SHARDS=2
 
 # Mode-specific config

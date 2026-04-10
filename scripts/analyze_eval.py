@@ -60,6 +60,13 @@ def overall_stats(df):
               f"median: {succ['steps'].median():.0f}, "
               f"range: [{succ['steps'].min()}, {succ['steps'].max()}]")
 
+    if "final_sensor_dist_mm" in df.columns:
+        sv = df[df["final_sensor_dist_mm"] >= 0]["final_sensor_dist_mm"]
+        if len(sv) > 0:
+            print(f"  Sensor dist — mean: {sv.mean():.2f}mm, "
+                  f"median: {sv.median():.2f}mm, "
+                  f"range: [{sv.min():.2f}, {sv.max():.2f}]mm")
+
 
 def success_vs_fail(df):
     print_section("Success vs Fail Comparison")
@@ -368,20 +375,39 @@ def plot_analysis(df, has_perturb, out_dir):
     ax.set_title("Min Distance per Episode (green=success, red=fail)")
     ax.legend()
 
-    # 2. Final dist vs min dist (overshoot detection)
+    # 2. Sensor distance distribution (or overshoot fallback)
     ax = axes[0, 1]
     succ = df[df["success"] == 1]
     fail = df[df["success"] == 0]
-    if len(fail) > 0:
-        ax.scatter(fail["min_dist_mm"], fail["final_dist_mm"], c="red", alpha=0.6, label="fail", s=40)
-    if len(succ) > 0:
-        ax.scatter(succ["min_dist_mm"], succ["final_dist_mm"], c="green", alpha=0.6, label="success", s=40)
-    lim = max(df["final_dist_mm"].max(), df["min_dist_mm"].max()) + 1
-    ax.plot([0, lim], [0, lim], "k--", alpha=0.3, label="final=min (no overshoot)")
-    ax.set_xlabel("Min Distance (mm)")
-    ax.set_ylabel("Final Distance (mm)")
-    ax.set_title("Overshoot Detection (above diagonal = overshoot)")
-    ax.legend()
+    if "final_sensor_dist_mm" in df.columns:
+        sensor_valid = df[df["final_sensor_dist_mm"] >= 0]
+        if len(sensor_valid) > 0:
+            s_succ = sensor_valid[sensor_valid["success"] == 1]
+            s_fail = sensor_valid[sensor_valid["success"] == 0]
+            if len(s_fail) > 0:
+                ax.scatter(s_fail["episode"], s_fail["final_sensor_dist_mm"], c="red", alpha=0.6, label="fail", s=40)
+            if len(s_succ) > 0:
+                ax.scatter(s_succ["episode"], s_succ["final_sensor_dist_mm"], c="green", alpha=0.6, label="success", s=40)
+            ax.axhline(y=sensor_valid["final_sensor_dist_mm"].median(), color="blue", linestyle="--", alpha=0.5,
+                       label=f"median={sensor_valid['final_sensor_dist_mm'].median():.1f}mm")
+            ax.set_xlabel("Episode")
+            ax.set_ylabel("Final Sensor Distance (mm)")
+            ax.set_title(f"Sensor Distance (mean={sensor_valid['final_sensor_dist_mm'].mean():.1f}mm)")
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, "No valid sensor data", transform=ax.transAxes, ha="center")
+    else:
+        # Fallback: overshoot plot
+        if len(fail) > 0:
+            ax.scatter(fail["min_dist_mm"], fail["final_dist_mm"], c="red", alpha=0.6, label="fail", s=40)
+        if len(succ) > 0:
+            ax.scatter(succ["min_dist_mm"], succ["final_dist_mm"], c="green", alpha=0.6, label="success", s=40)
+        lim = max(df["final_dist_mm"].max(), df["min_dist_mm"].max()) + 1
+        ax.plot([0, lim], [0, lim], "k--", alpha=0.3, label="final=min")
+        ax.set_xlabel("Min Distance (mm)")
+        ax.set_ylabel("Final Distance (mm)")
+        ax.set_title("Final vs Min Distance")
+        ax.legend()
 
     # 3. Distribution of min distances
     ax = axes[1, 0]

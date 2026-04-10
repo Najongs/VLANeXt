@@ -965,9 +965,14 @@ def train(config):
             did_update = do_update
         
         if did_update:
-            # Compute gradient norm before clipping for monitoring
+            # Compute gradient norm for monitoring
             grad_norm = None
-            if global_rank == 0:
+            if use_deepspeed:
+                # DeepSpeed clears grads after step(), but stores the norm internally
+                grad_norm = model.get_global_grad_norm()
+                if grad_norm is not None:
+                    grad_norm = float(grad_norm)
+            elif global_rank == 0:
                 total_norm_sq = 0.0
                 for p in model.parameters():
                     if p.grad is not None:
@@ -1006,7 +1011,7 @@ def train(config):
                 if config['project'].get('use_wandb', False):
                     current_lr = optimizer.param_groups[0]["lr"] if optimizer.param_groups else 0.0
                     log_data = {
-                        "train/loss": loss.item() * gradient_accumulation_steps,
+                        "train/loss/total": loss.item() * gradient_accumulation_steps,
                         "train/lr": current_lr,
                         "step": step,
                     }

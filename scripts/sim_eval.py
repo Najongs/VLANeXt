@@ -746,6 +746,9 @@ def draw_overlay(frame, metrics, ctrl_step):
         f"lateral={metrics['lateral_mm']:.1f}mm",
         f"angle={metrics['angle_deg']:.1f}deg",
     ]
+    if 'sensor_dist_mm' in metrics:
+        sd = metrics['sensor_dist_mm']
+        lines.append(f"sensor={sd:.1f}mm" if sd >= 0 else "sensor=N/A")
     sp = metrics.get("spatial_pred")
     if sp is not None:
         lines.append(f"pred: tip_vis={sp['tip_visible']:.2f} tro_vis={sp['trocar_visible']:.2f}")
