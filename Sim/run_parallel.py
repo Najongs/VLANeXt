@@ -183,9 +183,7 @@ def main():
         insertion_lines = f"""
 {module_name}.APPROACH_OFFSET_MM = {args.approach_offset}
 {module_name}.APPROACH_XY_OFFSET_MM = {args.approach_xy_offset}
-{module_name}.PERTURB_ENABLED = {args.perturb}
-{module_name}.PERTURB_ANGLE_DEG = {args.perturb_angle}
-{module_name}.TARGET_INSERTION_DEPTH = {args.insertion_depth / 1000.0}
+{module_name}.TARGET_INSERTION_DEPTH_MM = {args.insertion_depth}
 {module_name}.INSERTION_SPEED = {args.insertion_speed / 1000.0}
 """
 

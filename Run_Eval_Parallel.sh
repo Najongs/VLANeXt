@@ -7,19 +7,21 @@
 # Modes:
 #   align     - Fine-alignment eval (기본)
 #   approach  - Approach eval (먼 거리 → 트로카 접근)
+#   insertion - Insertion eval (정렬 후 삽입)
 #
 # Examples:
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint
 #   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
 #   bash Run_Eval_Parallel.sh approach /path/to/checkpoint
+#   bash Run_Eval_Parallel.sh insertion /path/to/checkpoint
 
 # Auto-detect: if first arg starts with / or . it's a checkpoint path, not a mode
 if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
     MODE="align"
     CHECKPOINT="$1"
     EXTRA_ARGS=("${@:2}")
-elif [ "$1" = "align" ] || [ "$1" = "approach" ]; then
+elif [ "$1" = "align" ] || [ "$1" = "approach" ] || [ "$1" = "insertion" ]; then
     MODE="$1"
     CHECKPOINT="${2:-/data/public/NAS/VLANeXt/output_dir_align_0410}"
     EXTRA_ARGS=("${@:3}")
@@ -37,6 +39,11 @@ if [ "$MODE" = "approach" ]; then
     TRAIN_CONFIG=config/sim_train_align_config.yaml
     EVAL_SCRIPT=scripts.sim_eval_approach_only
     MERGE_PREFIX="approach"
+elif [ "$MODE" = "insertion" ]; then
+    CONFIG=config/sim_eval_insertion_config.yaml
+    TRAIN_CONFIG=config/sim_train_align_config.yaml
+    EVAL_SCRIPT=scripts.sim_eval_insertion_only
+    MERGE_PREFIX="insertion"
 else
     CONFIG=config/sim_eval_align_config.yaml
     TRAIN_CONFIG=config/sim_train_align_config.yaml
