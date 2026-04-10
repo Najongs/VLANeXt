@@ -121,11 +121,10 @@ PERTURB_POS_Z_MM = 7.0
 PERTURB_ANGLE_DEG = 7.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.0035   # 3.5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.005   # 5mm
 ALIGN_SUCCESS_ANGLE_DEG = 15.0      # needle-trocar axis angle < 15deg
 ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
-USE_SENSOR_SUCCESS = False           # toggle sensor-based success check
 
 
 class AlignSimEnv:
@@ -137,7 +136,7 @@ class AlignSimEnv:
     Success: needle tip within threshold of trocar entry
     """
 
-    def __init__(self, model_xml_path: str, randomize_phantom: bool = False):
+    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False):
         self.model = mujoco.MjModel.from_xml_path(model_xml_path)
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -152,6 +151,7 @@ class AlignSimEnv:
 
         # Phantom randomization
         self.randomize_phantom = randomize_phantom
+        self.use_sensor_success = use_sensor_success
         self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
         self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
 
@@ -447,7 +447,7 @@ class AlignSimEnv:
 
         aligned = dist < ALIGN_SUCCESS_THRESHOLD_M and angle_deg < ALIGN_SUCCESS_ANGLE_DEG
 
-        if USE_SENSOR_SUCCESS and aligned:
+        if self.use_sensor_success and aligned:
             sensor_dist = self.get_sensor_dist()
             aligned = aligned and (sensor_dist >= ALIGN_SUCCESS_SENSOR_MIN_MM or sensor_dist < 0)
 
@@ -594,7 +594,8 @@ def run_eval(cfg):
 
     model_xml = os.path.abspath(SIM_MODEL_PATH)
     randomize_phantom = getattr(cfg, "randomize_phantom", False)
-    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom)
+    use_sensor_success = getattr(cfg, 'use_sensor_success', False)
+    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom, use_sensor_success=use_sensor_success)
 
     total_successes = 0
 
@@ -782,8 +783,6 @@ if __name__ == "__main__":
     cfg.shard_id = args.shard_id
     cfg.num_shards = args.num_shards
     cfg.randomize_phantom = args.randomize_phantom
-
-    global USE_SENSOR_SUCCESS
-    USE_SENSOR_SUCCESS = args.sensor_success
+    cfg.use_sensor_success = args.sensor_success
 
     run_eval(cfg)

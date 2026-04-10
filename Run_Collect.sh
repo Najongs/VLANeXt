@@ -37,6 +37,12 @@
 #               정렬뿐 아니라 삽입까지 포함된 full trajectory.
 #               align-only와는 다른 데이터셋.
 #
+#   insertion   Insertion-only 수집. 정렬 완료 상태에서 접근+삽입만 녹화.
+#               align 모델 종료 위치(z 뒤 + xy 오프셋)에서 시작.
+#
+#   insertion_perturb  위와 동일 + 각도/위치 perturbation 포함.
+#               불완전 정렬에서 보정하며 삽입하는 데이터.
+#
 # 저장 위치:
 #   dataset/fine_align/
 #   ├── collected_data_merged/          ← 기존 데이터 (건드리지 않음)
@@ -58,6 +64,8 @@
 #   bash Run_Collect.sh multi_phantom 10 2000       # Y축 5위치 × 10w × 2000ep
 #   bash Run_Collect.sh approach 10 2000           # approach+align (no insertion), Y축 5위치
 #   bash Run_Collect.sh full 5 500                 # full pipeline 2,500개
+#   bash Run_Collect.sh insertion 10 500             # insertion only, 팬텀 고정
+#   bash Run_Collect.sh insertion_perturb 10 500     # insertion + perturbation (불완전 정렬)
 #
 # =============================================================
 
@@ -89,6 +97,18 @@
 # bash Run_Collect.sh full 10 2000             # 5위치 × 20,000 = 100,000개
 # - 스크립트: Save_dataset.py + --phantom-pos
 # - approach + align + insert 전체 trajectory
+
+# Phase 4-alt: Insertion Only (정렬 완료 후 삽입만)
+
+# 팬텀 고정, 정렬 뒤 5mm에서 시작 → 접근+삽입 녹화
+# bash Run_Collect.sh insertion 10 500         # 5,000개
+# - 스크립트: Save_dataset_insertion_only.py
+# - align 모델 종료 위치 시뮬레이션 (z offset + xy offset)
+# - correct-while-inserting 전략 학습용
+
+# 불완전 정렬 + perturbation 포함
+# bash Run_Collect.sh insertion_perturb 10 500 # 5,000개
+# - 위와 동일 + 각도/위치 perturbation 추가
 
 
 MODE=${1:-uniform}
@@ -213,18 +233,37 @@ case $MODE in
         done
         ;;
 
+    insertion)
+        # 팬텀 고정, 정렬 완료 상태에서 접근+삽입만 녹화
+        python Sim/run_parallel.py \
+            --script insertion --workers $WORKERS --episodes $EPISODES \
+            --base-dir ${BASE}/insertion \
+            --approach-offset 5 --approach-xy-offset 2 $PHANTOM_FLAG
+        ;;
+
+    insertion_perturb)
+        # 불완전 정렬 + perturbation 포함
+        python Sim/run_parallel.py \
+            --script insertion --workers $WORKERS --episodes $EPISODES \
+            --base-dir ${BASE}/insertion_perturb \
+            --approach-offset 5 --approach-xy-offset 2 \
+            --perturb --perturb-angle 5 $PHANTOM_FLAG
+        ;;
+
     *)
         echo "Unknown mode: $MODE"
         echo ""
         echo "Available modes:"
-        echo "  uniform     - 균등 random perturbation"
-        echo "  bias_x_neg  - X 음수 방향 편향"
-        echo "  bias_y_neg  - Y 음수 방향 편향"
-        echo "  bias_all    - X-, Y- 순차 수집"
-        echo "  grid        - 그리드 기반 균등 수집 (args: workers bins_xy bins_z)"
-        echo "  multi_phantom - Y축 5개 고정 위치 순차 수집 (X=0, Y=0~-0.4)"
-        echo "  approach    - approach+align 수집, insertion 제외 (Y축 5위치)"
-        echo "  full        - 전체 파이프라인 (삽입 포함)"
+        echo "  uniform          - 균등 random perturbation"
+        echo "  bias_x_neg       - X 음수 방향 편향"
+        echo "  bias_y_neg       - Y 음수 방향 편향"
+        echo "  bias_all         - X-, Y- 순차 수집"
+        echo "  grid             - 그리드 기반 균등 수집 (args: workers bins_xy bins_z)"
+        echo "  multi_phantom    - Y축 5개 고정 위치 순차 수집 (X=0, Y=0~-0.4)"
+        echo "  approach         - approach+align 수집, insertion 제외 (Y축 5위치)"
+        echo "  full             - 전체 파이프라인 (삽입 포함)"
+        echo "  insertion        - insertion only (정렬 후 접근+삽입)"
+        echo "  insertion_perturb - insertion + perturbation (불완전 정렬)"
         exit 1
         ;;
 esac

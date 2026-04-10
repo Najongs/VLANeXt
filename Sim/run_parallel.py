@@ -2,7 +2,7 @@
 """
 Unified Parallel Data Collection
 
-Supports both full pipeline (Save_dataset.py) and align-only (Save_dataset_align_only.py).
+Supports full pipeline, align-only, and insertion-only.
 
 Usage:
     python Sim/run_parallel.py --script align --workers 10 --episodes 1000 \
@@ -10,6 +10,9 @@ Usage:
 
     python Sim/run_parallel.py --script full --workers 5 --episodes 500 \
         --base-dir dataset/new_data
+
+    python Sim/run_parallel.py --script insertion --workers 10 --episodes 500 \
+        --base-dir dataset/insertion_data --approach-offset 5 --approach-xy-offset 2
 
     python run_parallel.py --grid --grid-bins-xy 8 --grid-bins-z 6 --workers 10 --base-dir dataset/grid_data
 """
@@ -27,6 +30,7 @@ import numpy as np
 SCRIPT_MAP = {
     "align": "Save_dataset_align_only",
     "full": "Save_dataset",
+    "insertion": "Save_dataset_insertion_only",
 }
 
 
@@ -63,6 +67,19 @@ def main():
                         help="(full only) Stop after alignment, skip insertion")
     parser.add_argument("--seed", type=int, default=None,
                         help="Base random seed (worker i gets seed + i)")
+    # Insertion-only options
+    parser.add_argument("--approach-offset", type=float, default=5.0,
+                        help="(insertion only) Start behind entry in mm (default: 5.0)")
+    parser.add_argument("--approach-xy-offset", type=float, default=2.0,
+                        help="(insertion only) XY offset perpendicular to trocar axis in mm (default: 2.0)")
+    parser.add_argument("--perturb", action="store_true", default=False,
+                        help="(insertion only) Enable angle/position perturbation")
+    parser.add_argument("--perturb-angle", type=float, default=5.0,
+                        help="(insertion only) Angle perturbation range in deg (default: 5.0)")
+    parser.add_argument("--insertion-depth", type=float, default=27.5,
+                        help="(insertion only) Target insertion depth in mm (default: 27.5)")
+    parser.add_argument("--insertion-speed", type=float, default=2.5,
+                        help="(insertion only) Insertion speed in mm/s (default: 2.5)")
     args = parser.parse_args()
 
     module_name = SCRIPT_MAP[args.script]
@@ -134,6 +151,11 @@ def main():
         print(f"  Output:   {base_path}")
         if args.bias:
             print(f"  Bias:     {args.bias} (ratio={args.bias_ratio})")
+        if args.script == "insertion":
+            print(f"  Approach: offset={args.approach_offset}mm, xy=±{args.approach_xy_offset}mm")
+            print(f"  Insert:   depth={args.insertion_depth}mm, speed={args.insertion_speed}mm/s")
+            if args.perturb:
+                print(f"  Perturb:  angle=±{args.perturb_angle}deg")
         print("=" * 70)
         print()
 
@@ -154,6 +176,18 @@ def main():
 
     # No-insertion line (full script only)
     no_insertion_line = f"{module_name}.NO_INSERTION = True" if args.no_insertion else ""
+
+    # Insertion-only config lines
+    insertion_lines = ""
+    if args.script == "insertion":
+        insertion_lines = f"""
+{module_name}.APPROACH_OFFSET_MM = {args.approach_offset}
+{module_name}.APPROACH_XY_OFFSET_MM = {args.approach_xy_offset}
+{module_name}.PERTURB_ENABLED = {args.perturb}
+{module_name}.PERTURB_ANGLE_DEG = {args.perturb_angle}
+{module_name}.TARGET_INSERTION_DEPTH = {args.insertion_depth / 1000.0}
+{module_name}.INSERTION_SPEED = {args.insertion_speed / 1000.0}
+"""
 
     # Launch workers
     processes = []
@@ -203,6 +237,7 @@ import {module_name}
 {seed_line}
 {phantom_line}
 {no_insertion_line}
+{insertion_lines}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {args.episodes} episodes -> {worker_dir}")

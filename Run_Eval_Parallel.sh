@@ -2,6 +2,7 @@
 # Parallel eval across GPUs
 # Usage:
 #   bash Run_Eval_Parallel.sh [mode] [checkpoint_path] [extra_flags...]
+#   bash Run_Eval_Parallel.sh [checkpoint_path] [extra_flags...]    (mode defaults to align)
 #
 # Modes:
 #   align     - Fine-alignment eval (기본)
@@ -9,11 +10,25 @@
 #
 # Examples:
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint
-#   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom
+#   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
+#   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
 #   bash Run_Eval_Parallel.sh approach /path/to/checkpoint
 
-MODE=${1:-align}
-CHECKPOINT=${2:-/data/public/NAS/VLANeXt/output_dir_align_0410}
+# Auto-detect: if first arg starts with / or . it's a checkpoint path, not a mode
+if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
+    MODE="align"
+    CHECKPOINT="$1"
+    EXTRA_ARGS=("${@:2}")
+elif [ "$1" = "align" ] || [ "$1" = "approach" ]; then
+    MODE="$1"
+    CHECKPOINT="${2:-/data/public/NAS/VLANeXt/output_dir_align_0410}"
+    EXTRA_ARGS=("${@:3}")
+else
+    MODE="align"
+    CHECKPOINT="${1:-/data/public/NAS/VLANeXt/output_dir_align_0410}"
+    EXTRA_ARGS=("${@:2}")
+fi
+
 NUM_SHARDS=2
 
 # Mode-specific config
@@ -29,9 +44,9 @@ else
     MERGE_PREFIX="align"
 fi
 
-# Parse extra flags (--randomize-phantom, etc.)
+# Build extra flags string
 EXTRA_FLAGS=""
-for arg in "${@:3}"; do
+for arg in "${EXTRA_ARGS[@]}"; do
     EXTRA_FLAGS="${EXTRA_FLAGS} ${arg}"
 done
 
@@ -43,6 +58,9 @@ if [[ "${EXTRA_FLAGS}" == *"--randomize-phantom"* ]]; then
     echo "Phantom: RANDOMIZED"
 else
     echo "Phantom: FIXED"
+fi
+if [[ "${EXTRA_FLAGS}" == *"--sensor-success"* ]]; then
+    echo "Sensor Success: ON"
 fi
 
 # Launch shards in parallel
