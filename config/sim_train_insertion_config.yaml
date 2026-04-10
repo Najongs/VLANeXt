@@ -7,7 +7,7 @@ project:
 
 data:
   dataset_name: "sim_insertion"
-  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align_Random/insertion/collected_data_merged"
+  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true

@@ -78,8 +78,8 @@ def main():
                         help="(insertion only) Angle perturbation range in deg (default: 5.0)")
     parser.add_argument("--insertion-depth", type=float, default=27.5,
                         help="(insertion only) Target insertion depth in mm (default: 27.5)")
-    parser.add_argument("--insertion-speed", type=float, default=2.5,
-                        help="(insertion only) Insertion speed in mm/s (default: 2.5)")
+    parser.add_argument("--insertion-speed", type=float, default=5.0,
+                        help="(insertion only) Insertion speed in mm/s (default: 5.0)")
     args = parser.parse_args()
 
     module_name = SCRIPT_MAP[args.script]
@@ -184,7 +184,6 @@ def main():
 {module_name}.APPROACH_OFFSET_MM = {args.approach_offset}
 {module_name}.APPROACH_XY_OFFSET_MM = {args.approach_xy_offset}
 {module_name}.TARGET_INSERTION_DEPTH_MM = {args.insertion_depth}
-{module_name}.INSERTION_SPEED = {args.insertion_speed / 1000.0}
 """
 
     # Launch workers

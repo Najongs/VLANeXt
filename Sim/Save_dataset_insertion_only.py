@@ -7,9 +7,12 @@ Insertion dataset collection.
 4. 삽입 과정 녹화: XY 오차 보정하며 trocar 통과 → 목표 깊이까지
 5. 성공: 목표 깊이 도달 + lateral error 작음
     
+# python run_parallel.py --script insertion --workers 10 --episodes 5 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data \
+#     --phantom-pos 0.0 0.0
+
 python run_parallel.py --script insertion --workers 10 --episodes 5 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data \
-    --phantom-pos 0.0 0.0
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data
 """
 
 import os
@@ -60,12 +63,12 @@ IMG_HEIGHT = 480
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
-INSERTION_SPEED = 0.0075     # 삽입 속도 (m/s) — 정렬과 동일
+FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중 (~20 steps)
+INSERTION_SPEED = 0.005     # 삽입 속도 (m/s) — 녹화 중 (~80 steps)
 
 # --- Insertion 설정 ---
 APPROACH_OFFSET_MM = 5.0    # entry 뒤 시작 거리 (mm)
-APPROACH_XY_OFFSET_MM = 2.0 # align 모델의 XY 잔여 오차 (±mm)
+APPROACH_XY_OFFSET_MM = 15.0 # align 모델의 XY 잔여 오차 (±mm)
 TARGET_INSERTION_DEPTH_MM = 25.0  # 목표 삽입 깊이 (mm)
 
 # --- 성공 조건 ---
@@ -481,13 +484,13 @@ def main():
             ok = run_smooth_ik(
                 data.site_xpos[tip_id].copy(), data.site_xpos[back_id].copy(),
                 re_goal_tip, re_goal_back, ALIGN_SPEED)
-            if not ok:
-                print(f"Re-alignment failed for phantom offset={phantom_offset}, skipping...")
-                continue
 
-            # 재정렬 성공 → 상태 갱신
+            # 진행된 만큼 갱신 (다음 에피소드 시작점이 더 가까워짐)
             aligned_qpos = data.qpos[:n_motors].copy()
             aligned_qvel = data.qvel[:n_motors].copy()
+
+            if not ok:
+                continue
 
         # trocar 정보 갱신
         p_entry = data.site_xpos[target_entry_id].copy()
@@ -573,64 +576,56 @@ def main():
         step_count = 0
         success = False
 
-        # --- Phase 1: 정렬 (offset → entry 0.1mm) ---
-        align_start_tip = data.site_xpos[tip_id].copy()
-        align_start_back = data.site_xpos[back_id].copy()
-        align_dist = np.linalg.norm(align_goal_tip - align_start_tip)
-        align_duration = align_dist / FINE_ALIGN_SPEED if FINE_ALIGN_SPEED > 0 else 1.0
-        align_traj_start = data.time
-        align_timer = 0
-        align_done = False
+        # --- 연속 궤적: offset → entry(waypoint) → depth ---
+        # 2구간을 이어붙여 하나의 연속 보간으로 녹화
+        # 구간1: offset → entry 0.1mm (정렬)
+        # 구간2: entry → 목표 깊이 (삽입)
+        traj_start_tip = data.site_xpos[tip_id].copy()
+        traj_start_back = data.site_xpos[back_id].copy()
 
-        while not align_done:
-            progress = smooth_step((data.time - align_traj_start) / align_duration) if align_duration > 0 else 1.0
-            target_tip_pos = (1 - progress) * align_start_tip + progress * align_goal_tip
-            target_back_pos = (1 - progress) * align_start_back + progress * align_goal_back
+        seg1_dist = np.linalg.norm(align_goal_tip - traj_start_tip)
+        seg2_dist = np.linalg.norm(insert_goal_tip - align_goal_tip)
+        total_dist = seg1_dist + seg2_dist
 
-            run_ik_step(target_tip_pos, target_back_pos)
-            mujoco.mj_step(model, data)
-            step_count += 1
+        # 각 구간 소요 시간 (동일 속도)
+        seg1_duration = seg1_dist / FINE_ALIGN_SPEED if FINE_ALIGN_SPEED > 0 else 1.0
+        seg2_duration = seg2_dist / INSERTION_SPEED if INSERTION_SPEED > 0 else 1.0
+        total_duration = seg1_duration + seg2_duration
 
-            if step_count % 67 == 0:
-                last_ee_pose = record_step(last_ee_pose, 1)
+        # 구간1 비율 (전체 시간 중 정렬 구간)
+        seg1_ratio = seg1_duration / total_duration if total_duration > 0 else 0.5
 
-            if progress >= 1.0:
-                if np.linalg.norm(data.site_xpos[tip_id] - align_goal_tip) < ALIGN_THRESHOLD_M:
-                    align_timer += 1
-                else:
-                    align_timer = 0
-                if align_timer > ALIGN_HOLD_STEPS:
-                    align_done = True
-
-            if data.time - record_start_time > TIMEOUT_SEC:
-                break
-
-        if not align_done:
-            recorder.discard()
-            print(f"  Episode {episode_count} discarded [Align timeout]")
-            continue
-
-        # --- Phase 2: 직선 삽입 (entry → 목표 깊이) ---
-        insert_start_tip = data.site_xpos[tip_id].copy()
-        insert_start_back = data.site_xpos[back_id].copy()
-        insert_dist = np.linalg.norm(insert_goal_tip - insert_start_tip)
-        insert_duration = insert_dist / INSERTION_SPEED if INSERTION_SPEED > 0 else 1.0
-        insert_traj_start = data.time
+        traj_start_time = data.time
         depth_hold_timer = 0
 
         while True:
-            progress = smooth_step((data.time - insert_traj_start) / insert_duration) if insert_duration > 0 else 1.0
-            target_tip_pos = (1 - progress) * insert_start_tip + progress * insert_goal_tip
-            target_back_pos = (1 - progress) * insert_start_back + progress * insert_goal_back
+            elapsed = data.time - traj_start_time
+            global_t = min(elapsed / total_duration, 1.0) if total_duration > 0 else 1.0
+
+            if global_t <= seg1_ratio:
+                # 구간1: offset → entry (선형 보간)
+                alpha = global_t / seg1_ratio if seg1_ratio > 0 else 1.0
+                target_tip_pos = (1 - alpha) * traj_start_tip + alpha * align_goal_tip
+                target_back_pos = (1 - alpha) * traj_start_back + alpha * align_goal_back
+            else:
+                # 구간2: entry → depth (선형 보간)
+                alpha = (global_t - seg1_ratio) / (1.0 - seg1_ratio) if seg1_ratio < 1.0 else 1.0
+                target_tip_pos = (1 - alpha) * align_goal_tip + alpha * insert_goal_tip
+                target_back_pos = (1 - alpha) * align_goal_back + alpha * insert_goal_back
 
             run_ik_step(target_tip_pos, target_back_pos)
             mujoco.mj_step(model, data)
             step_count += 1
 
             if step_count % 67 == 0:
-                last_ee_pose = record_step(last_ee_pose, 2)
+                # Phase: entry 통과 전 = 1, 통과 후 = 2
+                curr_tip = data.site_xpos[tip_id].copy()
+                depth_along_axis = np.dot(curr_tip - p_entry, axis_dir)
+                phase = 1 if depth_along_axis < 0 else 2
+                last_ee_pose = record_step(last_ee_pose, phase)
 
-            if progress >= 1.0:
+            # 성공 조건: 목표 깊이 도달
+            if global_t >= 1.0:
                 curr_tip = data.site_xpos[tip_id].copy()
                 tip_to_entry = curr_tip - p_entry
                 depth_along_axis = np.dot(tip_to_entry, axis_dir) * 1000
