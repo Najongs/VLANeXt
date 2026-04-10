@@ -1,11 +1,18 @@
 """
-python Save_dataset.py --no-randomize-phantom-pos
+# python Save_dataset.py --no-randomize-phantom-pos
 
-python run_parallel.py \
-    --script full --workers 20 --episodes 5 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_test \
-    --phantom-pos 0.0 0.0 --no-insertion
+# python run_parallel.py \
+#     --script full --workers 5 --episodes 5 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_test \
+#     --phantom-pos 0.0 0.0 --no-insertion
 
+# python run_parallel.py --script approach --workers 5 --episodes 5 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_data \
+#     --phantom-pos 0.0 0.0 --no-insertion
+
+python run_parallel.py --script approach --workers 5 --episodes 5 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_data \
+    --no-insertion
 """
 
 import os
@@ -53,7 +60,7 @@ MAX_EPISODES = 1
 IMG_WIDTH = 640
 IMG_HEIGHT = 480
 TARGET_INSERTION_DEPTH = 0.0275
-ALIGN_SPEED = 0.01      # 정렬 단계 속도: 0.015 m/s (초당 1.5cm)
+ALIGN_SPEED = 0.02      # 정렬 단계 속도: 0.02 m/s (~200 steps)
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 2.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
@@ -222,6 +229,7 @@ def randomize_phantom_pos(model, data, phantom_id, rot_id):
 
 # === Args ===
 NO_INSERTION = False
+RANDOMIZE_PHANTOM = False
 PHANTOM_POS = None  # (x, y) 고정 위치
 
 def _parse_args():
@@ -230,7 +238,7 @@ def _parse_args():
         "--randomize-phantom-pos",
         dest="randomize_phantom_pos",
         action="store_true",
-        default=True,
+        default=False,
         help="Enable phantom position randomization.",
     )
     parser.add_argument(
@@ -254,12 +262,14 @@ def _parse_args():
 
 # === Main Script ===
 def main():
-    global NO_INSERTION, PHANTOM_POS
+    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM
     args = _parse_args()
     if args.no_insertion:
         NO_INSERTION = True
     if args.phantom_pos is not None:
         PHANTOM_POS = tuple(args.phantom_pos)
+    if args.randomize_phantom_pos:
+        RANDOMIZE_PHANTOM = True
     print(f"Loading Model: {MODEL_PATH}")
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
@@ -325,7 +335,7 @@ def main():
             phantom_offset = np.array([px, py, 0.0], dtype=np.float32)
             phantom_quat = new_quat.astype(np.float32)
             phantom_angle_deg = np.float32(rand_angle)
-        elif args.randomize_phantom_pos:
+        elif RANDOMIZE_PHANTOM:
             phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(model, data, phantom_body_id, rotating_id)
         mujoco.mj_forward(model, data)
         
