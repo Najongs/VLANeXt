@@ -33,8 +33,7 @@
 #               2번째 인자: workers, 3번째: bins_xy, 4번째: bins_z
 #               예: bash Run_Collect.sh grid 10 8 6  → 8x8x6=384 에피소드
 #
-#   full        전체 파이프라인 수집 (Save_dataset.py).
-#               정렬뿐 아니라 삽입까지 포함된 full trajectory.
+#   full        approach+align+insert 전체 파이프라인 수집 (Save_dataset_approach_only.py).
 #               align-only와는 다른 데이터셋.
 #
 #   insertion   Insertion-only 수집. 정렬 완료 상태에서 접근+삽입만 녹화.
@@ -88,14 +87,14 @@
 
 # Y축 5위치에서 approach+align (insertion 제외)
 # bash Run_Collect.sh approach 10 2000         # 5위치 × 20,000 = 100,000개
-# - 스크립트: Save_dataset.py + --phantom-pos + --no-insertion
+# - 스크립트: Save_dataset_approach_only.py + --phantom-pos + --no-insertion
 # - 먼 거리(home pose)에서 trocar까지 접근 + 정렬, 삽입 직전에 종료
 
 # Phase 4: Insertion (삽입)
 
 # Y축 5위치에서 full pipeline
 # bash Run_Collect.sh full 10 2000             # 5위치 × 20,000 = 100,000개
-# - 스크립트: Save_dataset.py + --phantom-pos
+# - 스크립트: Save_dataset_approach_only.py + --phantom-pos
 # - approach + align + insert 전체 trajectory
 
 # Phase 4-alt: Insertion Only (정렬 완료 후 삽입만)
@@ -211,7 +210,7 @@ case $MODE in
             echo ""
             echo "=== [$((idx+1))/${#POSITIONS[@]}] Approach: Phantom pos=(${POS[0]}, ${POS[1]}) ==="
             python Sim/run_parallel.py \
-                --script full --workers $WORKERS --episodes $EPISODES \
+                --script approach --workers $WORKERS --episodes $EPISODES \
                 --base-dir ${BASE}/approach_${LABEL} \
                 --phantom-pos ${POS[0]} ${POS[1]} --no-insertion
         done
@@ -227,7 +226,7 @@ case $MODE in
             echo ""
             echo "=== [$((idx+1))/${#POSITIONS[@]}] Full: Phantom pos=(${POS[0]}, ${POS[1]}) ==="
             python Sim/run_parallel.py \
-                --script full --workers $WORKERS --episodes $EPISODES \
+                --script approach --workers $WORKERS --episodes $EPISODES \
                 --base-dir ${BASE}/full_${LABEL} \
                 --phantom-pos ${POS[0]} ${POS[1]}
         done

@@ -1,31 +1,33 @@
 project:
-  name: "VLANeXt_finetune_sim_zero3"
+  name: "VLANeXt_Qwen3.5_fine_approach"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 500
+  save_interval: 5000
   use_wandb: true
 
 data:
-  dataset_name: "sim"
-  data_root: "/data/public/NAS/VLANeXt/dataset/New1/collected_data_merged"
+  dataset_name: "sim_align"
+  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
+  skip_history_padding: true
 
   history_len: 8
   future_len: 8
-  buffer_size: 1000
+  buffer_size: 2000
 
-  batch_size: 51
+  batch_size: 50
   max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "multi"
+  view_mode: "single"
 
   # camera name mapping (HDF5 key names)
-  cam_exterior: "side_camera"
-  cam_wrist: "tool_camera"
-  cam_top: "top_camera"
+  # wrist camera as primary — side/top too far for fine alignment
+  cam_exterior: "tool_camera"
+  cam_wrist: ""
+  cam_top: ""
 
   augmentation:
     enabled: true
@@ -45,11 +47,18 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3-VL-2B-Instruct"
+  lmm_path: "Qwen/Qwen3.5-2B"
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
   action_dim: 7
+  proprio_dim: 7
+  use_sensor: false
 
   loss_type: "diffusion"
   num_train_timesteps: 1000
@@ -84,8 +93,6 @@ model:
   generator_mlp_ratio: 4.0
   future_image_mode: "horizon"
 
-  spatial_loss_weight: 0.1
-
   dct_loss_weight: 0.1
   dct_freq_split: 0.125
   dct_low_freq_weight: 1.0
@@ -101,11 +108,11 @@ model:
 
 train:
   seed: 2026
-  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_finetune_sim/zero3"
+  resume_path: ""
   pretrained_checkpoint: ""
-  learning_rate: 1.0e-5  # fine-tuning이므로 DROID보다 낮게
+  learning_rate: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 100
+  warmup_steps: 250
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
@@ -113,6 +120,6 @@ train:
   dist_backend: "nccl"
   deepspeed:
     enabled: true
-    zero_stage: 3
-    offload_optimizer_device: "cpu"
+    zero_stage: 2
+    offload_optimizer_device: "none"
     offload_param_device: "none"

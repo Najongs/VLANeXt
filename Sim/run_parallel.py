@@ -8,7 +8,7 @@ Usage:
     python Sim/run_parallel.py --script align --workers 10 --episodes 1000 \
         --base-dir dataset/fine_align/bias_x_neg --bias x_neg
 
-    python Sim/run_parallel.py --script full --workers 5 --episodes 500 \
+    python Sim/run_parallel.py --script approach --workers 5 --episodes 500 \
         --base-dir dataset/new_data
 
     python Sim/run_parallel.py --script insertion --workers 10 --episodes 500 \
@@ -29,7 +29,7 @@ import numpy as np
 
 SCRIPT_MAP = {
     "align": "Save_dataset_align_only",
-    "full": "Save_dataset",
+    "approach": "Save_dataset_approach_only",
     "insertion": "Save_dataset_insertion_only",
 }
 

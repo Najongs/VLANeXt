@@ -6,13 +6,8 @@ Insertion dataset collection.
 3. XY offset 적용 (align 모델의 잔여 오차 시뮬레이션)
 4. 삽입 과정 녹화: XY 오차 보정하며 trocar 통과 → 목표 깊이까지
 5. 성공: 목표 깊이 도달 + lateral error 작음
-
-Usage:
-    python Sim/Save_dataset_insertion_only.py
-    python Sim/Save_dataset_insertion_only.py --randomize-phantom-pos --num-episodes 250
-    python Sim/Save_dataset_insertion_only.py --phantom-pos 0.0 -0.2 --num-episodes 100
     
-python run_parallel.py --script insertion --workers 10 --episodes 25 \
+python run_parallel.py --script insertion --workers 10 --episodes 5 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data \
     --phantom-pos 0.0 0.0
 """
@@ -65,8 +60,8 @@ IMG_HEIGHT = 480
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
-INSERTION_SPEED = 0.005     # 삽입 속도 (m/s) — 정렬과 동일
+FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
+INSERTION_SPEED = 0.0075     # 삽입 속도 (m/s) — 정렬과 동일
 
 # --- Insertion 설정 ---
 APPROACH_OFFSET_MM = 5.0    # entry 뒤 시작 거리 (mm)
@@ -74,16 +69,16 @@ APPROACH_XY_OFFSET_MM = 2.0 # align 모델의 XY 잔여 오차 (±mm)
 TARGET_INSERTION_DEPTH_MM = 25.0  # 목표 삽입 깊이 (mm)
 
 # --- 성공 조건 ---
-ALIGN_THRESHOLD_M = 0.002   # pre-alignment 수렴 (m)
-ALIGN_HOLD_STEPS = 20       # 수렴 유지 횟수
+ALIGN_THRESHOLD_M = 0.0025   # pre-alignment 수렴 (m)
+ALIGN_HOLD_STEPS = 0       # 수렴 유지 횟수
 INSERTION_DEPTH_THRESHOLD_MM = 1.0   # 목표 깊이 허용 오차 (mm)
 INSERTION_LATERAL_THRESHOLD_MM = 3.0  # lateral error 허용 (mm)
 
 # --- Task Instruction ---
-TASK_INSTRUCTION = "Insert the needle through the trocar opening while maintaining alignment"
+TASK_INSTRUCTION = "Insert the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # --- Holding (삽입 완료 후 자세 유지 녹화) ---
-HOLD_RECORD_STEPS = 10
+HOLD_RECORD_STEPS = 5
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)

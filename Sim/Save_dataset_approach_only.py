@@ -2,7 +2,7 @@
 python Save_dataset.py --no-randomize-phantom-pos
 
 python run_parallel.py \
-    --script full --workers 20 --episodes 500 \
+    --script full --workers 20 --episodes 5 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_test \
     --phantom-pos 0.0 0.0 --no-insertion
 
@@ -55,7 +55,7 @@ IMG_HEIGHT = 480
 TARGET_INSERTION_DEPTH = 0.0275
 ALIGN_SPEED = 0.01      # 정렬 단계 속도: 0.015 m/s (초당 1.5cm)
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
-TASK_INSTRUCTION = "Align the needle and insert it into the trocar opening"
+TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 2.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
