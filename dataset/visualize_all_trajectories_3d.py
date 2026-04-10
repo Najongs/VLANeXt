@@ -309,6 +309,10 @@ def analyze_dataset(dataset_path, output_path=None):
     all_actions = []
     action_per_episode_stats = []  # (mean, std, min, max) per episode
     ee_pose_ranges = []  # (min, max) per dimension across episode
+    sensor_dist_starts = []
+    sensor_dist_ends = []
+    sensor_dist_mins = []
+    all_sensor_dists = []
 
     print("Loading episodes...")
     for h5_file in tqdm(h5_files):
@@ -340,6 +344,15 @@ def analyze_dataset(dataset_path, output_path=None):
                     nt = f['observations']['needle_tip_pos'][-1, :3]
                     te = f['observations']['trocar_entry_pos'][-1, :3]
                     final_dists.append(np.linalg.norm(nt - te))
+
+                # Sensor distance
+                if 'sensor_dist' in f['observations']:
+                    sd = f['observations']['sensor_dist'][:].astype(np.float32)
+                    sensor_dist_starts.append(float(sd[0]))
+                    sensor_dist_ends.append(float(sd[-1]))
+                    valid_sd = sd[sd >= 0]
+                    sensor_dist_mins.append(float(valid_sd.min()) if len(valid_sd) > 0 else -1.0)
+                    all_sensor_dists.append(sd)
 
                 # Actions
                 actions = f['action'][:].astype(np.float32)
@@ -410,6 +423,43 @@ def analyze_dataset(dataset_path, output_path=None):
             pos = vals[vals > 0.5]
             p(f"  {ax_name}: mean={vals.mean():+.2f}, std={vals.std():.2f}, range=[{vals.min():+.2f}, {vals.max():+.2f}]")
             p(f"     negative(<-0.5): {len(neg)} ({len(neg)/len(vals)*100:.1f}%), positive(>+0.5): {len(pos)} ({len(pos)/len(vals)*100:.1f}%)")
+
+    has_sensor = len(sensor_dist_starts) > 0
+    if has_sensor:
+        sd_starts = np.array(sensor_dist_starts)
+        sd_ends = np.array(sensor_dist_ends)
+        sd_mins = np.array(sensor_dist_mins)
+        all_sd_cat = np.concatenate(all_sensor_dists, axis=0)
+
+        p(f"\n--- Sensor Distance ---")
+        p(f"  Episodes with sensor: {len(sd_starts)}")
+
+        # Start values
+        sd_s_valid = sd_starts[sd_starts >= 0]
+        p(f"  Start — mean: {sd_s_valid.mean():.2f}mm, median: {np.median(sd_s_valid):.2f}mm, range: [{sd_s_valid.min():.2f}, {sd_s_valid.max():.2f}]")
+        p(f"          undetected (< 0): {(sd_starts < 0).sum()} ({(sd_starts < 0).mean()*100:.1f}%)")
+
+        # End values
+        sd_e_valid = sd_ends[sd_ends >= 0]
+        sd_e_undetected = (sd_ends < 0).sum()
+        if len(sd_e_valid) > 0:
+            p(f"  End   — mean: {sd_e_valid.mean():.2f}mm, median: {np.median(sd_e_valid):.2f}mm, range: [{sd_e_valid.min():.2f}, {sd_e_valid.max():.2f}]")
+        p(f"          undetected (< 0): {sd_e_undetected} ({sd_e_undetected/len(sd_ends)*100:.1f}%)")
+
+        # Min values (closest approach)
+        sd_m_valid = sd_mins[sd_mins >= 0]
+        if len(sd_m_valid) > 0:
+            p(f"  Min   — mean: {sd_m_valid.mean():.2f}mm, median: {np.median(sd_m_valid):.2f}mm, range: [{sd_m_valid.min():.2f}, {sd_m_valid.max():.2f}]")
+
+        # All timesteps distribution
+        all_sd_valid = all_sd_cat[all_sd_cat >= 0]
+        all_sd_undetected = (all_sd_cat < 0).sum()
+        p(f"  All timesteps — {len(all_sd_cat)} total, undetected: {all_sd_undetected} ({all_sd_undetected/len(all_sd_cat)*100:.1f}%)")
+        if len(all_sd_valid) > 0:
+            p(f"    detected — mean: {all_sd_valid.mean():.2f}mm, median: {np.median(all_sd_valid):.2f}mm")
+            for thresh in [5, 10, 15, 20]:
+                cnt = (all_sd_valid < thresh).sum()
+                p(f"    < {thresh}mm: {cnt} ({cnt/len(all_sd_valid)*100:.1f}%)")
 
     p(f"\n--- Action Statistics (all timesteps, {len(all_actions_cat)} total) ---")
     dim_names = ['dx', 'dy', 'dz', 'droll', 'dpitch', 'dyaw', 'gripper']
@@ -527,24 +577,87 @@ def analyze_dataset(dataset_path, output_path=None):
     p(f"Saved: {out_dir / 'analysis_positions.png'}")
 
     # Figure 4: Trajectory length & final distance
-    fig, axes = plt.subplots(1, 2 if has_final_dist else 1, figsize=(12 if has_final_dist else 6, 5))
-    if not has_final_dist:
+    n_cols = 1 + int(has_final_dist) + int(has_sensor)
+    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 5))
+    if n_cols == 1:
         axes = [axes]
-    axes[0].hist(traj_lengths, bins=50, color='steelblue', edgecolor='black', alpha=0.7)
-    axes[0].set_xlabel('Trajectory Length (steps)')
-    axes[0].set_ylabel('Count')
-    axes[0].set_title(f'Trajectory Length Distribution (mean={traj_lengths.mean():.1f})')
+    col = 0
+    axes[col].hist(traj_lengths, bins=50, color='steelblue', edgecolor='black', alpha=0.7)
+    axes[col].set_xlabel('Trajectory Length (steps)')
+    axes[col].set_ylabel('Count')
+    axes[col].set_title(f'Trajectory Length Distribution (mean={traj_lengths.mean():.1f})')
+    col += 1
     if has_final_dist:
-        axes[1].hist(final_dists, bins=50, color='coral', edgecolor='black', alpha=0.7)
-        axes[1].axvline(3.0, color='green', linestyle='--', label='3mm threshold')
-        axes[1].set_xlabel('Final Distance (mm)')
-        axes[1].set_ylabel('Count')
-        axes[1].set_title(f'Final Needle-Trocar Distance (mean={final_dists.mean():.2f}mm)')
-        axes[1].legend()
+        axes[col].hist(final_dists, bins=50, color='coral', edgecolor='black', alpha=0.7)
+        axes[col].axvline(3.0, color='green', linestyle='--', label='3mm threshold')
+        axes[col].set_xlabel('Final Distance (mm)')
+        axes[col].set_ylabel('Count')
+        axes[col].set_title(f'Final Needle-Trocar Distance (mean={final_dists.mean():.2f}mm)')
+        axes[col].legend()
+        col += 1
+    if has_sensor:
+        # Sensor dist: start vs end histogram
+        ax = axes[col]
+        sd_s_valid = sd_starts[sd_starts >= 0]
+        sd_e_valid = sd_ends[sd_ends >= 0]
+        if len(sd_s_valid) > 0:
+            ax.hist(sd_s_valid, bins=50, alpha=0.5, color='orange', label=f'Start (mean={sd_s_valid.mean():.1f})', edgecolor='none')
+        if len(sd_e_valid) > 0:
+            ax.hist(sd_e_valid, bins=50, alpha=0.5, color='purple', label=f'End (mean={sd_e_valid.mean():.1f})', edgecolor='none')
+        ax.set_xlabel('Sensor Distance (mm)')
+        ax.set_ylabel('Count')
+        ax.set_title('Sensor Distance: Start vs End')
+        ax.legend()
     plt.tight_layout()
     plt.savefig(out_dir / 'analysis_traj_quality.png', dpi=200, bbox_inches='tight')
     plt.close()
     p(f"Saved: {out_dir / 'analysis_traj_quality.png'}")
+
+    # Figure 5: Sensor distance detail (if available)
+    if has_sensor:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig.suptitle('Sensor Distance Analysis', fontsize=14)
+
+        # All timesteps histogram
+        ax = axes[0]
+        all_sd_valid = all_sd_cat[all_sd_cat >= 0]
+        if len(all_sd_valid) > 0:
+            ax.hist(all_sd_valid, bins=100, color='steelblue', edgecolor='none', alpha=0.7)
+            ax.axvline(all_sd_valid.mean(), color='orange', linewidth=2, label=f'mean={all_sd_valid.mean():.1f}mm')
+            ax.axvline(np.median(all_sd_valid), color='red', linewidth=2, linestyle='--', label=f'median={np.median(all_sd_valid):.1f}mm')
+        ax.set_xlabel('Sensor Distance (mm)')
+        ax.set_ylabel('Count')
+        ax.set_title(f'All Timesteps (n={len(all_sd_valid)}, undetected={len(all_sd_cat)-len(all_sd_valid)})')
+        ax.legend()
+
+        # Min sensor dist per episode
+        ax = axes[1]
+        sd_m_valid = sd_mins[sd_mins >= 0]
+        if len(sd_m_valid) > 0:
+            ax.hist(sd_m_valid, bins=50, color='coral', edgecolor='black', alpha=0.7)
+            ax.axvline(sd_m_valid.mean(), color='orange', linewidth=2, label=f'mean={sd_m_valid.mean():.1f}mm')
+        ax.set_xlabel('Min Sensor Distance per Episode (mm)')
+        ax.set_ylabel('Count')
+        ax.set_title(f'Closest Sensor Reading per Episode')
+        ax.legend()
+
+        # Sensor dist over trajectory (sample 50 episodes)
+        ax = axes[2]
+        sample_idx = np.random.choice(len(all_sensor_dists), size=min(50, len(all_sensor_dists)), replace=False)
+        for i in sample_idx:
+            sd = all_sensor_dists[i]
+            sd_plot = sd.copy()
+            sd_plot[sd_plot < 0] = np.nan
+            ax.plot(np.arange(len(sd_plot)) / len(sd_plot), sd_plot, alpha=0.3, linewidth=0.5)
+        ax.set_xlabel('Trajectory Progress (0→1)')
+        ax.set_ylabel('Sensor Distance (mm)')
+        ax.set_title('Sensor Distance over Trajectory (50 samples)')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(out_dir / 'analysis_sensor.png', dpi=200, bbox_inches='tight')
+        plt.close()
+        p(f"Saved: {out_dir / 'analysis_sensor.png'}")
 
     # Save report
     report_path = out_dir / 'analysis_report.txt'

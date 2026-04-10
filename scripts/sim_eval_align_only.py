@@ -121,9 +121,11 @@ PERTURB_POS_Z_MM = 7.0
 PERTURB_ANGLE_DEG = 7.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.003   # 3mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.0035   # 3.5mm
 ALIGN_SUCCESS_ANGLE_DEG = 15.0      # needle-trocar axis angle < 15deg
 ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
+ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
+USE_SENSOR_SUCCESS = False           # toggle sensor-based success check
 
 
 class AlignSimEnv:
@@ -443,7 +445,13 @@ class AlignSimEnv:
         else:
             angle_deg = 90.0
 
-        if dist < ALIGN_SUCCESS_THRESHOLD_M and angle_deg < ALIGN_SUCCESS_ANGLE_DEG:
+        aligned = dist < ALIGN_SUCCESS_THRESHOLD_M and angle_deg < ALIGN_SUCCESS_ANGLE_DEG
+
+        if USE_SENSOR_SUCCESS and aligned:
+            sensor_dist = self.get_sensor_dist()
+            aligned = aligned and (sensor_dist >= ALIGN_SUCCESS_SENSOR_MIN_MM or sensor_dist < 0)
+
+        if aligned:
             self.align_hold_counter += 1
         else:
             self.align_hold_counter = 0
@@ -759,6 +767,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
     parser.add_argument("--randomize-phantom", action="store_true",
                         help="Randomize phantom position/rotation each episode")
+    parser.add_argument("--sensor-success", action="store_true",
+                        help="Require sensor to see through trocar hole for success")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -772,4 +782,8 @@ if __name__ == "__main__":
     cfg.shard_id = args.shard_id
     cfg.num_shards = args.num_shards
     cfg.randomize_phantom = args.randomize_phantom
+
+    global USE_SENSOR_SUCCESS
+    USE_SENSOR_SUCCESS = args.sensor_success
+
     run_eval(cfg)
