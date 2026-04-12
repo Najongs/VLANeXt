@@ -11,3 +11,6 @@ sim_eval_step*/
 fine_align/
 align_eval*/
 grid_data/
+
+insertion_eval*/
+approach_eval*/

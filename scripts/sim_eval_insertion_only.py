@@ -121,11 +121,11 @@ def _save_trajectory_plot(eval_dir):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Insertion eval config
 # ═══════════════════════════════════════════════════════════════════════════════
-TASK_INSTRUCTION = "Insert the needle through the trocar opening while maintaining alignment"
+TASK_INSTRUCTION = "Insert the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # Approach offset — simulates where align model actually stops
 APPROACH_OFFSET_MM = 5.0        # behind trocar entry along axis (mm)
-APPROACH_XY_OFFSET_MM = 2.0     # lateral offset perpendicular to trocar axis (±mm)
+APPROACH_XY_OFFSET_MM = 10.0    # lateral offset perpendicular to trocar axis (±mm)
 
 # Success criteria
 INSERT_SUCCESS_DEPTH_MM = 25.0      # needle tip must be this deep along trocar axis
@@ -588,7 +588,7 @@ def run_eval(cfg):
     use_sensor = getattr(cfg.model, "use_sensor", False)
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
-    max_steps = getattr(cfg.eval, "max_steps_per_episode", 300)
+    max_steps = getattr(cfg.eval, "max_steps_per_episode", 200)
     num_steps_execute = getattr(cfg.eval, "num_steps_execute", 1)
     sim_steps_per_ctrl = getattr(cfg.eval, "sim_steps_per_control", 67)
     save_video = getattr(cfg.eval, "save_video", True)

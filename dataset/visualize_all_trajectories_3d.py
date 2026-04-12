@@ -2,7 +2,7 @@
 """
 
 python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/approach_test/collected_data_merged"
-python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/approach_data/collected_data_merged"
+python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged"
 Visualize all trajectories from Eye_trocar dataset in 3D space
 Shows all trajectories with their start and end points marked
 """

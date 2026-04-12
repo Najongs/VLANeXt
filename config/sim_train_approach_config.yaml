@@ -6,8 +6,8 @@ project:
   use_wandb: true
 
 data:
-  dataset_name: "sim_align"
-  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
+  dataset_name: "sim_approach"
+  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/approach_data/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true
@@ -17,7 +17,7 @@ data:
   buffer_size: 2000
 
   batch_size: 50
-  max_steps: 10000
+  max_steps: 20000
   num_workers: 4
 
   input_modality: "image"
@@ -25,7 +25,7 @@ data:
 
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
-  cam_exterior: "tool_camera"
+  cam_exterior: "top_camera"
   cam_wrist: ""
   cam_top: ""
 

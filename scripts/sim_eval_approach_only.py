@@ -113,7 +113,7 @@ def _save_trajectory_plot(eval_dir):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Approach eval config
 # ═══════════════════════════════════════════════════════════════════════════════
-TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
+TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # Home pose joint ranges (same as Save_dataset.py)
 HOME_POSE_RANGES = [

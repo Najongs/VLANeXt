@@ -10,7 +10,7 @@
 #     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_data \
 #     --phantom-pos 0.0 0.0 --no-insertion
 
-python run_parallel.py --script approach --workers 5 --episodes 5 \
+python run_parallel.py --script approach --workers 20 --episodes 500 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_data \
     --no-insertion
 """

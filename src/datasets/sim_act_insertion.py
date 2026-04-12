@@ -13,11 +13,11 @@ from torch.utils.data import IterableDataset
 # recalculate from actual insertion data once collected.
 # delta_pose(6) + gripper(1)
 # Gripper is always 1.0 (closed) during insertion.
-action_min_sim_insertion = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, 1.0]
+action_min_sim_insertion = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
 action_max_sim_insertion = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, 1.0]
 
 # Must match Save_dataset_insertion_only.py and sim_eval_insertion_only.py
-TASK_INSTRUCTION = "Insert the needle through the trocar opening while maintaining alignment"
+TASK_INSTRUCTION = "Insert the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 
 class SimActInsertion(IterableDataset):

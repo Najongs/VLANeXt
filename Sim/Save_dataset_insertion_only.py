@@ -11,7 +11,7 @@ Insertion dataset collection.
 #     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data \
 #     --phantom-pos 0.0 0.0
 
-python run_parallel.py --script insertion --workers 10 --episodes 5 \
+python run_parallel.py --script insertion --workers 20 --episodes 500 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data
 """
 
@@ -81,7 +81,7 @@ INSERTION_LATERAL_THRESHOLD_MM = 3.0  # lateral error 허용 (mm)
 TASK_INSTRUCTION = "Insert the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # --- Holding (삽입 완료 후 자세 유지 녹화) ---
-HOLD_RECORD_STEPS = 5
+HOLD_RECORD_STEPS = 10
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
