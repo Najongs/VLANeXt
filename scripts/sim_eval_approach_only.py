@@ -457,12 +457,14 @@ def run_eval(cfg):
             img_wrist = preprocess_image(frames["tool_camera"], (image_size, image_size))
             img_top = preprocess_image(frames["top_camera"], (image_size, image_size))
 
-            # Use wrist as primary view (configured via train config view_mode)
-            img_primary = img_wrist
+            # Map sim cameras to train config camera roles
+            # Train config: cam_exterior=top_camera, cam_wrist=tool_camera, cam_top=""
+            img_primary = img_top       # exterior = top_camera
+            img_secondary = img_wrist   # wrist = tool_camera
 
             image_history.append(img_primary)
-            image_history_wrist.append(img_wrist)
-            image_history_top.append(img_top)
+            image_history_wrist.append(img_secondary)
+            image_history_top.append(img_top)  # kept for replay only
 
             metrics = env.get_spatial_metrics()
             metrics_history.append(metrics)
@@ -480,14 +482,14 @@ def run_eval(cfg):
 
             observation = {
                 "full_image": img_primary,
-                "full_image_wrist": img_wrist,
-                "full_image_top": img_top,
+                "full_image_wrist": img_secondary,
                 "image_history": image_history,
                 "image_history_wrist": image_history_wrist,
-                "image_history_top": image_history_top,
                 "state_history": state_history,
                 "action_history": action_history,
             }
+            # Note: full_image_top / image_history_top intentionally excluded
+            # because training used cam_top="" (only 2-view: top + tool)
 
             spatial_pred = None
             if len(action_buffer) == 0:

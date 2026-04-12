@@ -16,17 +16,17 @@ data:
   future_len: 8
   buffer_size: 2000
 
-  batch_size: 50
+  batch_size: 100
   max_steps: 20000
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "single"
+  view_mode: "multi"
 
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
   cam_exterior: "top_camera"
-  cam_wrist: ""
+  cam_wrist: "tool_camera"
   cam_top: ""
 
   augmentation:
@@ -112,8 +112,8 @@ train:
   pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 250
-  gradient_accumulation_steps: 1
+  warmup_steps: 500
+  gradient_accumulation_steps: 2
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true

@@ -1,17 +1,17 @@
 project:
   # [projectname]_[versionname]_[benchmarkname]_[else......]
-  name: "VLANeXt_final_droid_bs256_normal"
+  name: "VLANeXt_final_libero_spatial"
   output_dir: "/mnt/draven/checkpoints/VLANeXt"
   log_interval: 10
-  save_interval: 5000
+  save_interval: 2000
   use_wandb: true
 
 data:
-  dataset_name: "droid"
-  # /mnt/draven/data/open_x_embodiment/droid
-  data_root: "/mnt/draven/data/open_x_embodiment/droid"
-  # droid, options: (none for now)
-  task_suite_name: ""
+  dataset_name: "libero"
+  # /mnt/draven/data/LIBERO_modified
+  data_root: "/mnt/draven/data/LIBERO_modified"
+  # loptions: libero_spatial, libero_object, libero_goal, libero_10
+  task_suite_name: "libero_spatial"
   full_sequence: true  # If true, sample every timestep; if false, subsample
 
   # number of past timesteps
@@ -27,14 +27,14 @@ data:
 
   # batch training configs
   batch_size: 256  # this is the total batch size across all GPUs, it will be automatically divided by the number of GPUs used
-  max_steps: 100000
+  max_steps: 10000 # 10k for spatial, object, goal; 12k for long (10)
   num_workers: 2
 
   # vision input controls
   input_modality: "image"   # temporal history, options: "video", "image"
 
   # camera view, options: "single", "multi"
-  view_mode: "multi" 
+  view_mode: "multi"
   
   # augmentation (applied to image/video frames before processor)
   augmentation:
@@ -88,7 +88,7 @@ model:
   # condition type option: "loose", "tight", "soft"
   condition_type: "soft"
   # loose or soft conditioning configs (applicable if condition_type is "loose" or "soft")
-  num_queries: 16 
+  num_queries: 16
   # loose conditioning configs (applicable if condition_type is "loose")
   use_transformer_connector: true
   connector_depth: 2
@@ -113,7 +113,7 @@ model:
   dct_freq_split: 0.125
   dct_low_freq_weight: 1.0
   dct_high_freq_weight: 1.0
-  dct_similarity_type: "mae" # Options: "mse", "mae", "cosine", cosine needs smaller dct_loss_weight
+  dct_similarity_type: "mse" # Options: "mse", "mae", "cosine", cosine needs smaller dct_loss_weight
 
   # action condition configs
   use_proprio_input_vlm: true
@@ -129,9 +129,9 @@ train:
   pretrained_checkpoint: "" # path to the pretrained model checkpoint
   learning_rate: 1.0e-4
   weight_decay: 0.01
-  warmup_steps: 5000 # 5% of max steps
+  warmup_steps: 500 # 5% of max steps
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
-  distributed: true
+  distributed: false
   dist_backend: "nccl"

@@ -36,7 +36,7 @@ NUM_SHARDS=2
 # Mode-specific config
 if [ "$MODE" = "approach" ]; then
     CONFIG=config/sim_eval_approach_config.yaml
-    TRAIN_CONFIG=config/sim_train_align_config.yaml
+    TRAIN_CONFIG=config/sim_train_approach_config.yaml
     EVAL_SCRIPT=scripts.sim_eval_approach_only
     MERGE_PREFIX="approach"
 elif [ "$MODE" = "insertion" ]; then
