@@ -41,7 +41,7 @@ if [ "$MODE" = "approach" ]; then
     MERGE_PREFIX="approach"
 elif [ "$MODE" = "insertion" ]; then
     CONFIG=config/sim_eval_insertion_config.yaml
-    TRAIN_CONFIG=config/sim_train_align_config.yaml
+    TRAIN_CONFIG=config/sim_train_insertion_config.yaml
     EVAL_SCRIPT=scripts.sim_eval_insertion_only
     MERGE_PREFIX="insertion"
 else

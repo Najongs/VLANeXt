@@ -36,7 +36,7 @@ from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
-from src.datasets.sim_act_align import action_min_sim_align as action_min_sim, action_max_sim_align as action_max_sim
+from src.datasets.sim_act_approach import action_min_sim_approach as action_min_sim, action_max_sim_approach as action_max_sim
 
 # Reuse model loading / inference from sim_eval
 from scripts.sim_eval import (
