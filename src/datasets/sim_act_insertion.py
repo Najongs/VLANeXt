@@ -69,9 +69,32 @@ class SimActInsertion(IterableDataset):
         self.action_max = np.array(action_max_sim_insertion, dtype=np.float32)
 
         # Collect all h5 files (recursive — searches subdirectories too)
-        self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
-        if not self.episode_paths:
-            raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
+        # data_dir can be:
+        #   - str: single path
+        #   - list of str: multiple paths, all episodes used
+        #   - list of dict: multiple paths with optional max_episodes per path
+        #     e.g. [{"path": "/data/...", "max_episodes": 10000}, ...]
+        if isinstance(data_dir, (list, tuple)):
+            self.episode_paths = []
+            for d in data_dir:
+                if isinstance(d, dict):
+                    p = d["path"]
+                    max_ep = d.get("max_episodes", None)
+                else:
+                    p = d
+                    max_ep = None
+                eps = sorted(glob.glob(os.path.join(p, "**", "*.h5"), recursive=True))
+                if max_ep is not None and len(eps) > max_ep:
+                    rng = np.random.RandomState(42)
+                    eps = sorted(rng.choice(eps, size=max_ep, replace=False).tolist())
+                self.episode_paths.extend(eps)
+            self.episode_paths = sorted(self.episode_paths)
+            if not self.episode_paths:
+                raise FileNotFoundError(f"No .h5 files found in any of {data_dir}")
+        else:
+            self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
+            if not self.episode_paths:
+                raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
 
     @staticmethod
     def _decode_jpeg(jpeg_data):
@@ -127,6 +150,15 @@ class SimActInsertion(IterableDataset):
                     [kp_wrist, kp_vis, dist_normalized, phase_binary], axis=-1
                 )
 
+            # --- Instruction: read from h5 if available, fallback to default ---
+            if "language_instruction" in f:
+                instruction_raw = f["language_instruction"][()]
+                if isinstance(instruction_raw, bytes):
+                    instruction_raw = instruction_raw.decode()
+                episode_instruction = str(instruction_raw)
+            else:
+                episode_instruction = TASK_INSTRUCTION
+
             # --- Action weight: uniform ---
             action_weight_np = np.ones(traj_len, dtype=np.float32)
 
@@ -152,7 +184,7 @@ class SimActInsertion(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
+        return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np, episode_instruction
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -186,7 +218,7 @@ class SimActInsertion(IterableDataset):
 
             for ep_path in episode_paths:
                 try:
-                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np, episode_instruction = self._load_episode(ep_path)
                 except Exception as e:
                     print(f"[Warn] Skipping {ep_path}: {e}")
                     continue
@@ -237,8 +269,8 @@ class SimActInsertion(IterableDataset):
                         fut_acts_np[valid_mask_fut] = actions_np[fut_indices[valid_mask_fut]]
                     fut_acts = torch.from_numpy(fut_acts_np)
 
-                    # --- Instruction (fixed, matches eval) ---
-                    instruction = TASK_INSTRUCTION
+                    # --- Instruction: from h5 file (supports mixed datasets) ---
+                    instruction = episode_instruction
 
                     sample = {
                         "proprioception": hist_proprio,

@@ -7,7 +7,11 @@ project:
 
 data:
   dataset_name: "sim_insertion"
-  data_root: "/data/public/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged"
+  # Multi-dataset mixing: insertion (전체) + align (절반 샘플링)
+  data_root:
+    - path: "/data/public/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged"
+    - path: "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
+      max_episodes: 10000
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true
@@ -17,7 +21,7 @@ data:
   buffer_size: 2000
 
   batch_size: 50
-  max_steps: 10000
+  max_steps: 20000
   num_workers: 4
 
   input_modality: "image"
@@ -57,8 +61,8 @@ model:
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
   action_dim: 7
-  proprio_dim: 7
-  use_sensor: false
+  proprio_dim: 7 # 센서 사용하려면 8로 바꾸어야함
+  use_sensor: false # true
 
   loss_type: "diffusion"
   num_train_timesteps: 1000
@@ -112,7 +116,7 @@ train:
   pretrained_checkpoint: ""   # align 체크포인트에서 finetune할 때 여기에 경로 설정
   learning_rate: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 250
+  warmup_steps: 500
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
