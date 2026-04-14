@@ -128,10 +128,10 @@ APPROACH_OFFSET_MM = 5.0        # behind trocar entry along axis (mm)
 APPROACH_XY_OFFSET_MM = 10.0    # lateral offset perpendicular to trocar axis (±mm)
 
 # Success criteria
-INSERT_SUCCESS_DEPTH_MM = 25.0      # needle tip must be this deep along trocar axis
-INSERT_SUCCESS_LATERAL_MM = 3.0     # lateral deviation tolerance (mm)
-INSERT_SUCCESS_ANGLE_DEG = 15.0     # needle-trocar axis angle tolerance
-INSERT_SUCCESS_HOLD_STEPS = 5       # consecutive steps within threshold
+INSERT_SUCCESS_DIST_MM = 5.0        # needle tip must be within this distance to trocar depth point
+INSERT_SUCCESS_ANGLE_DEG = 10.0     # needle-trocar axis angle tolerance
+INSERT_SUCCESS_HOLD_STEPS = 10      # consecutive steps within threshold
+INSERT_SUCCESS_LATERAL_MM = 3.0     # max lateral deviation from trocar axis at entry (prevents side penetration)
 
 
 class InsertionSimEnv:
@@ -447,22 +447,25 @@ class InsertionSimEnv:
             mujoco.mj_step(self.model, self.data)
 
     def check_success(self):
-        """Check if needle tip has reached insertion depth with acceptable lateral error."""
+        """Check if needle tip reached trocar depth via proper entry (not side penetration)."""
         tip_pos = self.data.site_xpos[self.tip_id].copy()
         back_pos = self.data.site_xpos[self.back_id].copy()
         entry_pos = self.data.site_xpos[self.target_entry_id].copy()
         depth_pos = self.data.site_xpos[self.target_depth_id].copy()
 
+        # Distance from needle tip to trocar depth point
+        dist_mm = np.linalg.norm(tip_pos - depth_pos) * 1000.0
+
+        # Trocar axis
         axis = depth_pos - entry_pos
         axis_dir = axis / (np.linalg.norm(axis) + 1e-10)
 
-        # Insertion depth: projection of (tip - entry) onto trocar axis
+        # Lateral deviation: how far the needle tip is from the trocar axis line
+        # This prevents counting side penetration as success
         tip_offset = tip_pos - entry_pos
-        insertion_depth_mm = np.dot(tip_offset, axis_dir) * 1000.0
-
-        # Lateral deviation
-        projection = tip_offset - np.dot(tip_offset, axis_dir) * axis_dir
-        lateral_mm = np.linalg.norm(projection) * 1000.0
+        along_axis = np.dot(tip_offset, axis_dir)
+        lateral_vec = tip_offset - along_axis * axis_dir
+        lateral_mm = np.linalg.norm(lateral_vec) * 1000.0
 
         # Needle-trocar axis angle
         needle_dir = tip_pos - back_pos
@@ -474,7 +477,7 @@ class InsertionSimEnv:
             angle_deg = 90.0
 
         success_cond = (
-            insertion_depth_mm >= INSERT_SUCCESS_DEPTH_MM and
+            dist_mm < INSERT_SUCCESS_DIST_MM and
             lateral_mm < INSERT_SUCCESS_LATERAL_MM and
             angle_deg < INSERT_SUCCESS_ANGLE_DEG
         )

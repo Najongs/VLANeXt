@@ -21,12 +21,12 @@ data:
   num_workers: 4
 
   input_modality: "image"
-  view_mode: "multi"
+  view_mode: "single"
 
   # camera name mapping (HDF5 key names)
   # wrist camera as primary — side/top too far for fine alignment
   cam_exterior: "top_camera"
-  cam_wrist: "tool_camera"
+  cam_wrist: ""
   cam_top: ""
 
   augmentation:

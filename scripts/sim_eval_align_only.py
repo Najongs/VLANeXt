@@ -122,7 +122,7 @@ PERTURB_ANGLE_DEG = 7.0
 
 # Success: needle tip within distance + angle threshold
 ALIGN_SUCCESS_THRESHOLD_M = 0.005   # 5mm
-ALIGN_SUCCESS_ANGLE_DEG = 15.0      # needle-trocar axis angle < 15deg
+ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
 ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
 

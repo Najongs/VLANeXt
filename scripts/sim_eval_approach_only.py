@@ -126,9 +126,9 @@ HOME_POSE_RANGES = [
 ]
 
 # Success: needle tip within distance of trocar entry
-APPROACH_SUCCESS_THRESHOLD_M = 0.030   # 30mm
-APPROACH_SUCCESS_ANGLE_DEG = 30.0      # relaxed angle threshold
-APPROACH_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
+APPROACH_SUCCESS_THRESHOLD_M = 0.015   # 15mm
+APPROACH_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
+APPROACH_SUCCESS_HOLD_STEPS = 10       # consecutive steps within threshold
 
 
 class ApproachSimEnv:

@@ -46,13 +46,17 @@ def overall_stats(df):
 
     print(f"  Episodes: {n}")
     print(f"  Success Rate: {sr:.1f}% ({n_success}/{n})")
-    print(f"  Final dist  — mean: {df['final_dist_mm'].mean():.2f}mm, "
-          f"median: {df['final_dist_mm'].median():.2f}mm, "
-          f"std: {df['final_dist_mm'].std():.2f}mm")
-    print(f"  Min dist    — mean: {df['min_dist_mm'].mean():.2f}mm, "
-          f"median: {df['min_dist_mm'].median():.2f}mm")
-    print(f"  Lateral     — mean: {df['final_lateral_mm'].mean():.2f}mm")
-    print(f"  Angle       — mean: {df['final_angle_deg'].mean():.2f}deg")
+    if "final_dist_mm" in df.columns:
+        print(f"  Final dist  — mean: {df['final_dist_mm'].mean():.2f}mm, "
+              f"median: {df['final_dist_mm'].median():.2f}mm, "
+              f"std: {df['final_dist_mm'].std():.2f}mm")
+    if "min_dist_mm" in df.columns:
+        print(f"  Min dist    — mean: {df['min_dist_mm'].mean():.2f}mm, "
+              f"median: {df['min_dist_mm'].median():.2f}mm")
+    if "final_lateral_mm" in df.columns:
+        print(f"  Lateral     — mean: {df['final_lateral_mm'].mean():.2f}mm")
+    if "final_angle_deg" in df.columns:
+        print(f"  Angle       — mean: {df['final_angle_deg'].mean():.2f}deg")
 
     succ = df[df["success"] == 1]
     if len(succ) > 0:
@@ -81,11 +85,15 @@ def success_vs_fail(df):
                         ("min_dist_mm", "Min dist (mm)"),
                         ("final_lateral_mm", "Lateral (mm)"),
                         ("final_angle_deg", "Angle (deg)")]:
+        if col not in df.columns:
+            continue
         print(f"  {label:20s} | Success: {succ[col].mean():6.2f} +- {succ[col].std():5.2f} | "
               f"Fail: {fail[col].mean():6.2f} +- {fail[col].std():5.2f}")
 
 
 def near_miss_analysis(df, threshold_mm=3.0):
+    if "min_dist_mm" not in df.columns:
+        return
     print_section(f"Near-Miss Analysis (min_dist < {threshold_mm + 1}mm but failed)")
     fail = df[df["success"] == 0]
     near = fail[fail["min_dist_mm"] < threshold_mm + 1.0]
@@ -100,8 +108,9 @@ def near_miss_analysis(df, threshold_mm=3.0):
     print(f"\n  {'ep':>4s} {'min_dist':>8s} {'final_dist':>10s} {'lateral':>8s} {'angle':>6s}")
     print(f"  {'-'*40}")
     for _, r in near.sort_values("min_dist_mm").iterrows():
+        lateral = r['final_lateral_mm'] if 'final_lateral_mm' in r else 0.0
         print(f"  {int(r['episode']):4d} {r['min_dist_mm']:8.2f} {r['final_dist_mm']:10.2f} "
-              f"{r['final_lateral_mm']:8.2f} {r['final_angle_deg']:6.2f}")
+              f"{lateral:8.2f} {r['final_angle_deg']:6.2f}")
 
 
 def _axis_sr(df, col, lo, hi):
@@ -125,8 +134,10 @@ def perturbation_analysis(df):
         if len(subset) == 0:
             continue
         sr = subset["success"].mean() * 100
-        print(f"  {label:>8s}: SR={sr:5.1f}% ({subset['success'].sum()}/{len(subset)}) "
-              f"avg_min_dist={subset['min_dist_mm'].mean():.2f}mm")
+        extra = ""
+        if "min_dist_mm" in subset.columns:
+            extra = f" avg_min_dist={subset['min_dist_mm'].mean():.2f}mm"
+        print(f"  {label:>8s}: SR={sr:5.1f}% ({subset['success'].sum()}/{len(subset)}){extra}")
 
     # Single axis analysis
     for axis_name, col, limit in [("X", "perturb_x_mm", 2),
@@ -140,8 +151,10 @@ def perturbation_analysis(df):
             if len(subset) == 0:
                 continue
             sr = subset["success"].mean() * 100
-            print(f"  {name:>15s}: SR={sr:5.1f}% ({subset['success'].sum()}/{len(subset)}) "
-                  f"avg_min_dist={subset['min_dist_mm'].mean():.2f}mm")
+            extra = ""
+            if "min_dist_mm" in subset.columns:
+                extra = f" avg_min_dist={subset['min_dist_mm'].mean():.2f}mm"
+            print(f"  {name:>15s}: SR={sr:5.1f}% ({subset['success'].sum()}/{len(subset)}){extra}")
 
     # By angle magnitude
     print("\n  --- By perturbation angle ---")
@@ -150,8 +163,10 @@ def perturbation_analysis(df):
         if len(subset) == 0:
             continue
         sr = subset["success"].mean() * 100
-        print(f"  {name:>15s}: SR={sr:5.1f}% ({subset['success'].sum()}/{len(subset)}) "
-              f"avg_min_dist={subset['min_dist_mm'].mean():.2f}mm")
+        extra = ""
+        if "min_dist_mm" in subset.columns:
+            extra = f" avg_min_dist={subset['min_dist_mm'].mean():.2f}mm"
+        print(f"  {name:>15s}: SR={sr:5.1f}% ({subset['success'].sum()}/{len(subset)}){extra}")
 
 
 def quadrant_analysis(df):
@@ -321,11 +336,15 @@ def failure_mode_classification(df):
         print("  No failures!")
         return
 
+    has_min_dist = "min_dist_mm" in df.columns
+    has_final_dist = "final_dist_mm" in df.columns
+    has_angle = "final_angle_deg" in df.columns
+
     modes = []
     for _, r in fail.iterrows():
-        min_d = r["min_dist_mm"]
-        final_d = r["final_dist_mm"]
-        final_ang = r["final_angle_deg"]
+        min_d = r.get("min_dist_mm", r.get("final_dist_mm", 999.0))
+        final_d = r.get("final_dist_mm", 999.0)
+        final_ang = r.get("final_angle_deg", 0.0)
 
         if min_d < 3.0 and final_d > min_d + 2.0:
             modes.append("overshoot")
@@ -346,20 +365,28 @@ def failure_mode_classification(df):
         if len(subset) == 0:
             continue
         pct = len(subset) / len(fail) * 100
-        print(f"  {mode:>15s}: {len(subset):3d} ({pct:4.1f}%) — "
-              f"avg final_dist={subset['final_dist_mm'].mean():.1f}mm, "
-              f"avg min_dist={subset['min_dist_mm'].mean():.1f}mm")
+        info = f"  {mode:>15s}: {len(subset):3d} ({pct:4.1f}%)"
+        if has_final_dist:
+            info += f" — avg final_dist={subset['final_dist_mm'].mean():.1f}mm"
+        if has_min_dist:
+            info += f", avg min_dist={subset['min_dist_mm'].mean():.1f}mm"
+        print(info)
 
-    print(f"\n  --- Worst 5 episodes (by min_dist) ---")
-    worst = fail.nlargest(5, "min_dist_mm")
+    sort_col = "min_dist_mm" if has_min_dist else ("final_dist_mm" if has_final_dist else "steps")
+    print(f"\n  --- Worst 5 episodes (by {sort_col}) ---")
+    worst = fail.nlargest(5, sort_col)
     for _, r in worst.iterrows():
         mode = r.get("failure_mode", "?")
         extra = ""
         if "perturb_x_mm" in r:
             extra = (f" perturb=({r['perturb_x_mm']:+.1f}, "
                      f"{r['perturb_y_mm']:+.1f}, {r['perturb_z_mm']:+.1f})")
-        print(f"  ep{int(r['episode']):04d}: min_dist={r['min_dist_mm']:.1f}mm "
-              f"final={r['final_dist_mm']:.1f}mm mode={mode}{extra}")
+        dist_info = ""
+        if has_min_dist:
+            dist_info += f"min_dist={r['min_dist_mm']:.1f}mm "
+        if has_final_dist:
+            dist_info += f"final={r['final_dist_mm']:.1f}mm "
+        print(f"  ep{int(r['episode']):04d}: {dist_info}mode={mode}{extra}")
 
 
 def plot_analysis(df, has_perturb, out_dir):
@@ -368,12 +395,16 @@ def plot_analysis(df, has_perturb, out_dir):
     # 1. Distance over episodes
     ax = axes[0, 0]
     colors = ["green" if s else "red" for s in df["success"]]
-    ax.bar(df["episode"], df["min_dist_mm"], color=colors, alpha=0.7, label="min_dist")
-    ax.axhline(y=3.0, color="blue", linestyle="--", linewidth=1, label="threshold (3mm)")
-    ax.set_xlabel("Episode")
-    ax.set_ylabel("Min Distance (mm)")
-    ax.set_title("Min Distance per Episode (green=success, red=fail)")
-    ax.legend()
+    dist_col = "min_dist_mm" if "min_dist_mm" in df.columns else "final_dist_mm"
+    if dist_col in df.columns:
+        ax.bar(df["episode"], df[dist_col], color=colors, alpha=0.7, label=dist_col)
+        ax.axhline(y=3.0, color="blue", linestyle="--", linewidth=1, label="threshold (3mm)")
+        ax.set_xlabel("Episode")
+        ax.set_ylabel(f"{dist_col} (mm)")
+        ax.set_title(f"{dist_col} per Episode (green=success, red=fail)")
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "No distance data", transform=ax.transAxes, ha="center")
 
     # 2. Sensor distance distribution (or overshoot fallback)
     ax = axes[0, 1]
@@ -396,7 +427,7 @@ def plot_analysis(df, has_perturb, out_dir):
             ax.legend()
         else:
             ax.text(0.5, 0.5, "No valid sensor data", transform=ax.transAxes, ha="center")
-    else:
+    elif "min_dist_mm" in df.columns and "final_dist_mm" in df.columns:
         # Fallback: overshoot plot
         if len(fail) > 0:
             ax.scatter(fail["min_dist_mm"], fail["final_dist_mm"], c="red", alpha=0.6, label="fail", s=40)
@@ -408,15 +439,21 @@ def plot_analysis(df, has_perturb, out_dir):
         ax.set_ylabel("Final Distance (mm)")
         ax.set_title("Final vs Min Distance")
         ax.legend()
+    else:
+        ax.text(0.5, 0.5, "No distance data for plot", transform=ax.transAxes, ha="center")
 
     # 3. Distribution of min distances
     ax = axes[1, 0]
-    ax.hist(df["min_dist_mm"], bins=20, color="steelblue", alpha=0.7, edgecolor="black")
-    ax.axvline(x=3.0, color="red", linestyle="--", linewidth=2, label="threshold (3mm)")
-    ax.set_xlabel("Min Distance (mm)")
-    ax.set_ylabel("Count")
-    ax.set_title("Distribution of Min Distances")
-    ax.legend()
+    dist_col = "min_dist_mm" if "min_dist_mm" in df.columns else "final_dist_mm"
+    if dist_col in df.columns:
+        ax.hist(df[dist_col], bins=20, color="steelblue", alpha=0.7, edgecolor="black")
+        ax.axvline(x=3.0, color="red", linestyle="--", linewidth=2, label="threshold (3mm)")
+        ax.set_xlabel(f"{dist_col} (mm)")
+        ax.set_ylabel("Count")
+        ax.set_title(f"Distribution of {dist_col}")
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "No distance data", transform=ax.transAxes, ha="center")
 
     # 4. Perturbation scatter
     ax = axes[1, 1]
@@ -433,13 +470,15 @@ def plot_analysis(df, has_perturb, out_dir):
         for (x, y, label) in [(-5, 5, "X-Y+"), (5, 5, "X+Y+"), (-5, -5, "X-Y-"), (5, -5, "X+Y-")]:
             ax.text(x, y, label, fontsize=9, ha="center", va="center",
                     bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
-    else:
+    elif "final_lateral_mm" in df.columns and "final_angle_deg" in df.columns:
         ax.scatter(df["final_lateral_mm"], df["final_angle_deg"],
                    c=["green" if s else "red" for s in df["success"]],
                    alpha=0.6, s=40)
         ax.set_xlabel("Final Lateral (mm)")
         ax.set_ylabel("Final Angle (deg)")
         ax.set_title("Lateral vs Angle at Termination")
+    else:
+        ax.text(0.5, 0.5, "No lateral/angle data", transform=ax.transAxes, ha="center")
 
     plt.tight_layout()
     plot_path = out_dir / "eval_analysis.png"
