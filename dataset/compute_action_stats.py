@@ -2,7 +2,7 @@
 Compute action/proprio normalization statistics (min/max, p99, p95) from HDF5 episode files.
 
 Usage:
-    python dataset/compute_action_stats.py --data_dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_data/collected_data_merged
+    python dataset/compute_action_stats.py --data_dir /data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged
     python dataset/compute_action_stats.py --data_dir /data/public/NAS/VLANeXt/dataset/fine_align/approach_test/collected_data_merged --proprio   # include proprio stats
 """
 
