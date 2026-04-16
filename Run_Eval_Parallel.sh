@@ -14,7 +14,7 @@
 #   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
 #   bash Run_Eval_Parallel.sh approach /data/public/NAS/VLANeXt/output_dir_approach_0414
-#   bash Run_Eval_Parallel.sh insertion /data/public/NAS/VLANeXt/output_dir_insertion_0411
+#   bash Run_Eval_Parallel.sh insertion /data/public/NAS/VLANeXt/output_dir_insertion_0415
 
 # Auto-detect: if first arg starts with / or . it's a checkpoint path, not a mode
 if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
