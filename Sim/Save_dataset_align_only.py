@@ -71,6 +71,7 @@ SAVE_DIR = "collected_data_fine_align"
 MAX_EPISODES = 1
 IMG_WIDTH = 640
 IMG_HEIGHT = 480
+CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
@@ -93,7 +94,8 @@ HOLD_RECORD_STEPS = 10           # 정렬 완료 후 녹화 control steps
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
-TIMEOUT_SEC = 15.0          # 에피소드 전체 타임아웃 (초)
+TIMEOUT_SEC = 10.0          # 에피소드 전체 타임아웃 (초)
+MAX_CTRL_STEPS = 300        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
@@ -246,9 +248,9 @@ def randomize_phantom_pos(model, data, phantom_id, rot_id):
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
 
     if offset_y >= -0.25:
-        random_angle_deg = np.random.uniform(-15, 15)
+        random_angle_deg = 0 # np.random.uniform(-15, 15)
     else:
-        random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+        random_angle_deg = -90 # np.random.uniform(-15 - 90, 15 - 90)
 
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
@@ -437,11 +439,11 @@ def main():
             # 고정 위치에 팬텀 배치
             px, py = PHANTOM_POS
             model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
-            # 회전: Y 위치에 따라 적절한 각도
+            # 회전: Y 위치에 따라 고정 각도
             if py >= -0.25:
-                random_angle_deg_val = np.random.uniform(-15, 15)
+                random_angle_deg_val = 0
             else:
-                random_angle_deg_val = np.random.uniform(-15 - 90, 15 - 90)
+                random_angle_deg_val = -90
             new_quat = np.zeros(4)
             mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg_val)], "xyz")
             model.body_quat[rotating_id] = new_quat
@@ -645,7 +647,7 @@ def main():
                     delta_ee_action[:3] *= ACTION_CLIP_MM / pos_mag
 
                 frames = {}
-                for cam_name in ["side_camera", "tool_camera", "top_camera"]:
+                for cam_name in CAMERA_LIST:
                     renderer.update_scene(data, camera=cam_name)
                     frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
 
@@ -685,6 +687,10 @@ def main():
             if data.time - record_start_time > TIMEOUT_SEC:
                 break
 
+            # control step 상한 초과
+            if len(recorder.buffer) >= MAX_CTRL_STEPS:
+                break
+
         # ============================================================
         # Phase 3: Holding — 정렬 완료 후 자세 유지 녹화 (깨끗한 expert data)
         # ============================================================
@@ -709,7 +715,7 @@ def main():
                     delta_ee_action[:3] *= ACTION_CLIP_MM / pos_mag
 
                 frames = {}
-                for cam_name in ["side_camera", "tool_camera", "top_camera"]:
+                for cam_name in CAMERA_LIST:
                     renderer.update_scene(data, camera=cam_name)
                     frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
 
@@ -742,7 +748,12 @@ def main():
                 grid_cell_index += 1
                 grid_retry_count = 0
         else:
-            fail_reason = "IK_FAIL" if not perturb_reached else "Timeout"
+            if not perturb_reached:
+                fail_reason = "IK_FAIL"
+            elif len(recorder.buffer) >= MAX_CTRL_STEPS:
+                fail_reason = f"MaxSteps({MAX_CTRL_STEPS})"
+            else:
+                fail_reason = "Timeout"
             recorder.discard()
             if GRID_CELLS is not None:
                 grid_retry_count += 1
@@ -799,6 +810,8 @@ if __name__ == "__main__":
     parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
                         metavar=("X", "Y"),
                         help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.2")
+    parser.add_argument("--no-side-camera", action="store_true",
+                        help="Skip side_camera rendering/saving (saves storage)")
     args = parser.parse_args()
 
     # Override globals from CLI args
@@ -816,6 +829,10 @@ if __name__ == "__main__":
     RANDOMIZE_PHANTOM = args.randomize_phantom_pos
     if args.phantom_pos is not None:
         PHANTOM_POS = tuple(args.phantom_pos)
+
+    if args.no_side_camera:
+        CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
+        print(f"Cameras: {CAMERA_LIST}")
 
     # Grid mode
     if args.grid_cells_file:

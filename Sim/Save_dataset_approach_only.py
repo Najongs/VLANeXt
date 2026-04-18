@@ -59,11 +59,13 @@ SAVE_DIR = "collected_data_sim_clean"
 MAX_EPISODES = 1
 IMG_WIDTH = 640
 IMG_HEIGHT = 480
+CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 TARGET_INSERTION_DEPTH = 0.0275
 ALIGN_SPEED = 0.02      # 정렬 단계 속도: 0.02 m/s (~200 steps)
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 2.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
+MAX_CTRL_STEPS = 500        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
 class SimRecorder:
@@ -258,11 +260,15 @@ def _parse_args():
         metavar=("X", "Y"),
         help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.2",
     )
+    parser.add_argument(
+        "--no-side-camera", action="store_true",
+        help="Skip side_camera rendering/saving (saves storage)",
+    )
     return parser.parse_args()
 
 # === Main Script ===
 def main():
-    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM
+    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM, CAMERA_LIST
     args = _parse_args()
     if args.no_insertion:
         NO_INSERTION = True
@@ -270,6 +276,9 @@ def main():
         PHANTOM_POS = tuple(args.phantom_pos)
     if args.randomize_phantom_pos:
         RANDOMIZE_PHANTOM = True
+    if args.no_side_camera:
+        CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
+        print(f"Cameras: {CAMERA_LIST}")
     print(f"Loading Model: {MODEL_PATH}")
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
@@ -459,7 +468,7 @@ def main():
                     delta_ee_action[:3] *= ACTION_CLIP_MM / pos_mag
 
                 frames = {}
-                for cam_name in ["side_camera", "tool_camera", "top_camera"]:
+                for cam_name in CAMERA_LIST:
                     renderer.update_scene(data, camera=cam_name)
                     frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
 
@@ -483,6 +492,7 @@ def main():
                 last_ee_pose = current_ee_pose_mm.copy()
 
             if data.time - traj_start_time > 50.0: break
+            if len(recorder.buffer) >= MAX_CTRL_STEPS: break
 
         if success:
             recorder.save_async()
@@ -490,9 +500,16 @@ def main():
             pbar.update(1)
         else:
             # 왜 실패했는지 출력
-            reason = "Timeout" if data.time - traj_start_time > 50.0 else "Unknown"
-            if task_state == 1: reason = "Failed to Align"
-            elif task_state == 2 and not success: reason = "Failed to Insert/Hold"
+            if len(recorder.buffer) >= MAX_CTRL_STEPS:
+                reason = f"MaxSteps({MAX_CTRL_STEPS})"
+            elif data.time - traj_start_time > 50.0:
+                reason = "Timeout"
+            elif task_state == 1:
+                reason = "Failed to Align"
+            elif task_state == 2:
+                reason = "Failed to Insert/Hold"
+            else:
+                reason = "Unknown"
             print(f"  ⚠️ Episode {episode_count} discarded. Reason: {reason}")
             recorder.discard()
 

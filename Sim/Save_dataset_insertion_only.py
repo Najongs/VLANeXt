@@ -60,6 +60,7 @@ SAVE_DIR = "collected_data_insertion"
 MAX_EPISODES = 1
 IMG_WIDTH = 640
 IMG_HEIGHT = 480
+CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
@@ -368,7 +369,7 @@ def main():
             delta_ee_action[:3] *= ACTION_CLIP_MM / pos_mag
 
         frames = {}
-        for cam_name in ["side_camera", "tool_camera", "top_camera"]:
+        for cam_name in CAMERA_LIST:
             renderer.update_scene(data, camera=cam_name)
             frames[cam_name] = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
 
@@ -691,6 +692,8 @@ if __name__ == "__main__":
                         help=f"XY perturbation range (±mm, default: {APPROACH_XY_OFFSET_MM})")
     parser.add_argument("--target-depth", type=float, default=TARGET_INSERTION_DEPTH_MM,
                         help=f"Target insertion depth (mm, default: {TARGET_INSERTION_DEPTH_MM})")
+    parser.add_argument("--no-side-camera", action="store_true",
+                        help="Skip side_camera rendering/saving (saves storage)")
     args = parser.parse_args()
 
     SAVE_DIR = args.save_dir
@@ -702,5 +705,9 @@ if __name__ == "__main__":
     APPROACH_OFFSET_MM = args.approach_offset
     APPROACH_XY_OFFSET_MM = args.xy_offset
     TARGET_INSERTION_DEPTH_MM = args.target_depth
+
+    if args.no_side_camera:
+        CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
+        print(f"Cameras: {CAMERA_LIST}")
 
     main()

@@ -216,9 +216,9 @@ class AlignSimEnv:
         self.model.body_pos[self._phantom_body_id] = np.array([offset_x, offset_y, offset_z])
 
         if offset_y >= -0.25:
-            random_angle_deg = np.random.uniform(-15, 15)
+            random_angle_deg = 0
         else:
-            random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+            random_angle_deg = -90
 
         new_quat = np.zeros(4)
         mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
@@ -233,14 +233,14 @@ class AlignSimEnv:
         print(f"  Phantom: pos=({offset_x:.3f}, {offset_y:.3f}), angle={random_angle_deg:.1f}deg")
 
     def _set_fixed_phantom(self, pos):
-        """Set phantom to a fixed (x, y) position with random rotation."""
+        """Set phantom to a fixed (x, y) position with fixed rotation."""
         px, py = pos
         self.model.body_pos[self._phantom_body_id] = np.array([px, py, 0.0])
 
         if py >= -0.25:
-            random_angle_deg = np.random.uniform(-15, 15)
+            random_angle_deg = 0
         else:
-            random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+            random_angle_deg = -90
 
         new_quat = np.zeros(4)
         mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
@@ -256,7 +256,7 @@ class AlignSimEnv:
 
     def _ensure_aligned_state(self):
         """Pre-align and cache. Re-runs if phantom is randomized or fixed with random rotation."""
-        if self._aligned_qpos is not None and not self.randomize_phantom and self.phantom_pos is None:
+        if self._aligned_qpos is not None and not self.randomize_phantom:
             return
 
         label = "Re-aligning for new phantom..." if self._aligned_qpos is not None else "Running initial pre-alignment..."
@@ -316,7 +316,7 @@ class AlignSimEnv:
     def reset(self, max_retries=10):
         """Reset to aligned state + random perturbation.
         Retries if IK fails to converge to the perturbed position."""
-        if self.randomize_phantom or self.phantom_pos is not None:
+        if self.randomize_phantom:
             # Invalidate cache so _ensure_aligned_state re-runs
             self._aligned_qpos = None
         self._ensure_aligned_state()

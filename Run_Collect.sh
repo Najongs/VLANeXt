@@ -122,6 +122,12 @@ if [ "$RANDOMIZE_PHANTOM" = "true" ]; then
     PHANTOM_FLAG="--randomize-phantom-pos"
 fi
 
+# Side camera flag (set NO_SIDE_CAM=true to skip side camera)
+SIDE_CAM_FLAG=""
+if [ "${NO_SIDE_CAM:-false}" = "true" ]; then
+    SIDE_CAM_FLAG="--no-side-camera"
+fi
+
 if [ "$MODE" = "grid" ]; then
     BINS_XY=${3:-8}
     BINS_Z=${4:-6}
@@ -144,21 +150,21 @@ case $MODE in
     uniform)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
-            --base-dir ${BASE}/uniform_new $PHANTOM_FLAG
+            --base-dir ${BASE}/uniform_new $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     bias_x_neg)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_x_neg \
-            --bias x_neg $PHANTOM_FLAG
+            --bias x_neg $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     bias_y_neg)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_y_neg \
-            --bias y_neg $PHANTOM_FLAG
+            --bias y_neg $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     bias_all)
@@ -167,21 +173,21 @@ case $MODE in
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_x_neg \
-            --bias x_neg $PHANTOM_FLAG
+            --bias x_neg $PHANTOM_FLAG $SIDE_CAM_FLAG
 
         echo ""
         echo "=== [2/2] Y negative bias ==="
         python Sim/run_parallel.py \
             --script align --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/bias_y_neg \
-            --bias y_neg $PHANTOM_FLAG
+            --bias y_neg $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     grid)
         python Sim/run_parallel.py \
             --script align --workers $WORKERS \
             --base-dir ${BASE}/grid \
-            --grid --grid-bins-xy $BINS_XY --grid-bins-z $BINS_Z $PHANTOM_FLAG
+            --grid --grid-bins-xy $BINS_XY --grid-bins-z $BINS_Z $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     multi_phantom)
@@ -196,7 +202,7 @@ case $MODE in
             python Sim/run_parallel.py \
                 --script align --workers $WORKERS --episodes $EPISODES \
                 --base-dir ${BASE}/phantom_${LABEL} \
-                --phantom-pos ${POS[0]} ${POS[1]}
+                --phantom-pos ${POS[0]} ${POS[1]} $SIDE_CAM_FLAG
         done
         ;;
 
@@ -212,7 +218,7 @@ case $MODE in
             python Sim/run_parallel.py \
                 --script approach --workers $WORKERS --episodes $EPISODES \
                 --base-dir ${BASE}/approach_${LABEL} \
-                --phantom-pos ${POS[0]} ${POS[1]} --no-insertion
+                --phantom-pos ${POS[0]} ${POS[1]} --no-insertion $SIDE_CAM_FLAG
         done
         ;;
 
@@ -228,7 +234,7 @@ case $MODE in
             python Sim/run_parallel.py \
                 --script approach --workers $WORKERS --episodes $EPISODES \
                 --base-dir ${BASE}/full_${LABEL} \
-                --phantom-pos ${POS[0]} ${POS[1]}
+                --phantom-pos ${POS[0]} ${POS[1]} $SIDE_CAM_FLAG
         done
         ;;
 
@@ -237,7 +243,7 @@ case $MODE in
         python Sim/run_parallel.py \
             --script insertion --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/insertion \
-            --approach-offset 5 --approach-xy-offset 2 $PHANTOM_FLAG
+            --approach-offset 5 --approach-xy-offset 2 $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     insertion_perturb)
@@ -246,7 +252,7 @@ case $MODE in
             --script insertion --workers $WORKERS --episodes $EPISODES \
             --base-dir ${BASE}/insertion_perturb \
             --approach-offset 5 --approach-xy-offset 2 \
-            --perturb --perturb-angle 5 $PHANTOM_FLAG
+            --perturb --perturb-angle 5 $PHANTOM_FLAG $SIDE_CAM_FLAG
         ;;
 
     *)

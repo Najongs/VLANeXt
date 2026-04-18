@@ -5,8 +5,11 @@ Unified Parallel Data Collection
 Supports full pipeline, align-only, and insertion-only.
 
 Usage:
-    python Sim/run_parallel.py --script align --workers 10 --episodes 1000 \
-        --base-dir dataset/fine_align/bias_x_neg --bias x_neg
+python run_parallel.py --script align --workers 10 --episodes 500 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 -0.4 --no-side-camera
+
+python run_parallel.py --script align --workers 10 --episodes 500 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 0.0 --no-side-camera
 
     python Sim/run_parallel.py --script approach --workers 5 --episodes 500 \
         --base-dir dataset/new_data
@@ -67,6 +70,8 @@ def main():
                         help="(full only) Stop after alignment, skip insertion")
     parser.add_argument("--seed", type=int, default=None,
                         help="Base random seed (worker i gets seed + i)")
+    parser.add_argument("--no-side-camera", action="store_true",
+                        help="Skip side_camera rendering/saving (saves storage)")
     args = parser.parse_args()
 
     module_name = SCRIPT_MAP[args.script]
@@ -159,6 +164,9 @@ def main():
     # No-insertion line (full script only)
     no_insertion_line = f"{module_name}.NO_INSERTION = True" if args.no_insertion else ""
 
+    # No side camera line
+    no_side_cam_line = f"{module_name}.CAMERA_LIST = [c for c in {module_name}.CAMERA_LIST if c != 'side_camera']" if args.no_side_camera else ""
+
 
     # Launch workers
     processes = []
@@ -187,6 +195,7 @@ with open(r'{grid_json}', 'r') as _f:
 {seed_line}
 {phantom_line}
 {no_insertion_line}
+{no_side_cam_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {n_cells} grid cells -> {worker_dir}")
@@ -208,6 +217,7 @@ import {module_name}
 {seed_line}
 {phantom_line}
 {no_insertion_line}
+{no_side_cam_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {args.episodes} episodes -> {worker_dir}")
