@@ -136,7 +136,7 @@ class AlignSimEnv:
     Success: needle tip within threshold of trocar entry
     """
 
-    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False):
+    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False, phantom_pos: tuple = None):
         self.model = mujoco.MjModel.from_xml_path(model_xml_path)
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -149,8 +149,9 @@ class AlignSimEnv:
         self.n_motors = self.model.nu
         self.dof = self.model.nv
 
-        # Phantom randomization
+        # Phantom randomization / fixed position
         self.randomize_phantom = randomize_phantom
+        self.phantom_pos = phantom_pos
         self.use_sensor_success = use_sensor_success
         self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
         self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
@@ -231,9 +232,31 @@ class AlignSimEnv:
         }
         print(f"  Phantom: pos=({offset_x:.3f}, {offset_y:.3f}), angle={random_angle_deg:.1f}deg")
 
+    def _set_fixed_phantom(self, pos):
+        """Set phantom to a fixed (x, y) position with random rotation."""
+        px, py = pos
+        self.model.body_pos[self._phantom_body_id] = np.array([px, py, 0.0])
+
+        if py >= -0.25:
+            random_angle_deg = np.random.uniform(-15, 15)
+        else:
+            random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+
+        new_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
+        self.model.body_quat[self._rotating_id] = new_quat
+        mujoco.mj_forward(self.model, self.data)
+
+        self.last_phantom_info = {
+            "phantom_x": px,
+            "phantom_y": py,
+            "phantom_angle_deg": random_angle_deg,
+        }
+        print(f"  Phantom (fixed): pos=({px:.3f}, {py:.3f}), angle={random_angle_deg:.1f}deg")
+
     def _ensure_aligned_state(self):
-        """Pre-align and cache. Re-runs if phantom is randomized."""
-        if self._aligned_qpos is not None and not self.randomize_phantom:
+        """Pre-align and cache. Re-runs if phantom is randomized or fixed with random rotation."""
+        if self._aligned_qpos is not None and not self.randomize_phantom and self.phantom_pos is None:
             return
 
         label = "Re-aligning for new phantom..." if self._aligned_qpos is not None else "Running initial pre-alignment..."
@@ -243,7 +266,9 @@ class AlignSimEnv:
         self.data.qpos[:6] = home_pose
         mujoco.mj_forward(self.model, self.data)
 
-        if self.randomize_phantom:
+        if self.phantom_pos is not None:
+            self._set_fixed_phantom(self.phantom_pos)
+        elif self.randomize_phantom:
             self._randomize_phantom()
 
         p_entry = self.data.site_xpos[self.target_entry_id].copy()
@@ -291,7 +316,7 @@ class AlignSimEnv:
     def reset(self, max_retries=10):
         """Reset to aligned state + random perturbation.
         Retries if IK fails to converge to the perturbed position."""
-        if self.randomize_phantom:
+        if self.randomize_phantom or self.phantom_pos is not None:
             # Invalidate cache so _ensure_aligned_state re-runs
             self._aligned_qpos = None
         self._ensure_aligned_state()
@@ -594,8 +619,9 @@ def run_eval(cfg):
 
     model_xml = os.path.abspath(SIM_MODEL_PATH)
     randomize_phantom = getattr(cfg, "randomize_phantom", False)
+    phantom_pos = getattr(cfg, "phantom_pos", None)
     use_sensor_success = getattr(cfg, 'use_sensor_success', False)
-    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom, use_sensor_success=use_sensor_success)
+    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom, use_sensor_success=use_sensor_success, phantom_pos=phantom_pos)
 
     total_successes = 0
 
@@ -607,7 +633,7 @@ def run_eval(cfg):
                    "final_sensor_dist_mm",
                    "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
                    "perturb_angle_deg", "perturb_dist_mm", "initial_dist_mm"]
-    if randomize_phantom:
+    if randomize_phantom or phantom_pos is not None:
         csv_header.extend(["phantom_x", "phantom_y", "phantom_angle_deg"])
     csv_writer.writerow(csv_header)
 
@@ -718,7 +744,7 @@ def run_eval(cfg):
             f"{pi['perturb_x_mm']:.2f}", f"{pi['perturb_y_mm']:.2f}", f"{pi['perturb_z_mm']:.2f}",
             f"{pi['perturb_angle_deg']:.2f}", f"{pi['perturb_dist_mm']:.2f}", f"{pi['initial_dist_mm']:.2f}",
         ]
-        if randomize_phantom and env.last_phantom_info:
+        if (randomize_phantom or phantom_pos is not None) and env.last_phantom_info:
             ph = env.last_phantom_info
             row.extend([f"{ph['phantom_x']:.4f}", f"{ph['phantom_y']:.4f}", f"{ph['phantom_angle_deg']:.1f}"])
         csv_writer.writerow(row)
@@ -768,6 +794,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
     parser.add_argument("--randomize-phantom", action="store_true",
                         help="Randomize phantom position/rotation each episode")
+    parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
+                        metavar=("X", "Y"),
+                        help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.4")
     parser.add_argument("--sensor-success", action="store_true",
                         help="Require sensor to see through trocar hole for success")
     args = parser.parse_args()
@@ -783,6 +812,7 @@ if __name__ == "__main__":
     cfg.shard_id = args.shard_id
     cfg.num_shards = args.num_shards
     cfg.randomize_phantom = args.randomize_phantom
+    cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
     cfg.use_sensor_success = args.sensor_success
 
     run_eval(cfg)

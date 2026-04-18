@@ -10,7 +10,7 @@
 #   insertion - Insertion eval (정렬 후 삽입)
 #
 # Examples:
-#   bash Run_Eval_Parallel.sh align /path/to/checkpoint
+#   bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0417
 #   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
 #   bash Run_Eval_Parallel.sh approach /data/public/NAS/VLANeXt/output_dir_approach_0414

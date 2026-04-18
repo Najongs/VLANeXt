@@ -6,6 +6,7 @@ data:
 model:
   diffusion_steps: 10
   scheduler_type: "flow_match"
+  use_sensor: true
 
 eval:
   finetuned_checkpoint: ""  # Path to the finetuned model checkpoint
