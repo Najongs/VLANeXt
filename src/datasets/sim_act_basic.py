@@ -8,36 +8,25 @@ import h5py
 import torch
 from torch.utils.data import IterableDataset
 
-# Action normalization stats for align-only dataset (99th percentile, symmetric)
-# delta_pose(6) + gripper(1)
-# Each dimension uses max(abs(p1), abs(p99)) so that normalized 0 = no movement.
-# Original p99 (asymmetric):
-#   min = [-0.6779, -0.5033, -0.4874, -0.00342, -0.000949, -0.00542, -1.0]
-#   max = [+0.5353, +0.5128, +0.4601, +0.00292, +0.001237, +0.00326, -1.0]
-
-# action_min_sim_align = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
-# action_max_sim_align = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, -1.0]
-
-action_min_sim_align = [-0.5957266092300415, -0.6034851670265198, -0.5240848660469055, -0.002589409239590168, -0.0008707013912498951, -0.003319802926853299, -1.0]
-action_max_sim_align = [0.5957266092300415, 0.6034851670265198, 0.5240848660469055, 0.002589409239590168, 0.0008707013912498951, 0.003319802926853299, 1.0]
-
-# action_min_sim_align = [-0.38991427421569824, -0.05123097822070122, -0.37570905685424805, -0.0019127572886645794, -0.0008466076687909663, 7.329344953177497e-05, -1.0]
-# action_max_sim_align = [0.2393515408039093, 0.5194841623306274, 0.27770981192588806, 0.003510331502184272, 0.0007455003215000033, 0.006129839923232794, -1.0]
-
-# Must match Save_dataset_align_only.py and sim_eval_align_only.py
-TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
+# Action normalization stats for basic motion dataset
+# Will be computed from collected data — using align stats as initial placeholder
+# These should be updated after collecting data and running dataset_stats.py
+action_min_sim_basic = [-0.5957266092300415, -0.6034851670265198, -0.5240848660469055, -0.002589409239590168, -0.0008707013912498951, -0.003319802926853299, -1.0]
+action_max_sim_basic = [0.5957266092300415, 0.6034851670265198, 0.5240848660469055, 0.002589409239590168, 0.0008707013912498951, 0.003319802926853299, 1.0]
 
 
-class SimActAlign(IterableDataset):
+class SimActBasic(IterableDataset):
     """
-    HDF5-based IterableDataset for fine-alignment simulation data.
-    Same structure as SimAct but with align-only instruction and normalization.
+    HDF5-based IterableDataset for basic motion pre-training data.
+    Same structure as SimActAlign but uses per-episode language_instruction
+    from h5 file (direction name) instead of a fixed task instruction.
+    No spatial_target support.
     """
 
     def __init__(
         self,
         data_dir,
-        dataset_name="sim_align",
+        dataset_name="sim_basic",
         length=None,
         history_len=8,
         future_len=8,
@@ -72,15 +61,10 @@ class SimActAlign(IterableDataset):
         self.use_sensor = use_sensor
 
         # Action normalization to [-1, 1]
-        self.action_min = np.array(action_min_sim_align, dtype=np.float32)
-        self.action_max = np.array(action_max_sim_align, dtype=np.float32)
+        self.action_min = np.array(action_min_sim_basic, dtype=np.float32)
+        self.action_max = np.array(action_max_sim_basic, dtype=np.float32)
 
         # Collect all h5 files (recursive — searches subdirectories too)
-        # data_dir can be:
-        #   - str: single path
-        #   - list of str: multiple paths, all episodes used
-        #   - list of dict: multiple paths with optional max_episodes per path
-        #     e.g. [{"path": "/data/...", "max_episodes": 10000}, ...]
         if isinstance(data_dir, (list, tuple)):
             self.episode_paths = []
             for d in data_dir:
@@ -133,29 +117,18 @@ class SimActAlign(IterableDataset):
             # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
             proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
             if self.use_sensor and "sensor_dist" in f["observations"]:
-                sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
+                sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)
                 if sensor_dist.ndim == 1:
-                    sensor_dist = sensor_dist[:, None]  # (N, 1)
-                # 클리핑만: 음수/무한대 → 20mm (미감지), 범위 [0, 20]
+                    sensor_dist = sensor_dist[:, None]
                 sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
                 proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
 
-            # --- Spatial auxiliary targets (backward compatible) ---
-            spatial_targets_np = None
-            if "keypoints_wrist" in f["observations"]:
-                needle_tip = f["observations"]["needle_tip_pos"][:].astype(np.float32)
-                trocar_entry = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
-                kp_wrist = f["observations"]["keypoints_wrist"][:].astype(np.float32)
-                kp_vis = f["observations"]["keypoints_visibility"][:].astype(np.float32)
-                phase_raw = f["phase"][:].astype(np.float32)
-
-                dist = np.linalg.norm(trocar_entry - needle_tip, axis=-1, keepdims=True)
-                dist_normalized = dist / 100.0
-                phase_binary = np.clip(phase_raw - 1, 0, 1).reshape(-1, 1)
-
-                spatial_targets_np = np.concatenate(
-                    [kp_wrist, kp_vis, dist_normalized, phase_binary], axis=-1
-                )
+            # --- Language instruction from h5 ---
+            instruction_raw = f["language_instruction"][()]
+            if isinstance(instruction_raw, bytes):
+                instruction = instruction_raw.decode("utf-8")
+            else:
+                instruction = str(instruction_raw)
 
             # --- Action weight: uniform ---
             action_weight_np = np.ones(traj_len, dtype=np.float32)
@@ -182,7 +155,7 @@ class SimActAlign(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
+        return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, instruction, action_weight_np
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -211,12 +184,12 @@ class SimActAlign(IterableDataset):
 
         shuffle_buffer = []
 
-        while True:  # Infinite loop — no epoch boundary, no buffer flush
+        while True:  # Infinite loop — no epoch boundary
             np.random.shuffle(episode_paths)
 
             for ep_path in episode_paths:
                 try:
-                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, instruction, action_weight_np = self._load_episode(ep_path)
                 except Exception as e:
                     print(f"[Warn] Skipping {ep_path}: {e}")
                     continue
@@ -236,7 +209,7 @@ class SimActAlign(IterableDataset):
                     sample_indices = np.random.choice(traj_len, size=num_samples, replace=False)
 
                 for t in sample_indices:
-                    # History observation indices (for image / proprio)
+                    # History observation indices
                     start_hist_obs = t - self.history_len + 1
                     hist_indices_obs = np.arange(start_hist_obs, t + 1)
                     hist_indices_obs = np.clip(hist_indices_obs, 0, traj_len - 1)
@@ -267,22 +240,14 @@ class SimActAlign(IterableDataset):
                         fut_acts_np[valid_mask_fut] = actions_np[fut_indices[valid_mask_fut]]
                     fut_acts = torch.from_numpy(fut_acts_np)
 
-                    # --- Instruction (fixed, matches eval) ---
-                    instruction = TASK_INSTRUCTION
-
                     sample = {
                         "proprioception": hist_proprio,
                         "history_actions": hist_actions,
                         "future_actions": fut_acts,
                         "instruction": instruction,
                         "source_info": f"{Path(ep_path).stem}:t{t}",
+                        "spatial_target": None,
                     }
-
-                    # Spatial target for auxiliary loss (current timestep)
-                    if spatial_targets_np is not None:
-                        sample["spatial_target"] = torch.from_numpy(spatial_targets_np[t].copy())
-                    else:
-                        sample["spatial_target"] = None
 
                     # Action loss weight
                     sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)
@@ -326,8 +291,6 @@ class SimActAlign(IterableDataset):
                     del wrist_np
                 if top_np is not None:
                     del top_np
-                if spatial_targets_np is not None:
-                    del spatial_targets_np
                 gc.collect()
 
         # No flush — loop back and keep filling the buffer

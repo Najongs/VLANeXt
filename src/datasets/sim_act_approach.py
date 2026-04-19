@@ -17,8 +17,8 @@ from torch.utils.data import IterableDataset
 
 # 웬만하면 정규화 값은 대칭값으로 학습하자.
 
-action_min_sim_approach = [-0.6953704357147217, -0.8400689959526062, -0.7533223032951355, -0.0070596602745354176, -0.0018169614486396313, -0.00982032623142004, -1.0]
-action_max_sim_approach = [0.6953704357147217, 0.8400689959526062, 0.7533223032951355, 0.0070596602745354176, 0.0018169614486396313, 0.00982032623142004, -1.0]
+action_min_sim_approach = [-1, -1, -1, -0.01, -0.01, -0.01, -1.0]
+action_max_sim_approach = [1, 1, 1, 0.01, 0.01, 0.01, 1.0]
 
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
@@ -71,10 +71,33 @@ class SimActApproach(IterableDataset):
         self.action_min = np.array(action_min_sim_approach, dtype=np.float32)
         self.action_max = np.array(action_max_sim_approach, dtype=np.float32)
 
-        # Collect all h5 files (recursive)
-        self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
-        if not self.episode_paths:
-            raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
+        # Collect all h5 files (recursive — searches subdirectories too)
+        # data_dir can be:
+        #   - str: single path
+        #   - list of str: multiple paths, all episodes used
+        #   - list of dict: multiple paths with optional max_episodes per path
+        #     e.g. [{"path": "/data/...", "max_episodes": 10000}, ...]
+        if isinstance(data_dir, (list, tuple)):
+            self.episode_paths = []
+            for d in data_dir:
+                if isinstance(d, dict):
+                    p = d["path"]
+                    max_ep = d.get("max_episodes", None)
+                else:
+                    p = d
+                    max_ep = None
+                eps = sorted(glob.glob(os.path.join(p, "**", "*.h5"), recursive=True))
+                if max_ep is not None and len(eps) > max_ep:
+                    rng = np.random.RandomState(42)
+                    eps = sorted(rng.choice(eps, size=max_ep, replace=False).tolist())
+                self.episode_paths.extend(eps)
+            self.episode_paths = sorted(self.episode_paths)
+            if not self.episode_paths:
+                raise FileNotFoundError(f"No .h5 files found in any of {data_dir}")
+        else:
+            self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
+            if not self.episode_paths:
+                raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
 
     @staticmethod
     def _decode_jpeg(jpeg_data):
@@ -92,9 +115,19 @@ class SimActApproach(IterableDataset):
         return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
     def _load_episode(self, h5_path):
-        """Load a single episode from HDF5 file and return arrays."""
+        """Load a single episode from HDF5 file and return arrays.
+        If phase data exists, only keep phase==1 (approach/align) timesteps.
+        """
         with h5py.File(h5_path, "r") as f:
             traj_len = f["action"].shape[0]
+
+            # --- Phase filtering: keep only phase==1 (approach/align) ---
+            phase_mask = None
+            if "phase" in f:
+                phase_all = f["phase"][:].astype(np.int32)
+                phase_mask = (phase_all == 1)
+                if not np.any(phase_mask):
+                    return None  # no approach data in this episode
 
             # --- Actions (N, 7): normalize delta_pose + gripper to [-1, 1] ---
             actions_np = f["action"][:].astype(np.float32)
@@ -129,9 +162,6 @@ class SimActApproach(IterableDataset):
                     [kp_wrist, kp_vis, dist_normalized, phase_binary], axis=-1
                 )
 
-            # --- Action weight: uniform ---
-            action_weight_np = np.ones(traj_len, dtype=np.float32)
-
             # --- Images ---
             img_grp = f["observations"]["images"]
 
@@ -153,6 +183,23 @@ class SimActApproach(IterableDataset):
                         [self._decode_jpeg(img_grp[self.cam_top][i]) for i in range(traj_len)],
                         axis=0,
                     )
+
+            # --- Apply phase filter (keep phase==1 only) ---
+            if phase_mask is not None:
+                indices = np.where(phase_mask)[0]
+                actions_np = actions_np[indices]
+                proprio_np = proprio_np[indices]
+                images_np = images_np[indices]
+                if wrist_np is not None:
+                    wrist_np = wrist_np[indices]
+                if top_np is not None:
+                    top_np = top_np[indices]
+                if spatial_targets_np is not None:
+                    spatial_targets_np = spatial_targets_np[indices]
+                traj_len = len(indices)
+
+            # --- Action weight: uniform ---
+            action_weight_np = np.ones(traj_len, dtype=np.float32)
 
         return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
 
@@ -186,7 +233,10 @@ class SimActApproach(IterableDataset):
 
             for ep_path in episode_paths:
                 try:
-                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                    result = self._load_episode(ep_path)
+                    if result is None:
+                        continue
+                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = result
                 except Exception as e:
                     print(f"[Warn] Skipping {ep_path}: {e}")
                     continue

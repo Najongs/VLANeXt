@@ -217,10 +217,10 @@ def randomize_phantom_pos(model, data, phantom_id, rot_id):
     # 2. 회전 (Rotation)
     if offset_y >= -0.25:
         # 0.0 ~ -0.25 구간
-        random_angle_deg = np.random.uniform(-15, 15)
+        random_angle_deg = 0
     else:
         # -0.3 ~ -0.4 구간
-        random_angle_deg = np.random.uniform(-15 - 90, 15 - 90)
+        random_angle_deg = -90
 
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
@@ -325,7 +325,7 @@ def main():
     episode_count = 0
     while episode_count < MAX_EPISODES:
         mujoco.mj_resetData(model, data)
-        home_pose = np.array([np.random.uniform(-0.45, 0.55) , np.random.uniform(-0.6, -0.1), np.random.uniform(0.1, 0.6),  0.0000,np.random.uniform(0.3, 0.7), np.random.uniform(0.8, 1.2)])
+        home_pose = np.array([np.random.uniform(-0.45, 0.55), np.random.uniform(-0.6, -0.1), np.random.uniform(0.1, 0.6), 0.0, np.random.uniform(0.3, 0.7), np.random.uniform(0.8, 1.2)])
         data.qpos[:6] = home_pose
         phantom_offset = np.zeros(3, dtype=np.float32)
         phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -334,9 +334,9 @@ def main():
             px, py = PHANTOM_POS
             model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
             if py >= -0.25:
-                rand_angle = np.random.uniform(-15, 15)
+                rand_angle = 0
             else:
-                rand_angle = np.random.uniform(-15 - 90, 15 - 90)
+                rand_angle = -90
             new_quat = np.zeros(4)
             mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(rand_angle)], "xyz")
             model.body_quat[rotating_id] = new_quat

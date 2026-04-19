@@ -33,6 +33,7 @@ from src.datasets.sim_act import SimAct
 from src.datasets.sim_act_align import SimActAlign
 from src.datasets.sim_act_insertion import SimActInsertion
 from src.datasets.sim_act_approach import SimActApproach
+from src.datasets.sim_act_basic import SimActBasic
 
 
 # -----------------------------------------------------------------------------
@@ -411,7 +412,7 @@ def train(config):
     dataset_name = config['data'].get('dataset_name', 'libero')
     if dataset_name == "droid":
         fps = 15.0
-    elif dataset_name in ("sim", "sim_align", "sim_insertion", "sim_approach"):
+    elif dataset_name in ("sim", "sim_align", "sim_insertion", "sim_approach", "sim_basic"):
         fps = 15.0
     elif dataset_name == "libero":
         fps = 20.0
@@ -575,7 +576,7 @@ def train(config):
         droid_path = os.path.join(data_root, "1.0.1")
         if global_rank == 0:
             print(f"Initializing DROID Dataset: {droid_path}")
-    elif dataset_name in ("sim", "sim_align", "sim_insertion", "sim_approach"):
+    elif dataset_name in ("sim", "sim_align", "sim_insertion", "sim_approach", "sim_basic"):
         sim_path = data_root
         if global_rank == 0:
             print(f"Initializing Sim Dataset ({dataset_name}): {sim_path}")
@@ -680,6 +681,24 @@ def train(config):
             ds = SimActApproach(
                 data_dir=sim_path,
                 dataset_name="sim_approach",
+                history_len=history_len,
+                future_len=config['data']['future_len'],
+                full_sequence=full_sequence,
+                input_modality=input_modality,
+                view_mode=view_mode,
+                load_future_image=load_future_image,
+                future_image_mode=future_image_mode,
+                buffer_size=buffer_size,
+                cam_exterior=config['data'].get('cam_exterior', 'side_camera'),
+                cam_wrist=config['data'].get('cam_wrist', 'tool_camera'),
+                cam_top=config['data'].get('cam_top', ''),
+                skip_history_padding=config['data'].get('skip_history_padding', False),
+                use_sensor=config['model'].get('use_sensor', True),
+            )
+        elif dataset_name == "sim_basic":
+            ds = SimActBasic(
+                data_dir=sim_path,
+                dataset_name="sim_basic",
                 history_len=history_len,
                 future_len=config['data']['future_len'],
                 full_sequence=full_sequence,

@@ -27,12 +27,12 @@ Usage:
         --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged \
+    --data-dir /data/public/NAS/VLANeXt/dataset/approach_00/collected_data_merged \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
-    --max-range 100 \
+    --max-range 250 \
     --max-detour 3.0 \
-    --max-path-length 50 \
+    --max-path-length 500 \
     --execute
     
 """

@@ -11,13 +11,20 @@ python run_parallel.py --script align --workers 10 --episodes 500 \
 python run_parallel.py --script align --workers 10 --episodes 500 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 0.0 --no-side-camera
 
-    python Sim/run_parallel.py --script approach --workers 5 --episodes 500 \
-        --base-dir dataset/new_data
+python run_parallel.py --script approach --workers 10 --episodes 500 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/approach_00 --phantom-pos 0.0 0.0 --no-side-camera --no-insertion
+
+python run_parallel.py --script approach --workers 10 --episodes 500 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/approach_04 --phantom-pos 0.0 -0.4 --no-side-camera --no-insertion
 
     python Sim/run_parallel.py --script insertion --workers 10 --episodes 500 \
         --base-dir dataset/insertion_data --approach-offset 5 --approach-xy-offset 2
 
     python run_parallel.py --grid --grid-bins-xy 8 --grid-bins-z 6 --workers 10 --base-dir dataset/grid_data
+    
+python run_parallel.py --script basic --direction all --episodes 1000 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/basic_motion --no-side-camera --seed 42
+      
 """
 import os
 import sys
@@ -34,7 +41,15 @@ SCRIPT_MAP = {
     "align": "Save_dataset_align_only",
     "approach": "Save_dataset_approach_only",
     "insertion": "Save_dataset_insertion_only",
+    "basic": "Save_dataset_basic_motion",
 }
+
+# 10 directions for basic motion
+BASIC_DIRECTIONS = [
+    "left", "right", "up", "down",
+    "left_up", "left_down", "right_up", "right_down",
+    "forward", "backward",
+]
 
 
 def main():
@@ -72,6 +87,11 @@ def main():
                         help="Base random seed (worker i gets seed + i)")
     parser.add_argument("--no-side-camera", action="store_true",
                         help="Skip side_camera rendering/saving (saves storage)")
+    # Basic motion mode
+    parser.add_argument("--direction", type=str, default=None,
+                        help="(basic only) Direction to collect, or 'all' for 10-direction parallel")
+    parser.add_argument("--steps-per-episode", type=int, default=50,
+                        help="(basic only) Recorded control steps per episode")
     args = parser.parse_args()
 
     module_name = SCRIPT_MAP[args.script]
@@ -146,6 +166,32 @@ def main():
         print("=" * 70)
         print()
 
+    # --- Basic motion mode: direction-based parallel ---
+    basic_worker_directions = {}  # worker_id -> direction name
+    if args.script == "basic":
+        if args.direction is None:
+            print("Error: --direction is required for --script basic")
+            return
+        if args.direction == "all":
+            # One worker per direction (override --workers)
+            args.workers = len(BASIC_DIRECTIONS)
+            for i, d in enumerate(BASIC_DIRECTIONS):
+                basic_worker_directions[i] = d
+            total = len(BASIC_DIRECTIONS) * args.episodes
+            print("=" * 70)
+            print(f"Parallel Data Collection (basic) — ALL DIRECTIONS")
+            print("=" * 70)
+            print(f"  Script:   {module_name}.py")
+            print(f"  Directions: {len(BASIC_DIRECTIONS)} ({', '.join(BASIC_DIRECTIONS)})")
+            print(f"  Episodes: {args.episodes} per direction ({total} total)")
+            print(f"  Output:   {base_path}")
+            print("=" * 70)
+            print()
+        else:
+            # Single direction, multiple workers
+            for i in range(args.workers):
+                basic_worker_directions[i] = args.direction
+
     # Build bias override lines for align-only script
     bias_lines = ""
     if args.bias and args.script == "align" and not args.grid:
@@ -166,6 +212,9 @@ def main():
 
     # No side camera line
     no_side_cam_line = f"{module_name}.CAMERA_LIST = [c for c in {module_name}.CAMERA_LIST if c != 'side_camera']" if args.no_side_camera else ""
+
+    # Basic motion: steps per episode
+    basic_steps_line = f"{module_name}.STEPS_PER_EPISODE = {args.steps_per_episode}" if args.script == "basic" else ""
 
 
     # Launch workers
@@ -204,6 +253,11 @@ if __name__ == "__main__":
     print(f"[Worker {i}] Done!")
 """
         else:
+            # Basic motion: set direction for this worker
+            basic_dir_line = ""
+            if i in basic_worker_directions:
+                basic_dir_line = f"{module_name}.DIRECTION = '{basic_worker_directions[i]}'"
+
             script_content = f"""
 import sys, os, time
 os.chdir('{sim_dir}')
@@ -218,6 +272,8 @@ import {module_name}
 {phantom_line}
 {no_insertion_line}
 {no_side_cam_line}
+{basic_steps_line}
+{basic_dir_line}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {args.episodes} episodes -> {worker_dir}")
@@ -253,7 +309,7 @@ if __name__ == "__main__":
         log_file.close()
 
         worker_dir = base_path / f"worker_{i}"
-        h5_count = len(list(worker_dir.glob("*.h5"))) if worker_dir.exists() else 0
+        h5_count = len(list(worker_dir.glob("**/*.h5"))) if worker_dir.exists() else 0
         status = "OK" if proc.returncode == 0 else f"FAIL(exit={proc.returncode})"
         print(f"  [Worker {i}] {status} — {h5_count} episodes")
 
@@ -270,29 +326,50 @@ if __name__ == "__main__":
         print()
         print("Merging worker data...")
 
-        final_dir = base_path / "collected_data_merged"
-        final_dir.mkdir(parents=True, exist_ok=True)
-
-        total_episodes = 0
-        for i in range(args.workers):
-            worker_dir = base_path / f"worker_{i}"
-            if not worker_dir.exists():
-                continue
-            h5_files = list(worker_dir.glob("*.h5"))
-            if h5_files:
+        if args.script == "basic" and basic_worker_directions:
+            # Basic mode: merge into direction-based subdirectories
+            total_episodes = 0
+            for i in range(args.workers):
+                worker_dir = base_path / f"worker_{i}"
+                if not worker_dir.exists():
+                    continue
+                # h5 files are in worker_dir/{direction}/
+                h5_files = list(worker_dir.glob("**/*.h5"))
                 for h5_file in h5_files:
+                    # Preserve direction subdirectory
+                    direction_subdir = h5_file.parent.name
+                    final_dir = base_path / direction_subdir
+                    final_dir.mkdir(parents=True, exist_ok=True)
                     new_name = f"w{i}_{h5_file.name}"
                     shutil.move(str(h5_file), str(final_dir / new_name))
                     total_episodes += 1
-                try:
-                    worker_dir.rmdir()
-                except OSError:
-                    pass
+                # Clean up worker dir
+                shutil.rmtree(str(worker_dir), ignore_errors=True)
+            print(f"  Merged {total_episodes} episodes -> {base_path}/<direction>/")
+        else:
+            final_dir = base_path / "collected_data_merged"
+            final_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"  Merged {total_episodes} episodes -> {final_dir}")
+            total_episodes = 0
+            for i in range(args.workers):
+                worker_dir = base_path / f"worker_{i}"
+                if not worker_dir.exists():
+                    continue
+                h5_files = list(worker_dir.glob("*.h5"))
+                if h5_files:
+                    for h5_file in h5_files:
+                        new_name = f"w{i}_{h5_file.name}"
+                        shutil.move(str(h5_file), str(final_dir / new_name))
+                        total_episodes += 1
+                    try:
+                        worker_dir.rmdir()
+                    except OSError:
+                        pass
+
+            print(f"  Merged {total_episodes} episodes -> {final_dir}")
     else:
         total_episodes = sum(
-            len(list((base_path / f"worker_{i}").glob("*.h5")))
+            len(list((base_path / f"worker_{i}").glob("**/*.h5")))
             for i in range(args.workers)
             if (base_path / f"worker_{i}").exists()
         )

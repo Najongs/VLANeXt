@@ -140,7 +140,7 @@ class ApproachSimEnv:
     Success: needle tip within threshold of trocar entry
     """
 
-    def __init__(self, model_xml_path: str, randomize_phantom: bool = False):
+    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, phantom_pos: tuple = None):
         self.model = mujoco.MjModel.from_xml_path(model_xml_path)
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -155,6 +155,7 @@ class ApproachSimEnv:
 
         # Phantom randomization
         self.randomize_phantom = randomize_phantom
+        self.phantom_pos = phantom_pos
         self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
         self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
 
@@ -185,11 +186,35 @@ class ApproachSimEnv:
         }
         print(f"  Phantom: pos=({offset_x:.3f}, {offset_y:.3f}), angle={random_angle_deg:.1f}deg")
 
+    def _set_fixed_phantom(self, pos):
+        """Set phantom to a fixed (x, y) position with fixed rotation."""
+        px, py = pos
+        self.model.body_pos[self._phantom_body_id] = np.array([px, py, 0.0])
+
+        if py >= -0.25:
+            random_angle_deg = 0
+        else:
+            random_angle_deg = -90
+
+        new_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
+        self.model.body_quat[self._rotating_id] = new_quat
+        mujoco.mj_forward(self.model, self.data)
+
+        self.last_phantom_info = {
+            "phantom_x": px,
+            "phantom_y": py,
+            "phantom_angle_deg": random_angle_deg,
+        }
+        print(f"  Phantom (fixed): pos=({px:.3f}, {py:.3f}), angle={random_angle_deg:.1f}deg")
+
     def reset(self):
         """Reset to random home pose (far from trocar)."""
         mujoco.mj_resetData(self.model, self.data)
 
-        if self.randomize_phantom:
+        if self.phantom_pos is not None:
+            self._set_fixed_phantom(self.phantom_pos)
+        elif self.randomize_phantom:
             self._randomize_phantom()
 
         # Random home pose (same ranges as Save_dataset.py)
@@ -423,7 +448,8 @@ def run_eval(cfg):
 
     model_xml = os.path.abspath(SIM_MODEL_PATH)
     randomize_phantom = getattr(cfg, "randomize_phantom", False)
-    env = ApproachSimEnv(model_xml, randomize_phantom=randomize_phantom)
+    phantom_pos = getattr(cfg, "phantom_pos", None)
+    env = ApproachSimEnv(model_xml, randomize_phantom=randomize_phantom, phantom_pos=phantom_pos)
 
     total_successes = 0
 
@@ -433,7 +459,7 @@ def run_eval(cfg):
     csv_header = ["episode", "success", "steps", "final_dist_mm",
                    "final_lateral_mm", "final_angle_deg", "min_dist_mm",
                    "initial_dist_mm"]
-    if randomize_phantom:
+    if randomize_phantom or phantom_pos is not None:
         csv_header.extend(["phantom_x", "phantom_y", "phantom_angle_deg"])
     csv_writer.writerow(csv_header)
 
@@ -542,7 +568,7 @@ def run_eval(cfg):
             f"{min_dist:.2f}",
             f"{si['initial_dist_mm']:.2f}",
         ]
-        if randomize_phantom and env.last_phantom_info:
+        if (randomize_phantom or phantom_pos is not None) and env.last_phantom_info:
             ph = env.last_phantom_info
             row.extend([f"{ph['phantom_x']:.4f}", f"{ph['phantom_y']:.4f}", f"{ph['phantom_angle_deg']:.1f}"])
         csv_writer.writerow(row)
@@ -592,6 +618,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
     parser.add_argument("--randomize-phantom", action="store_true",
                         help="Randomize phantom position/rotation each episode")
+    parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
+                        metavar=("X", "Y"),
+                        help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.4")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -605,4 +634,5 @@ if __name__ == "__main__":
     cfg.shard_id = args.shard_id
     cfg.num_shards = args.num_shards
     cfg.randomize_phantom = args.randomize_phantom
+    cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
     run_eval(cfg)
