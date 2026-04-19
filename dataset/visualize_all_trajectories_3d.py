@@ -3,6 +3,10 @@
 
 python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/approach_test/collected_data_merged"
 python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/approach_00/collected_data_merged"
+
+# Multiple folders:
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/path/to/folder1" "/path/to/folder2"
+python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/approach_00/collected_data_merged" "/data/public/NAS/VLANeXt/dataset/approach_04/collected_data_merged"
 Shows all trajectories with their start and end points marked
 """
 
@@ -52,12 +56,17 @@ def visualize_all_trajectories(dataset_path, output_path=None, max_trajectories=
     Visualize all trajectories in 3D space
 
     Args:
-        dataset_path: Path to Eye_trocar dataset
+        dataset_path: Path or list of paths to dataset directories
         output_path: Path to save the visualization (optional)
         max_trajectories: Maximum number of trajectories to visualize (for testing)
     """
-    # Find all h5 files
-    h5_files = glob.glob(str(Path(dataset_path) / "**/*.h5"), recursive=True)
+    # Find all h5 files from one or more directories
+    if isinstance(dataset_path, list):
+        h5_files = []
+        for dp in dataset_path:
+            h5_files.extend(glob.glob(str(Path(dp) / "**/*.h5"), recursive=True))
+    else:
+        h5_files = glob.glob(str(Path(dataset_path) / "**/*.h5"), recursive=True)
 
     if max_trajectories:
         h5_files = h5_files[:max_trajectories]
@@ -292,7 +301,13 @@ def analyze_dataset(dataset_path, output_path=None):
     Analyze training dataset distribution: perturbation, actions, trajectory quality.
     Designed to diagnose directional bias and coverage gaps.
     """
-    h5_files = sorted(glob.glob(str(Path(dataset_path) / "**/*.h5"), recursive=True))
+    if isinstance(dataset_path, list):
+        h5_files = []
+        for dp in dataset_path:
+            h5_files.extend(glob.glob(str(Path(dp) / "**/*.h5"), recursive=True))
+        h5_files = sorted(h5_files)
+    else:
+        h5_files = sorted(glob.glob(str(Path(dataset_path) / "**/*.h5"), recursive=True))
     print(f"Found {len(h5_files)} episodes")
 
     # Collect per-episode metadata
@@ -382,7 +397,7 @@ def analyze_dataset(dataset_path, output_path=None):
     # Concatenate all actions for global stats
     all_actions_cat = np.concatenate(all_actions, axis=0)
 
-    out_dir = Path(output_path or dataset_path)
+    out_dir = Path(output_path or (dataset_path[0] if isinstance(dataset_path, list) else dataset_path))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ================================================================
@@ -669,9 +684,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Visualize and analyze trajectories')
-    parser.add_argument('--dataset_path', type=str,
-                       default='/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged',
-                       help='Path to dataset')
+    parser.add_argument('--dataset_path', type=str, nargs='+',
+                       default=['/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged'],
+                       help='Path(s) to dataset directories (supports multiple)')
     parser.add_argument('--output', type=str, default='all_trajectories_3d.png',
                        help='Output image path')
     parser.add_argument('--max_trajectories', type=int, default=None,
