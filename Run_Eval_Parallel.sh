@@ -9,6 +9,12 @@
 #   approach  - Approach eval (먼 거리 → 트로카 접근)
 #   insertion - Insertion eval (정렬 후 삽입)
 #
+# NOTE: Perturbation Z 범위
+#   align 데이터 수집/eval에서 Z perturbation은 [0, +Z_MAX]mm만 사용.
+#   Z < 0이면 tool_camera에서 바늘 팁이 팬텀(눈 모형)에 가려짐.
+#   (occlusion grid 테스트 결과: dataset/occlusion_grid/, dataset/occlusion_grid_angle/)
+#   관련 파일: Save_dataset_align_only.py, sim_eval_align_only.py, run_parallel.py
+#
 # Examples:
 #   bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0417
 #   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success

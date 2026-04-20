@@ -208,18 +208,19 @@ def smooth_step(t):
 
 def randomize_phantom_pos(model, data, phantom_id, rot_id):
     # 1. 위치 이동 (Translation)
-    offset_x = np.random.uniform(-0.05, 0.05) # 기존 테스트용 주석 해제
-    offset_y = np.random.uniform(-0.4, 0.0)   # 0부터 -0.4까지 랜덤 설정
-    offset_z = 0.0 
+    offset_x = np.random.uniform(-0.05, 0.05)
+    # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
+    if np.random.random() < 0.6:
+        offset_y = np.random.uniform(-0.4, -0.26)
+    else:
+        offset_y = np.random.uniform(-0.17, 0.0)
+    offset_z = 0.0
 
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
-    
-    # 2. 회전 (Rotation)
+
     if offset_y >= -0.25:
-        # 0.0 ~ -0.25 구간
         random_angle_deg = 0
     else:
-        # -0.3 ~ -0.4 구간
         random_angle_deg = -90
 
     new_quat = np.zeros(4)
@@ -325,7 +326,14 @@ def main():
     episode_count = 0
     while episode_count < MAX_EPISODES:
         mujoco.mj_resetData(model, data)
-        home_pose = np.array([np.random.uniform(-0.45, 0.55), np.random.uniform(-0.6, -0.1), np.random.uniform(0.1, 0.6), 0.0, np.random.uniform(0.3, 0.7), np.random.uniform(0.8, 1.2)])
+        home_pose = np.array([
+            np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
+            np.random.uniform(-0.3, 0.3),    # J2 (shoulder pitch)
+            np.random.uniform(-0.5, 0.2),    # J3 (elbow pitch)
+            np.random.uniform(-0.3, 0.3),    # J4 (roll)
+            np.random.uniform(0.4, 1.0),     # J5 (wrist pitch)
+            np.random.uniform(-1.0, 1.0),    # J6
+        ])
         data.qpos[:6] = home_pose
         phantom_offset = np.zeros(3, dtype=np.float32)
         phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)

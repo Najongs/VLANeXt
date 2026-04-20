@@ -27,12 +27,12 @@ Usage:
         --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/approach_00/collected_data_merged \
+    --data-dir /data/public/NAS/VLANeXt/dataset/basic_motion \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
-    --max-range 250 \
+    --max-range 50 \
     --max-detour 3.0 \
-    --max-path-length 500 \
+    --max-path-length 50 \
     --execute
     
 """
@@ -145,7 +145,7 @@ def main():
                         help="Actually move files. Without this flag, only reports.")
     args = parser.parse_args()
 
-    files = sorted(glob.glob(os.path.join(args.data_dir, '*.h5')))
+    files = sorted(glob.glob(os.path.join(args.data_dir, '**', '*.h5'), recursive=True))
     if not files:
         print(f"No .h5 files found in {args.data_dir}")
         return
@@ -267,20 +267,23 @@ def main():
 
         for o in outliers:
             src = o['path']
-            dst = os.path.join(quarantine_dir, os.path.basename(src))
+            # 하위폴더 구조 유지: data_dir/subdir/file.h5 → _outliers/subdir/file.h5
+            rel = os.path.relpath(src, args.data_dir)
+            dst = os.path.join(quarantine_dir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.move(src, dst)
 
         print(f"\nMoved {len(outliers)} files to {quarantine_dir}/")
 
         # Recompute action stats on clean data
-        clean_files = sorted(glob.glob(os.path.join(args.data_dir, '*.h5')))
+        clean_files = sorted(glob.glob(os.path.join(args.data_dir, '**', '*.h5'), recursive=True))
         _print_action_stats(clean_files, prefix="clean")
     elif not args.execute and outliers:
         print(f"\nDry run complete. Add --execute to actually move files.")
 
     # Always print stats for all data (dry run or execute)
     if all_stats and not args.execute:
-        all_files = sorted(glob.glob(os.path.join(args.data_dir, '*.h5')))
+        all_files = sorted(glob.glob(os.path.join(args.data_dir, '**', '*.h5'), recursive=True))
         _print_action_stats(all_files, prefix="all")
 
 

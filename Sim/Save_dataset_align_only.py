@@ -79,7 +79,8 @@ FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MM = 20.0     # Z축 perturbation 범위 (±mm)
+PERTURB_POS_Z_MIN_MM = 0.0  # Z축 하한 (mm) — 음수면 팬텀에 바늘팁 가림 (occlusion grid 결과)
+PERTURB_POS_Z_MAX_MM = 20.0 # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
 
 # --- 성공 조건 ---
@@ -242,7 +243,11 @@ def smooth_step(t):
 def randomize_phantom_pos(model, data, phantom_id, rot_id):
     """팬텀 위치/회전 랜덤화 (Save_dataset.py와 동일 로직)"""
     offset_x = np.random.uniform(-0.1, 0.1)
-    offset_y = np.random.uniform(-0.4, 0.0)
+    # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
+    if np.random.random() < 0.6:
+        offset_y = np.random.uniform(-0.4, -0.26)
+    else:
+        offset_y = np.random.uniform(-0.17, 0.0)
     offset_z = 0.0
 
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
@@ -285,16 +290,33 @@ def main():
     phantom_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
     rotating_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
 
+    # tool_camera ID (occlusion check용)
+    tool_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "tool_camera")
+
+    def check_tip_occluded():
+        """tool_camera → needle_tip ray cast로 팬텀에 가려지는지 확인."""
+        cam_pos = data.cam_xpos[tool_cam_id].copy()
+        tip_pos = data.site_xpos[tip_id].copy()
+        direction = tip_pos - cam_pos
+        dist_to_tip = np.linalg.norm(direction)
+        direction_norm = direction / (dist_to_tip + 1e-10)
+        geomid_out = np.zeros(1, dtype=np.int32)
+        hit_dist = mujoco.mj_ray(model, data, cam_pos, direction_norm,
+                                  None, 1, -1, geomid_out)
+        if hit_dist > 0 and hit_dist < dist_to_tip - 0.001:
+            return True  # 팁보다 앞에 뭔가 있음 → 가려짐
+        return False
+
     recorder = SimRecorder(SAVE_DIR)
 
     # 초기 home pose (정렬 시작점)
     home_pose = np.array([
-        np.random.uniform(-0.45, 0.55),
-        np.random.uniform(-0.4, -0.3),
-        np.random.uniform(0.3, 0.4),
-        0.0,
-        np.random.uniform(0.45, 0.55),
-        np.random.uniform(0.95, 1.05),
+        np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
+        np.random.uniform(-0.3, 0.3),    # J2 (shoulder pitch)
+        np.random.uniform(-0.5, 0.2),    # J3 (elbow pitch)
+        np.random.uniform(-0.3, 0.3),    # J4 (roll)
+        np.random.uniform(0.4, 1.0),     # J5 (wrist pitch)
+        np.random.uniform(-1.0, 1.0),    # J6
     ])
     ik_speed = 0.5
 
@@ -363,12 +385,12 @@ def main():
     print("Running initial pre-alignment (one-time)...")
     mujoco.mj_resetData(model, data)
     home_pose = np.array([
-        np.random.uniform(-0.45, 0.55),
-        np.random.uniform(-0.4, -0.3),
-        np.random.uniform(0.3, 0.4),
-        0.0,
-        np.random.uniform(0.45, 0.55),
-        np.random.uniform(0.95, 1.05),
+        np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
+        np.random.uniform(-0.3, 0.3),    # J2 (shoulder pitch)
+        np.random.uniform(-0.5, 0.2),    # J3 (elbow pitch)
+        np.random.uniform(-0.3, 0.3),    # J4 (roll)
+        np.random.uniform(0.4, 1.0),     # J5 (wrist pitch)
+        np.random.uniform(-1.0, 1.0),    # J6
     ])
     data.qpos[:6] = home_pose
     mujoco.mj_forward(model, data)
@@ -527,14 +549,14 @@ def main():
             perturb_xyz = np.array([
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
+                np.random.uniform(PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM) / 1000.0,
             ])
             # Apply directional bias if configured
             if BIAS_DIRECTION is not None and np.random.random() < BIAS_RATIO:
                 for bias_part in BIAS_DIRECTION.split(","):
                     axis, sign = bias_part.strip().split("_")
                     idx = {"x": 0, "y": 1, "z": 2}[axis]
-                    limit = PERTURB_POS_Z_MM if axis == "z" else PERTURB_POS_XY_MM
+                    limit = PERTURB_POS_Z_MAX_MM if axis == "z" else PERTURB_POS_XY_MM
                     if sign == "neg":
                         perturb_xyz[idx] = np.random.uniform(-limit, -limit * 0.15) / 1000.0
                     else:
@@ -586,8 +608,20 @@ def main():
         perturb_dist_mm = np.linalg.norm(perturb_xyz) * 1000
         ik_err_mm = np.linalg.norm(data.site_xpos[tip_id] - perturbed_tip) * 1000
         reach_tag = "OK" if perturb_reached else f"IK_FAIL(err={ik_err_mm:.1f}mm)"
+
+        # Occlusion check: tool_camera에서 바늘 팁이 팬텀에 가려지는지 확인
+        tip_occluded = False
+        if perturb_reached:
+            tip_occluded = check_tip_occluded()
+            if tip_occluded:
+                reach_tag = "OCCLUDED"
+
         print(f"  Episode {episode_count}: perturbation applied "
               f"(pos={perturb_dist_mm:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg) [{reach_tag}]")
+
+        if tip_occluded:
+            print(f"  Episode {episode_count} discarded. Reason: needle tip occluded by phantom")
+            continue
 
         # ============================================================
         # Phase 2: 미세 정렬 녹화

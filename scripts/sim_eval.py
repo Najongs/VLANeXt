@@ -347,7 +347,11 @@ def smooth_step(t):
 
 def randomize_phantom_pos(model_mj, data_mj, phantom_id, rot_id):
     offset_x = np.random.uniform(-0.05, 0.05)
-    offset_y = np.random.uniform(-0.4, 0.0)
+    # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
+    if np.random.random() < 0.6:
+        offset_y = np.random.uniform(-0.4, -0.26)
+    else:
+        offset_y = np.random.uniform(-0.17, 0.0)
     offset_z = 0.0
     model_mj.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
 

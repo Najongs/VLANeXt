@@ -117,7 +117,8 @@ TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port 
 
 # Perturbation (same as data collection)
 PERTURB_POS_XY_MM = 10.0
-PERTURB_POS_Z_MM = 7.0
+PERTURB_POS_Z_MIN_MM = 0.0   # Z 하한 — 음수면 팬텀에 바늘팁 가림
+PERTURB_POS_Z_MAX_MM = 7.0
 PERTURB_ANGLE_DEG = 7.0
 
 # Success: needle tip within distance + angle threshold
@@ -211,7 +212,11 @@ class AlignSimEnv:
     def _randomize_phantom(self):
         """Randomize phantom position and rotation (same logic as Save_dataset.py)."""
         offset_x = np.random.uniform(-0.05, 0.05)
-        offset_y = np.random.uniform(-0.4, 0.0)
+        # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
+        if np.random.random() < 0.6:
+            offset_y = np.random.uniform(-0.4, -0.26)
+        else:
+            offset_y = np.random.uniform(-0.17, 0.0)
         offset_z = 0.0
         self.model.body_pos[self._phantom_body_id] = np.array([offset_x, offset_y, offset_z])
 
@@ -331,7 +336,7 @@ class AlignSimEnv:
             perturb_xyz = np.array([
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                np.random.uniform(-PERTURB_POS_Z_MM, PERTURB_POS_Z_MM) / 1000.0,
+                np.random.uniform(PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM) / 1000.0,
             ])
             perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
             random_axis = np.random.randn(3)
@@ -377,7 +382,7 @@ class AlignSimEnv:
 
             # Verify: actual tip distance to trocar entry should be reasonable
             actual_dist = np.linalg.norm(self.data.site_xpos[self.tip_id] - self._p_entry) * 1000.0
-            max_expected = np.sqrt(PERTURB_POS_XY_MM**2 * 2 + PERTURB_POS_Z_MM**2) + 5.0  # margin
+            max_expected = np.sqrt(PERTURB_POS_XY_MM**2 * 2 + PERTURB_POS_Z_MAX_MM**2) + 5.0  # margin
 
             if converged and actual_dist < max_expected:
                 perturb_dist = np.linalg.norm(perturb_xyz) * 1000

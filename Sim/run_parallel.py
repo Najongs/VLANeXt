@@ -103,13 +103,14 @@ def main():
     grid_worker_files = {}  # worker_id -> json file path
     if args.grid and args.script == "align":
         xy_mm = 30.0   # PERTURB_POS_XY_MM
-        z_mm = 20.0    # PERTURB_POS_Z_MM
+        z_min_mm = 0.0   # PERTURB_POS_Z_MIN_MM — 음수면 팬텀에 바늘팁 가림
+        z_max_mm = 20.0  # PERTURB_POS_Z_MAX_MM
         bx, by, bz = args.grid_bins_xy, args.grid_bins_xy, args.grid_bins_z
 
         # 셀 경계 생성
         x_edges = np.linspace(-xy_mm, xy_mm, bx + 1)
         y_edges = np.linspace(-xy_mm, xy_mm, by + 1)
-        z_edges = np.linspace(-z_mm, z_mm, bz + 1)
+        z_edges = np.linspace(z_min_mm, z_max_mm, bz + 1)
 
         # 전체 셀 목록: [x_lo, x_hi, y_lo, y_hi, z_lo, z_hi]
         all_cells = []

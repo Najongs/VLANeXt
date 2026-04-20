@@ -49,19 +49,19 @@ FINE_ALIGN_SPEED = 0.005    # m/s — basic motion speed
 STEPS_PER_EPISODE = 50      # recorded control steps per episode
 ACTION_CLIP_MM = 1.0        # delta position clipping (mm)
 
-# --- 10 directions in EE local frame ---
-# EE rotation matrix columns: x = mat[:,0], y = mat[:,1], z = mat[:,2]
+# --- 10 directions in WORLD frame (fixed vectors) ---
+# World: Z=up, gravity=(0,0,-9.81). X/Y assignment TBD after visual check.
 DIRECTIONS = {
-    "left":       lambda x, y, z: -y,
-    "right":      lambda x, y, z:  y,
-    "up":         lambda x, y, z:  z,
-    "down":       lambda x, y, z: -z,
-    "left_up":    lambda x, y, z: (-y + z) / sqrt(2),
-    "left_down":  lambda x, y, z: (-y - z) / sqrt(2),
-    "right_up":   lambda x, y, z: ( y + z) / sqrt(2),
-    "right_down": lambda x, y, z: ( y - z) / sqrt(2),
-    "forward":    lambda x, y, z:  x,
-    "backward":   lambda x, y, z: -x,
+    "left":       np.array([ 0.0,  1.0,  0.0]),
+    "right":      np.array([ 0.0, -1.0,  0.0]),
+    "up":         np.array([ 0.0,  0.0,  1.0]),
+    "down":       np.array([ 0.0,  0.0, -1.0]),
+    "left_up":    np.array([ 0.0,  1.0,  1.0]) / sqrt(2),
+    "left_down":  np.array([ 0.0,  1.0, -1.0]) / sqrt(2),
+    "right_up":   np.array([ 0.0, -1.0,  1.0]) / sqrt(2),
+    "right_down": np.array([ 0.0, -1.0, -1.0]) / sqrt(2),
+    "forward":    np.array([ 1.0,  0.0,  0.0]),
+    "backward":   np.array([-1.0,  0.0,  0.0]),
 }
 
 # Direction name → language instruction
@@ -80,11 +80,11 @@ DIRECTION_INSTRUCTIONS = {
 
 # --- Random start joint ranges (safe, within joint limits) ---
 JOINT_RANGES = [
-    (-0.5, 0.5),    # J1
-    (-0.5, 0.5),    # J2
-    (-0.5, 0.5),    # J3
+    (-0.5, 0.5),    # J1 (base rotation)
+    (-0.3, 0.3),    # J2 (shoulder pitch)
+    (-0.5, 0.2),    # J3 (elbow pitch)
     (-0.3, 0.3),    # J4 (roll)
-    (-0.5, 0.5),    # J5
+    (0.4, 1.0),     # J5 (wrist pitch, biased more downward)
     (-1.0, 1.0),    # J6
 ]
 
@@ -164,15 +164,18 @@ class SimRecorder:
 
                     # Language instruction (direction name)
                     instruction = data[0].get("instruction", "")
-                    f.create_dataset("language_instruction", data=instruction)
+                    f.create_dataset("language_instruction", data=instruction.encode("utf-8"))
 
                     # Metadata
                     for key, value in metadata.items():
-                        value_arr = np.asarray(value)
-                        if value_arr.shape == ():
-                            meta_grp.create_dataset(key, data=value_arr)
+                        if isinstance(value, str):
+                            meta_grp.create_dataset(key, data=value.encode("utf-8"))
                         else:
-                            meta_grp.create_dataset(key, data=value_arr, compression="gzip")
+                            value_arr = np.asarray(value)
+                            if value_arr.shape == ():
+                                meta_grp.create_dataset(key, data=value_arr)
+                            else:
+                                meta_grp.create_dataset(key, data=value_arr, compression="gzip")
 
                     # Images (JPEG encoded)
                     first_imgs = data[0]["imgs"]
@@ -235,7 +238,7 @@ def main():
         print(f"Error: Unknown direction '{direction_name}'. Choose from: {list(DIRECTIONS.keys())}")
         return
 
-    direction_fn = DIRECTIONS[direction_name]
+    direction_vec = DIRECTIONS[direction_name]
     instruction = DIRECTION_INSTRUCTIONS[direction_name]
 
     print(f"Loading Model: {MODEL_PATH}")
@@ -330,6 +333,14 @@ def main():
             data.ctrl[:n_motors] = data.qpos[:n_motors]
             mujoco.mj_step(model, data)
 
+        # Warm-up: run direction movement without recording to skip initial transient
+        warmup_tip = data.site_xpos[tip_id].copy()
+        warmup_back = data.site_xpos[back_id].copy()
+        for ws in range(500):
+            disp = direction_vec * FINE_ALIGN_SPEED * model.opt.timestep * (ws + 1)
+            run_ik_step(warmup_tip + disp, warmup_back + disp)
+            mujoco.mj_step(model, data)
+
         # Get initial EE state
         last_ee_pose = get_ee_pose_6d_scaled()
         curr_tip = data.site_xpos[tip_id].copy()
@@ -354,38 +365,34 @@ def main():
 
         prev_tip = data.site_xpos[tip_id].copy() if episode_ok else None
 
+        # Accumulate target from initial position (prevents gravity drift)
+        init_tip = data.site_xpos[tip_id].copy()
+        init_back = data.site_xpos[back_id].copy()
+        elapsed_sim_steps = 0
+
         for ctrl_idx in range(STEPS_PER_EPISODE):
             if not episode_ok:
                 break
 
-            # Recompute direction from current EE orientation each control step
-            ee_x, ee_y, ee_z = get_ee_direction_vectors(data, link6_id)
-            direction_world = direction_fn(ee_x, ee_y, ee_z)
-            direction_world = direction_world / (np.linalg.norm(direction_world) + 1e-10)
-
-            # Compute target: move tip and back in direction
-            curr_tip = data.site_xpos[tip_id].copy()
-            curr_back = data.site_xpos[back_id].copy()
+            # Fixed world-frame direction (no EE-relative recomputation needed)
+            direction_world = direction_vec
 
             # Run 67 sim steps (one control step = one recorded frame)
             for sim_step in range(67):
-                # Update targets each sim step for smooth motion
-                curr_tip_now = data.site_xpos[tip_id].copy()
-                curr_back_now = data.site_xpos[back_id].copy()
+                elapsed_sim_steps += 1
 
                 # NaN check inside sim loop — break early on IK divergence
+                curr_tip_now = data.site_xpos[tip_id].copy()
+                curr_back_now = data.site_xpos[back_id].copy()
                 if np.any(np.isnan(curr_tip_now)) or np.any(np.isnan(data.qpos[:n_motors])):
                     episode_ok = False
                     fail_reason = "nan"
                     break
 
-                # Recompute direction from current EE each sim step
-                ee_x_s, ee_y_s, ee_z_s = get_ee_direction_vectors(data, link6_id)
-                dir_world = direction_fn(ee_x_s, ee_y_s, ee_z_s)
-                dir_world = dir_world / (np.linalg.norm(dir_world) + 1e-10)
-
-                target_tip = curr_tip_now + dir_world * FINE_ALIGN_SPEED * model.opt.timestep
-                target_back = curr_back_now + dir_world * FINE_ALIGN_SPEED * model.opt.timestep
+                # Target = initial position + accumulated displacement
+                displacement = direction_world * FINE_ALIGN_SPEED * model.opt.timestep * elapsed_sim_steps
+                target_tip = init_tip + displacement
+                target_back = init_back + displacement
 
                 run_ik_step(target_tip, target_back)
 

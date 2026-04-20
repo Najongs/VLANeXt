@@ -11,9 +11,9 @@ from torch.utils.data import IterableDataset
 # Action normalization stats for basic motion dataset
 # Will be computed from collected data — using align stats as initial placeholder
 # These should be updated after collecting data and running dataset_stats.py
-action_min_sim_basic = [-0.5957266092300415, -0.6034851670265198, -0.5240848660469055, -0.002589409239590168, -0.0008707013912498951, -0.003319802926853299, -1.0]
-action_max_sim_basic = [0.5957266092300415, 0.6034851670265198, 0.5240848660469055, 0.002589409239590168, 0.0008707013912498951, 0.003319802926853299, 1.0]
 
+action_min_sim_basic = [-1, -1, -1, -0.01, -0.01, -0.01, -1]
+action_max_sim_basic = [1, 1, 1, 0.01, 0.01, 0.01, 1]
 
 class SimActBasic(IterableDataset):
     """

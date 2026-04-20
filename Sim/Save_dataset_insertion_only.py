@@ -231,7 +231,11 @@ def smooth_step(t):
 def randomize_phantom_pos(model, data, phantom_id, rot_id):
     """팬텀 위치/회전 랜덤화"""
     offset_x = np.random.uniform(-0.1, 0.1)
-    offset_y = np.random.uniform(-0.4, 0.0)
+    # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
+    if np.random.random() < 0.6:
+        offset_y = np.random.uniform(-0.4, -0.26)
+    else:
+        offset_y = np.random.uniform(-0.17, 0.0)
     offset_z = 0.0
 
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
@@ -407,12 +411,12 @@ def main():
     print("Running initial pre-alignment (one-time)...")
     mujoco.mj_resetData(model, data)
     home_pose = np.array([
-        np.random.uniform(-0.45, 0.55),
-        np.random.uniform(-0.4, -0.3),
-        np.random.uniform(0.3, 0.4),
-        0.0,
-        np.random.uniform(0.45, 0.55),
-        np.random.uniform(0.95, 1.05),
+        np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
+        np.random.uniform(-0.3, 0.3),    # J2 (shoulder pitch)
+        np.random.uniform(-0.5, 0.2),    # J3 (elbow pitch)
+        np.random.uniform(-0.3, 0.3),    # J4 (roll)
+        np.random.uniform(0.4, 1.0),     # J5 (wrist pitch)
+        np.random.uniform(-1.0, 1.0),    # J6
     ])
     data.qpos[:6] = home_pose
     mujoco.mj_forward(model, data)
