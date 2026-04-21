@@ -65,7 +65,7 @@
 #   bash Run_Collect.sh full 5 500                 # full pipeline 2,500개
 #   bash Run_Collect.sh insertion 10 500             # insertion only, 팬텀 고정
 #   bash Run_Collect.sh insertion_perturb 10 500     # insertion + perturbation (불완전 정렬)
-#
+#   NO_SIDE_CAM=true bash Run_Collect.sh uniform 20 500 _ true
 # =============================================================
 
 # Phase 1: Micro-Alignment (가까이에서 정렬)

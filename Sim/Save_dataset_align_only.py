@@ -240,14 +240,23 @@ def smooth_step(t):
     return t * t * (3 - 2 * t)
 
 
-def randomize_phantom_pos(model, data, phantom_id, rot_id):
-    """팬텀 위치/회전 랜덤화 (Save_dataset.py와 동일 로직)"""
-    offset_x = np.random.uniform(-0.1, 0.1)
-    # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
-    if np.random.random() < 0.6:
-        offset_y = np.random.uniform(-0.4, -0.26)
+def randomize_phantom_pos(model, data, phantom_id, rot_id, angle_counts=None):
+    """팬텀 위치/회전 랜덤화.
+    angle_counts: {0: n_success_0deg, -90: n_success_m90deg} — 균등 배분용 카운터.
+                  덜 모인 각도 구간을 우선 선택. None이면 50/50 랜덤.
+    """
+    # X: [-0.03, 0.05] (phantom_grid_test_v3 결과: X=-0.05 좌측, X=0.053+ 우측 실패)
+    offset_x = np.random.uniform(-0.03, 0.05)
+    # Y=-0.24~-0.20 제외 (회전 전환 경계 + IK 실패 다발 구간, phantom_grid_test_v3 결과)
+    # 각도별 성공 카운터 기반으로 덜 모인 쪽 우선 선택 → 데이터 비율 균등화
+    if angle_counts is not None:
+        pick_m90 = angle_counts.get(-90, 0) <= angle_counts.get(0, 0)
     else:
-        offset_y = np.random.uniform(-0.17, 0.0)
+        pick_m90 = np.random.random() < 0.5
+    if pick_m90:
+        offset_y = np.random.uniform(-0.4, -0.24)   # → angle -90°
+    else:
+        offset_y = np.random.uniform(-0.20, 0.0)    # → angle 0°
     offset_z = 0.0
 
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
@@ -446,6 +455,7 @@ def main():
     grid_fail_cells = []         # Grid mode: 실패한 셀 기록
     grid_max_retries = 3         # Grid mode: 셀당 최대 재시도 횟수
     grid_retry_count = 0
+    angle_counts = {0: 0, -90: 0}  # 각도별 성공 에피소드 카운터 (균등 배분용)
     while episode_count < MAX_EPISODES:
         # 정렬된 상태로 즉시 리셋
         mujoco.mj_resetData(model, data)
@@ -476,7 +486,7 @@ def main():
             print(f">>> Fixed phantom: Pos=({px:.2f}, {py:.2f}), Angle={random_angle_deg_val:.1f} deg")
         elif RANDOMIZE_PHANTOM and phantom_body_id >= 0:
             phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(
-                model, data, phantom_body_id, rotating_id)
+                model, data, phantom_body_id, rotating_id, angle_counts=angle_counts)
 
         # 팬텀이 이동된 경우 재정렬 필요
         need_realign = (PHANTOM_POS is not None or RANDOMIZE_PHANTOM) and phantom_body_id >= 0
@@ -777,6 +787,11 @@ def main():
         if success and len(recorder.buffer) > 0:
             recorder.save_async()
             episode_count += 1
+            # 각도별 성공 카운터 업데이트 (랜덤 팬텀 균등 배분용)
+            if RANDOMIZE_PHANTOM:
+                angle_key = int(round(float(phantom_angle_deg)))
+                if angle_key in angle_counts:
+                    angle_counts[angle_key] += 1
             pbar.update(1)
             if GRID_CELLS is not None:
                 grid_cell_index += 1
