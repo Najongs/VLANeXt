@@ -508,6 +508,7 @@ def main():
             re_start_time = data.time
             re_timer = 0
 
+            realign_ok = False
             for _ in range(50000):
                 t_re = (data.time - re_start_time) / re_duration
                 alpha_re = smooth_step(min(t_re, 1.0))
@@ -522,13 +523,19 @@ def main():
                     else:
                         re_timer = 0
                     if re_timer > ALIGN_HOLD_STEPS:
+                        realign_ok = True
                         break
 
                 if data.time - re_start_time > 50.0:
-                    print(f"Re-alignment failed for phantom offset={phantom_offset}, skipping...")
+                    print(f"Re-alignment failed for phantom offset={phantom_offset}, retrying with fresh state...")
                     break
 
-            # 재정렬 후 상태를 이번 에피소드 기준으로 갱신
+            if not realign_ok:
+                # 실패 시: aligned_qpos 업데이트하지 않고 에피소드 스킵
+                # 다음 에피소드에서 이전 성공 상태로 복원됨
+                continue
+
+            # 재정렬 성공 시에만 상태 갱신
             aligned_qpos = data.qpos[:n_motors].copy()
             aligned_qvel = data.qvel[:n_motors].copy()
 
