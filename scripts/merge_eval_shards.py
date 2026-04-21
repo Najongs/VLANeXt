@@ -13,13 +13,17 @@ from pathlib import Path
 
 
 def _collect_shard_files(shard_dirs, merged_dir):
-    """Copy mp4, npz, png files from shard directories into merged directory."""
+    """Copy mp4, npz, png files from shard directories into merged directory.
+    Preserves subdirectory structure (e.g., direction_name/ for basic eval)."""
     count = 0
     for shard_dir in shard_dirs:
-        for pattern in ("*.mp4", "*.npz", "*.png"):
+        for pattern in ("**/*.mp4", "**/*.npz", "**/*.png"):
             for f in shard_dir.glob(pattern):
-                dst = merged_dir / f.name
+                # Preserve relative path from shard dir
+                rel = f.relative_to(shard_dir)
+                dst = merged_dir / rel
                 if not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(f, dst)
                     count += 1
     print(f"  Collected {count} files (mp4/npz/png) into merged directory")
@@ -62,9 +66,12 @@ def main():
         print("No shard results found!")
         return
 
-    # Merge and sort by episode number
+    # Merge and sort
     merged = pd.concat(shard_csvs, ignore_index=True)
-    merged = merged.sort_values("episode").reset_index(drop=True)
+    if "direction" in merged.columns:
+        merged = merged.sort_values(["direction", "episode"]).reset_index(drop=True)
+    else:
+        merged = merged.sort_values("episode").reset_index(drop=True)
 
     # Save merged CSV
     merged_dir = ckpt_path.parent / base_name
@@ -88,10 +95,14 @@ def main():
     # Generate merged trajectory plot from all npz files
     _generate_merged_trajectory_plot(merged_dir)
 
-    # Auto-run analysis
-    print(f"\nRunning analysis...")
-    import subprocess
-    subprocess.run(["python", "scripts/analyze_eval.py", str(merged_csv)])
+    # Auto-run analysis (skip for basic eval — different CSV format)
+    if args.prefix == "basic":
+        print(f"\nGenerating basic motion summary...")
+        _generate_basic_summary(merged_dir, merged)
+    else:
+        print(f"\nRunning analysis...")
+        import subprocess
+        subprocess.run(["python", "scripts/analyze_eval.py", str(merged_csv)])
 
 
 def _generate_merged_trajectory_plot(merged_dir):
@@ -153,6 +164,62 @@ def _generate_merged_trajectory_plot(merged_dir):
     plt.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"  Merged trajectory plot saved: {out_path}")
+
+
+def _generate_basic_summary(merged_dir, df):
+    """Generate bar chart summary for basic motion eval."""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    directions = sorted(df["direction"].unique())
+    success_rates = []
+    avg_cosines = []
+    avg_displacements = []
+
+    for d in directions:
+        g = df[df["direction"] == d]
+        success_rates.append(g["success"].mean() * 100)
+        avg_cosines.append(g["cosine_sim"].astype(float).mean())
+        avg_displacements.append(g["displacement_mm"].astype(float).mean())
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    overall_sr = df["success"].mean() * 100
+    fig.suptitle(f"Basic Motion Eval Summary (Overall SR: {overall_sr:.1f}%)", fontsize=14)
+
+    x = np.arange(len(directions))
+
+    colors_sr = ['green' if s >= 50 else 'orange' if s >= 25 else 'red' for s in success_rates]
+    axes[0].bar(x, success_rates, color=colors_sr)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(directions, rotation=45, ha='right')
+    axes[0].set_ylabel("Success Rate (%)")
+    axes[0].set_title("Success Rate per Direction")
+    axes[0].set_ylim(0, 105)
+    for i, v in enumerate(success_rates):
+        axes[0].text(i, v + 1, f"{v:.0f}%", ha='center', fontsize=8)
+
+    colors_cos = ['green' if c >= 0.5 else 'orange' if c >= 0.0 else 'red' for c in avg_cosines]
+    axes[1].bar(x, avg_cosines, color=colors_cos)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(directions, rotation=45, ha='right')
+    axes[1].set_ylabel("Avg Cosine Similarity")
+    axes[1].set_title("Direction Accuracy")
+    axes[1].set_ylim(-1, 1.1)
+    axes[1].axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+
+    axes[2].bar(x, avg_displacements, color='steelblue')
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(directions, rotation=45, ha='right')
+    axes[2].set_ylabel("Avg Displacement (mm)")
+    axes[2].set_title("Movement Magnitude")
+
+    plt.tight_layout()
+    out_path = merged_dir / "eval_analysis.png"
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"  Summary plot saved: {out_path}")
 
 
 if __name__ == "__main__":

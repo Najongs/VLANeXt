@@ -539,9 +539,30 @@ def train(config):
     if has_pretrained_ckpt:
         if global_rank == 0:
             print(f"Loading pretrained VLA checkpoint: {pretrained_ckpt_path}")
-        checkpoint = torch.load(pretrained_ckpt_path, map_location='cpu')
-        state_dict = checkpoint['model_state_dict']
-        del checkpoint
+        if os.path.isdir(pretrained_ckpt_path):
+            # Sharded checkpoint directory (HF format from zero_to_fp32.py)
+            import json as _json
+            index_path = os.path.join(pretrained_ckpt_path, "pytorch_model.bin.index.json")
+            single_path = os.path.join(pretrained_ckpt_path, "pytorch_model.bin")
+            if os.path.exists(index_path):
+                with open(index_path) as _f:
+                    _index = _json.load(_f)
+                shard_files = sorted(set(_index["weight_map"].values()))
+                state_dict = {}
+                for _shard in shard_files:
+                    state_dict.update(torch.load(os.path.join(pretrained_ckpt_path, _shard), map_location='cpu'))
+                if global_rank == 0:
+                    print(f"  Loaded {len(state_dict)} keys from {len(shard_files)} shards")
+            elif os.path.exists(single_path):
+                state_dict = torch.load(single_path, map_location='cpu')
+                if global_rank == 0:
+                    print(f"  Loaded {len(state_dict)} keys from single pytorch_model.bin")
+            else:
+                raise FileNotFoundError(f"No pytorch_model.bin.index.json or pytorch_model.bin in {pretrained_ckpt_path}")
+        else:
+            checkpoint = torch.load(pretrained_ckpt_path, map_location='cpu')
+            state_dict = checkpoint['model_state_dict']
+            del checkpoint
         if list(state_dict.keys())[0].startswith('module.'):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         # Filter out shape-mismatched keys

@@ -27,7 +27,7 @@ Usage:
         --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/basic_motion \
+    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
     --max-range 50 \

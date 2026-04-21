@@ -1,0 +1,23 @@
+data:
+  augmentation:
+    center_crop: false
+    center_crop_ratio: 1.0
+
+model:
+  diffusion_steps: 10
+  scheduler_type: "flow_match"
+  use_sensor: false
+
+eval:
+  finetuned_checkpoint: ""
+  num_episodes_per_direction: 10
+  max_steps_per_episode: 80
+  num_steps_execute: 1
+  seed: 42
+  image_size: 256
+  sim_steps_per_control: 67
+  save_video: true
+  video_fps: 15
+  # Direction success criteria
+  cosine_threshold: 0.5       # cosine similarity > 0.5 = success
+  min_displacement_mm: 2.0    # minimum total displacement to count
