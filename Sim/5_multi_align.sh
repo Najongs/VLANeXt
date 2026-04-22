@@ -4,8 +4,8 @@ python run_parallel.py --script align --workers 20 --episodes 200 \
 python run_parallel.py --script align --workers 20 --episodes 200 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align_01 --phantom-pos 0.0 -0.1 --no-side-camera
 
-python run_parallel.py --script align --workers 20 --episodes 200 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align_02 --phantom-pos 0.0 -0.2 --no-side-camera
+# python run_parallel.py --script align --workers 20 --episodes 200 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align_02 --phantom-pos 0.0 -0.2 --no-side-camera
 
 python run_parallel.py --script align --workers 20 --episodes 200 \
     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align_03 --phantom-pos 0.0 -0.3 --no-side-camera

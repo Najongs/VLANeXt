@@ -75,12 +75,12 @@ CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
+FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MIN_MM = 0.0  # Z축 하한 (mm) — 음수면 팬텀에 바늘팁 가림 (occlusion grid 결과)
-PERTURB_POS_Z_MAX_MM = 20.0 # Z축 상한 (mm)
+PERTURB_POS_Z_MIN_MM = -20.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
+PERTURB_POS_Z_MAX_MM = 20.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
 
 # --- 성공 조건 ---
@@ -240,17 +240,19 @@ def smooth_step(t):
     return t * t * (3 - 2 * t)
 
 
-def randomize_phantom_pos(model, data, phantom_id, rot_id, angle_counts=None):
+def randomize_phantom_pos(model, data, phantom_id, rot_id, combo_counts=None):
     """팬텀 위치/회전 랜덤화.
-    angle_counts: {0: n_success_0deg, -90: n_success_m90deg} — 균등 배분용 카운터.
+    combo_counts: {(angle, z_dir): count} — 4-way 균등 배분용 카운터.
                   덜 모인 각도 구간을 우선 선택. None이면 50/50 랜덤.
     """
     # X: [-0.03, 0.05] (phantom_grid_test_v3 결과: X=-0.05 좌측, X=0.053+ 우측 실패)
     offset_x = np.random.uniform(-0.03, 0.05)
     # Y=-0.24~-0.20 제외 (회전 전환 경계 + IK 실패 다발 구간, phantom_grid_test_v3 결과)
-    # 각도별 성공 카운터 기반으로 덜 모인 쪽 우선 선택 → 데이터 비율 균등화
-    if angle_counts is not None:
-        pick_m90 = angle_counts.get(-90, 0) <= angle_counts.get(0, 0)
+    # combo_counts에서 각도별 합산으로 덜 모인 쪽 우선 선택
+    if combo_counts is not None:
+        count_0 = combo_counts.get((0, "pos"), 0) + combo_counts.get((0, "neg"), 0)
+        count_m90 = combo_counts.get((-90, "pos"), 0) + combo_counts.get((-90, "neg"), 0)
+        pick_m90 = count_m90 <= count_0
     else:
         pick_m90 = np.random.random() < 0.5
     if pick_m90:
@@ -455,7 +457,12 @@ def main():
     grid_fail_cells = []         # Grid mode: 실패한 셀 기록
     grid_max_retries = 3         # Grid mode: 셀당 최대 재시도 횟수
     grid_retry_count = 0
-    angle_counts = {0: 0, -90: 0}  # 각도별 성공 에피소드 카운터 (균등 배분용)
+    # 4-way 교차 카운터: (angle, z_dir) → 성공 에피소드 수
+    # 고정 위치 모드에서는 angle이 항상 같으므로 자동으로 Z+/Z- 2-way로 동작
+    combo_counts = {
+        (0, "pos"): 0, (0, "neg"): 0,
+        (-90, "pos"): 0, (-90, "neg"): 0,
+    }
     while episode_count < MAX_EPISODES:
         # 정렬된 상태로 즉시 리셋
         mujoco.mj_resetData(model, data)
@@ -486,7 +493,7 @@ def main():
             print(f">>> Fixed phantom: Pos=({px:.2f}, {py:.2f}), Angle={random_angle_deg_val:.1f} deg")
         elif RANDOMIZE_PHANTOM and phantom_body_id >= 0:
             phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(
-                model, data, phantom_body_id, rotating_id, angle_counts=angle_counts)
+                model, data, phantom_body_id, rotating_id, combo_counts=combo_counts)
 
         # 팬텀이 이동된 경우 재정렬 필요
         need_realign = (PHANTOM_POS is not None or RANDOMIZE_PHANTOM) and phantom_body_id >= 0
@@ -562,11 +569,18 @@ def main():
                 np.random.uniform(cell[4], cell[5]) / 1000.0,  # z: [z_lo, z_hi] mm
             ])
         else:
-            # Random mode (기존)
+            # Random mode — Z 방향 균등 배분 (4-way combo_counts 기반)
+            # 현재 angle에서 Z+/Z- 중 덜 모인 쪽 선택
+            cur_angle_key = int(round(float(phantom_angle_deg)))
+            pick_z_neg = combo_counts.get((cur_angle_key, "neg"), 0) <= combo_counts.get((cur_angle_key, "pos"), 0)
+            if pick_z_neg and PERTURB_POS_Z_MIN_MM < 0:
+                z_val = np.random.uniform(PERTURB_POS_Z_MIN_MM, 0) / 1000.0
+            else:
+                z_val = np.random.uniform(0, PERTURB_POS_Z_MAX_MM) / 1000.0
             perturb_xyz = np.array([
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                np.random.uniform(PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM) / 1000.0,
+                z_val,
             ])
             # Apply directional bias if configured
             if BIAS_DIRECTION is not None and np.random.random() < BIAS_RATIO:
@@ -794,11 +808,12 @@ def main():
         if success and len(recorder.buffer) > 0:
             recorder.save_async()
             episode_count += 1
-            # 각도별 성공 카운터 업데이트 (랜덤 팬텀 균등 배분용)
-            if RANDOMIZE_PHANTOM:
-                angle_key = int(round(float(phantom_angle_deg)))
-                if angle_key in angle_counts:
-                    angle_counts[angle_key] += 1
+            # 4-way 교차 카운터 업데이트 (angle × Z방향 균등 배분용)
+            angle_key = int(round(float(phantom_angle_deg)))
+            z_dir_key = "neg" if perturb_xyz[2] < 0 else "pos"
+            combo_key = (angle_key, z_dir_key)
+            if combo_key in combo_counts:
+                combo_counts[combo_key] += 1
             pbar.update(1)
             if GRID_CELLS is not None:
                 grid_cell_index += 1

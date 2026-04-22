@@ -117,8 +117,8 @@ TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port 
 
 # Perturbation (same as data collection)
 PERTURB_POS_XY_MM = 10.0
-PERTURB_POS_Z_MIN_MM = 0.0   # Z 하한 — 음수면 팬텀에 바늘팁 가림
-PERTURB_POS_Z_MAX_MM = 7.0
+PERTURB_POS_Z_MIN_MM = -20.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
+PERTURB_POS_Z_MAX_MM = 20.0
 PERTURB_ANGLE_DEG = 7.0
 
 # Success: needle tip within distance + angle threshold
@@ -156,6 +156,12 @@ class AlignSimEnv:
         self.use_sensor_success = use_sensor_success
         self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
         self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
+
+        # tool_camera ID (occlusion check용)
+        self._tool_cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "tool_camera")
+
+        # Z 방향 균등 배분 카운터
+        self._z_dir_counts = {"pos": 0, "neg": 0}
 
         # Cached aligned state
         self._aligned_qpos = None
@@ -208,6 +214,20 @@ class AlignSimEnv:
         dq_p3 = np.linalg.pinv(J_p3_proj, rcond=1e-4) @ ((err_roll * 10.0) - jac_tip_full[3:, :n] @ (dq_p1 + dq_p2))
 
         self.data.ctrl[:n] = self.data.qpos[:n] + (dq_p1 + dq_p2 + dq_p3) * speed
+
+    def _check_tip_occluded(self):
+        """tool_camera → needle_tip ray cast로 팬텀에 가려지는지 확인."""
+        cam_pos = self.data.cam_xpos[self._tool_cam_id].copy()
+        tip_pos = self.data.site_xpos[self.tip_id].copy()
+        direction = tip_pos - cam_pos
+        dist_to_tip = np.linalg.norm(direction)
+        direction_norm = direction / (dist_to_tip + 1e-10)
+        geomid_out = np.zeros(1, dtype=np.int32)
+        hit_dist = mujoco.mj_ray(self.model, self.data, cam_pos, direction_norm,
+                                  None, 1, -1, geomid_out)
+        if hit_dist > 0 and hit_dist < dist_to_tip - 0.001:
+            return True
+        return False
 
     def _randomize_phantom(self):
         """Randomize phantom position and rotation (same logic as Save_dataset.py)."""
@@ -332,11 +352,16 @@ class AlignSimEnv:
             self.data.qvel[:self.n_motors] = self._aligned_qvel
             mujoco.mj_forward(self.model, self.data)
 
-            # Random perturbation
+            # Random perturbation — Z 방향 균등 배분
+            pick_z_neg = self._z_dir_counts["neg"] <= self._z_dir_counts["pos"]
+            if pick_z_neg and PERTURB_POS_Z_MIN_MM < 0:
+                z_val = np.random.uniform(PERTURB_POS_Z_MIN_MM, 0) / 1000.0
+            else:
+                z_val = np.random.uniform(0, PERTURB_POS_Z_MAX_MM) / 1000.0
             perturb_xyz = np.array([
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
                 np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                np.random.uniform(PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM) / 1000.0,
+                z_val,
             ])
             perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
             random_axis = np.random.randn(3)
@@ -382,12 +407,20 @@ class AlignSimEnv:
 
             # Verify: actual tip distance to trocar entry should be reasonable
             actual_dist = np.linalg.norm(self.data.site_xpos[self.tip_id] - self._p_entry) * 1000.0
-            max_expected = np.sqrt(PERTURB_POS_XY_MM**2 * 2 + PERTURB_POS_Z_MAX_MM**2) + 5.0  # margin
+            z_abs_max = max(abs(PERTURB_POS_Z_MIN_MM), abs(PERTURB_POS_Z_MAX_MM))
+            max_expected = np.sqrt(PERTURB_POS_XY_MM**2 * 2 + z_abs_max**2) + 5.0  # margin
 
             if converged and actual_dist < max_expected:
+                # Occlusion check: Z 음수일 때 바늘팁이 팬텀에 가려지면 재시도
+                if perturb_xyz[2] < 0 and self._check_tip_occluded():
+                    print(f"  Perturbation attempt {attempt+1}: Z<0 occluded, retrying...")
+                    continue
                 perturb_dist = np.linalg.norm(perturb_xyz) * 1000
+                # Z 방향 카운터 업데이트
+                z_dir_key = "neg" if perturb_xyz[2] < 0 else "pos"
+                self._z_dir_counts[z_dir_key] += 1
                 print(f"  Perturbation: pos={perturb_dist:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg, "
-                      f"actual_dist={actual_dist:.1f}mm")
+                      f"actual_dist={actual_dist:.1f}mm, z_dir={z_dir_key}")
                 break
             else:
                 print(f"  Perturbation attempt {attempt+1} failed (converged={converged}, "
