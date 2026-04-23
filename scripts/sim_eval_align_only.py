@@ -116,13 +116,13 @@ def _save_trajectory_plot(eval_dir):
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # Perturbation (same as data collection)
-PERTURB_POS_XY_MM = 10.0
+PERTURB_POS_XY_MM = 30.0
 PERTURB_POS_Z_MIN_MM = -20.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
 PERTURB_POS_Z_MAX_MM = 20.0
-PERTURB_ANGLE_DEG = 7.0
+PERTURB_ANGLE_DEG = 10.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.005   # 5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.0025  # 2.5mm
 ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
 ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
@@ -137,7 +137,7 @@ class AlignSimEnv:
     Success: needle tip within threshold of trocar entry
     """
 
-    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False, phantom_pos: tuple = None):
+    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False, phantom_pos: tuple = None, retreat_mm: float = 10.0):
         self.model = mujoco.MjModel.from_xml_path(model_xml_path)
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -154,6 +154,7 @@ class AlignSimEnv:
         self.randomize_phantom = randomize_phantom
         self.phantom_pos = phantom_pos
         self.use_sensor_success = use_sensor_success
+        self.retreat_mm = retreat_mm
         self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
         self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
 
@@ -303,8 +304,9 @@ class AlignSimEnv:
         needle_len = np.linalg.norm(curr_tip - curr_back)
 
         axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-        goal_tip = p_entry - (axis_dir * 0.0001)
-        goal_back = p_entry - (axis_dir * (0.0001 + needle_len))
+        retreat_m = self.retreat_mm / 1000.0
+        goal_tip = p_entry - (axis_dir * retreat_m)
+        goal_back = p_entry - (axis_dir * (retreat_m + needle_len))
 
         start_tip = curr_tip.copy()
         start_back = curr_back.copy()
@@ -489,13 +491,13 @@ class AlignSimEnv:
             mujoco.mj_step(self.model, self.data)
 
     def check_success(self):
-        """Check if needle tip is aligned to trocar entry (distance + angle)."""
+        """Check if needle tip is aligned to goal_tip (retreated from entry)."""
         tip_pos = self.data.site_xpos[self.tip_id].copy()
         back_pos = self.data.site_xpos[self.back_id].copy()
         entry_pos = self.data.site_xpos[self.target_entry_id].copy()
         depth_pos = self.data.site_xpos[self.target_depth_id].copy()
 
-        dist = np.linalg.norm(tip_pos - entry_pos)
+        dist = np.linalg.norm(tip_pos - self._goal_tip)
 
         # Needle-trocar axis angle
         needle_dir = tip_pos - back_pos
@@ -522,10 +524,9 @@ class AlignSimEnv:
         return self.align_hold_counter >= ALIGN_SUCCESS_HOLD_STEPS
 
     def get_alignment_dist_mm(self):
-        """Distance from needle tip to trocar entry in mm."""
+        """Distance from needle tip to goal_tip (retreated from entry) in mm."""
         tip_pos = self.data.site_xpos[self.tip_id].copy()
-        entry_pos = self.data.site_xpos[self.target_entry_id].copy()
-        return np.linalg.norm(tip_pos - entry_pos) * 1000.0
+        return np.linalg.norm(tip_pos - self._goal_tip) * 1000.0
 
     def get_sensor_dist(self):
         tip_pos = self.data.site_xpos[self.tip_id].copy()
@@ -659,7 +660,8 @@ def run_eval(cfg):
     randomize_phantom = getattr(cfg, "randomize_phantom", False)
     phantom_pos = getattr(cfg, "phantom_pos", None)
     use_sensor_success = getattr(cfg, 'use_sensor_success', False)
-    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom, use_sensor_success=use_sensor_success, phantom_pos=phantom_pos)
+    retreat_mm = getattr(cfg, 'retreat_mm', 10.0)
+    env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom, use_sensor_success=use_sensor_success, phantom_pos=phantom_pos, retreat_mm=retreat_mm)
 
     total_successes = 0
 
@@ -835,6 +837,8 @@ if __name__ == "__main__":
     parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
                         metavar=("X", "Y"),
                         help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.4")
+    parser.add_argument("--retreat-mm", type=float, default=10.0,
+                        help="Retreat goal_tip from trocar entry along -axis_dir (mm, default: 10)")
     parser.add_argument("--sensor-success", action="store_true",
                         help="Require sensor to see through trocar hole for success")
     args = parser.parse_args()
@@ -852,5 +856,6 @@ if __name__ == "__main__":
     cfg.randomize_phantom = args.randomize_phantom
     cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
     cfg.use_sensor_success = args.sensor_success
+    cfg.retreat_mm = args.retreat_mm
 
     run_eval(cfg)

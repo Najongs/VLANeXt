@@ -87,6 +87,19 @@ def main():
                         help="Base random seed (worker i gets seed + i)")
     parser.add_argument("--no-side-camera", action="store_true",
                         help="Skip side_camera rendering/saving (saves storage)")
+    # Insertion mode
+    parser.add_argument("--approach-offset", type=float, default=None,
+                        help="(insertion only) Distance behind entry to start recording (mm)")
+    parser.add_argument("--approach-xy-offset", type=float, default=None,
+                        help="(insertion only) XY perturbation range (±mm)")
+    parser.add_argument("--retreat-mm", type=float, default=None,
+                        help="(insertion/align) Retreat distance from entry (mm)")
+    parser.add_argument("--perturb-mm", type=float, default=None,
+                        help="(insertion only) Lateral perturbation during insertion (mm)")
+    parser.add_argument("--perturb-prob", type=float, default=None,
+                        help="(insertion only) Perturbation probability per control frame")
+    parser.add_argument("--perturb-frames", type=int, default=None,
+                        help="(insertion only) Perturbation duration in control frames")
     # Basic motion mode
     parser.add_argument("--direction", type=str, default=None,
                         help="(basic only) Direction to collect, or 'all' for 10-direction parallel")
@@ -217,6 +230,26 @@ def main():
     # Basic motion: steps per episode
     basic_steps_line = f"{module_name}.STEPS_PER_EPISODE = {args.steps_per_episode}" if args.script == "basic" else ""
 
+    # Insertion overrides
+    insertion_lines = ""
+    if args.script == "insertion":
+        parts = []
+        if args.approach_offset is not None:
+            parts.append(f"{module_name}.APPROACH_OFFSET_MM = {args.approach_offset}")
+        if args.approach_xy_offset is not None:
+            parts.append(f"{module_name}.APPROACH_XY_OFFSET_MM = {args.approach_xy_offset}")
+        if args.retreat_mm is not None:
+            parts.append(f"{module_name}.RETREAT_MM = {args.retreat_mm}")
+        if args.perturb_mm is not None:
+            parts.append(f"{module_name}.INSERTION_PERTURB_MM = {args.perturb_mm}")
+        if args.perturb_prob is not None:
+            parts.append(f"{module_name}.INSERTION_PERTURB_PROB = {args.perturb_prob}")
+        if args.perturb_frames is not None:
+            parts.append(f"{module_name}.INSERTION_PERTURB_FRAMES = {args.perturb_frames}")
+        insertion_lines = "\n".join(parts)
+    elif args.script == "align" and args.retreat_mm is not None:
+        insertion_lines = f"{module_name}.RETREAT_MM = {args.retreat_mm}"
+
 
     # Launch workers
     processes = []
@@ -246,6 +279,7 @@ with open(r'{grid_json}', 'r') as _f:
 {phantom_line}
 {no_insertion_line}
 {no_side_cam_line}
+{insertion_lines}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {n_cells} grid cells -> {worker_dir}")
@@ -275,6 +309,7 @@ import {module_name}
 {no_side_cam_line}
 {basic_steps_line}
 {basic_dir_line}
+{insertion_lines}
 
 if __name__ == "__main__":
     print(f"[Worker {i}] Starting: {args.episodes} episodes -> {worker_dir}")

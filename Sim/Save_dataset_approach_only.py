@@ -64,8 +64,9 @@ TARGET_INSERTION_DEPTH = 0.0275
 ALIGN_SPEED = 0.02      # 정렬 단계 속도: 0.02 m/s (~200 steps)
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
-ACTION_CLIP_MM = 2.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
+ACTION_CLIP_MM = 1.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 MAX_CTRL_STEPS = 500        # 녹화 control step 상한 (초과 시 에피소드 폐기)
+WARMUP_STEPS = 500          # 녹화 전 J6 settling 대기 (sim steps, 67 control step ≈ 7 control frames)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
 class SimRecorder:
@@ -372,6 +373,50 @@ def main():
             "target_depth_world": p_depth.astype(np.float32),
         })
         step_count, success = 0, False
+
+        # --- Warm-up: J6 settling (IK 돌리되 녹화 안 함) ---
+        for _ in range(WARMUP_STEPS):
+            curr_tip_w = data.site_xpos[tip_id].copy()
+            curr_back_w = data.site_xpos[back_id].copy()
+            # IK: 현재 위치 유지 (target = current)
+            target_tip_pos_w = curr_tip_w.copy()
+            target_back_pos_w = curr_back_w.copy()
+
+            err_tip_w = target_tip_pos_w - curr_tip_w
+            err_back_w = target_back_pos_w - curr_back_w
+            tip_rot_mat_w = data.site_xmat[tip_id].reshape(3, 3)
+            offset_angle_w = np.deg2rad(180 + 30)
+            offset_local_vec_w = np.array([np.cos(offset_angle_w), np.sin(offset_angle_w), 0])
+            current_side_vec_w = tip_rot_mat_w @ offset_local_vec_w
+            needle_axis_w = (curr_tip_w - curr_back_w) / (np.linalg.norm(curr_tip_w - curr_back_w) + 1e-10)
+            target_side_vec_w = np.cross(needle_axis_w, np.array([0, 0, 1]))
+            target_side_vec_w = target_side_vec_w / np.linalg.norm(target_side_vec_w) if np.linalg.norm(target_side_vec_w) > 1e-3 else np.array([1, 0, 0])
+            err_roll_w = np.cross(current_side_vec_w, target_side_vec_w)
+
+            jac_tip_w = np.zeros((6, dof))
+            jac_back_w = np.zeros((3, dof))
+            mujoco.mj_jacSite(model, data, jac_tip_w[:3], jac_tip_w[3:], tip_id)
+            mujoco.mj_jacSite(model, data, jac_back_w, None, back_id)
+
+            J1 = jac_tip_w[:3, :n_motors]
+            e1 = err_tip_w * 50.0
+            if np.linalg.norm(e1) > 1.0:
+                e1 = e1 / np.linalg.norm(e1) * 1.0
+            J1_pinv = np.linalg.pinv(J1, rcond=1e-4)
+            dq1 = J1_pinv @ e1
+            P1 = np.eye(n_motors) - (J1_pinv @ J1)
+            J2_proj = jac_back_w[:, :n_motors] @ P1
+            dq2 = np.linalg.pinv(J2_proj, rcond=1e-4) @ ((err_back_w * 50.0) - jac_back_w[:, :n_motors] @ dq1)
+            P2 = P1 - (np.linalg.pinv(J2_proj, rcond=1e-4) @ J2_proj)
+            J3_proj = jac_tip_w[3:, :n_motors] @ P2
+            dq3 = np.linalg.pinv(J3_proj, rcond=1e-4) @ ((err_roll_w * 10.0) - jac_tip_w[3:, :n_motors] @ (dq1 + dq2))
+
+            data.ctrl[:n_motors] = data.qpos[:n_motors] + (dq1 + dq2 + dq3) * current_speed
+            mujoco.mj_step(model, data)
+
+        # Warm-up 후 상태 재초기화
+        last_ee_pose = get_ee_pose_6d_scaled()
+        traj_start_time = data.time
 
         while True:
             t_curr = data.time

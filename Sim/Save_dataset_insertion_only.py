@@ -64,7 +64,7 @@ CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중 (~20 steps)
+FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중 (~20 steps)
 INSERTION_SPEED = 0.005     # 삽입 속도 (m/s) — 녹화 중 (~80 steps)
 
 # --- Insertion 설정 ---
@@ -73,7 +73,7 @@ APPROACH_XY_OFFSET_MM = 15.0 # align 모델의 XY 잔여 오차 (±mm)
 TARGET_INSERTION_DEPTH_MM = 25.0  # 목표 삽입 깊이 (mm)
 
 # --- 성공 조건 ---
-ALIGN_THRESHOLD_M = 0.0025   # pre-alignment 수렴 (m)
+ALIGN_THRESHOLD_M = 0.0075   # pre-alignment 수렴 (m)
 ALIGN_HOLD_STEPS = 0       # 수렴 유지 횟수
 INSERTION_DEPTH_THRESHOLD_MM = 1.0   # 목표 깊이 허용 오차 (mm)
 INSERTION_LATERAL_THRESHOLD_MM = 3.0  # lateral error 허용 (mm)
@@ -83,6 +83,14 @@ TASK_INSTRUCTION = "Insert the needle tip to the small grey circular trocar port
 
 # --- Holding (삽입 완료 후 자세 유지 녹화) ---
 HOLD_RECORD_STEPS = 10
+
+# --- Retreat (align 스크립트와 동일) ---
+RETREAT_MM = 10.0           # entry에서 뒤로 빼는 거리 (mm) — align 종료 지점과 일치
+
+# --- Insertion 중 lateral perturbation (DAgger-style) ---
+INSERTION_PERTURB_MM = 2.0   # lateral perturbation 최대 크기 (mm)
+INSERTION_PERTURB_PROB = 0.15 # 녹화 프레임당 perturbation 시작 확률
+INSERTION_PERTURB_FRAMES = 50 # kick 후 복귀 프레임 수 (5mm/50=0.1mm/frame 보정)
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
@@ -339,18 +347,25 @@ def main():
         dist = mujoco.mj_ray(model, data, curr_tip, needle_dir, None, 1, link6_id, np.zeros(1, dtype=np.int32))
         return dist * 1000.0 if dist >= 0 else -1.0
 
-    def run_smooth_ik(start_tip, start_back, end_tip, end_back, speed, timeout=50.0):
+    def run_smooth_ik(start_tip, start_back, end_tip, end_back, speed, timeout=50.0, label=""):
         """Smooth IK interpolation. Returns True if converged."""
         dist = np.linalg.norm(end_tip - start_tip)
         duration = max(dist / speed, 0.1)
         t0 = data.time
         timer = 0
-        for _ in range(100000):
+        last_log_time = t0
+        for step_i in range(100000):
             t = (data.time - t0) / duration
             alpha = smooth_step(min(t, 1.0))
             run_ik_step((1 - alpha) * start_tip + alpha * end_tip,
                         (1 - alpha) * start_back + alpha * end_back)
             mujoco.mj_step(model, data)
+            # 5초마다 진행 로그
+            if data.time - last_log_time >= 5.0:
+                err_mm = np.linalg.norm(data.site_xpos[tip_id] - end_tip) * 1000
+                elapsed = data.time - t0
+                print(f"    [{label}] {elapsed:.1f}s/{timeout:.0f}s  alpha={alpha:.2f}  err={err_mm:.1f}mm", flush=True)
+                last_log_time = data.time
             if t >= 1.0:
                 if np.linalg.norm(data.site_xpos[tip_id] - end_tip) < ALIGN_THRESHOLD_M:
                     timer += 1
@@ -419,6 +434,19 @@ def main():
         np.random.uniform(-1.0, 1.0),    # J6
     ])
     data.qpos[:6] = home_pose
+
+    # Pre-alignment에서도 phantom 위치/회전 설정 (에피소드 루프와 일치시킴)
+    if PHANTOM_POS is not None and phantom_body_id >= 0:
+        px, py = PHANTOM_POS
+        model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
+        if py >= -0.25:
+            init_angle = 0
+        else:
+            init_angle = -90
+        init_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(init_quat, [0, 0, np.deg2rad(init_angle)], "xyz")
+        model.body_quat[rotating_id] = init_quat
+
     mujoco.mj_forward(model, data)
 
     p_entry = data.site_xpos[target_entry_id].copy()
@@ -428,10 +456,11 @@ def main():
     needle_len = np.linalg.norm(curr_tip - curr_back)
 
     axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-    goal_tip = p_entry - (axis_dir * 0.0001)  # entry 0.1mm 앞
-    goal_back = p_entry - (axis_dir * (0.0001 + needle_len))
+    retreat_m = RETREAT_MM / 1000.0
+    goal_tip = p_entry - (axis_dir * retreat_m)  # entry에서 retreat_mm 뒤
+    goal_back = p_entry - (axis_dir * (retreat_m + needle_len))
 
-    ok = run_smooth_ik(curr_tip, curr_back, goal_tip, goal_back, ALIGN_SPEED)
+    ok = run_smooth_ik(curr_tip, curr_back, goal_tip, goal_back, ALIGN_SPEED, label="pre-align")
     if not ok:
         print("Pre-alignment failed! Exiting.")
         return
@@ -460,22 +489,22 @@ def main():
             px, py = PHANTOM_POS
             model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
             if py >= -0.25:
-                rand_angle = np.random.uniform(-15, 15)
+                fixed_angle = 0
             else:
-                rand_angle = np.random.uniform(-15 - 90, 15 - 90)
+                fixed_angle = -90
             new_quat = np.zeros(4)
-            mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(rand_angle)], "xyz")
+            mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(fixed_angle)], "xyz")
             model.body_quat[rotating_id] = new_quat
             mujoco.mj_forward(model, data)
             phantom_offset = np.array([px, py, 0.0], dtype=np.float32)
             phantom_quat = new_quat.astype(np.float32)
-            phantom_angle_deg = np.float32(rand_angle)
+            phantom_angle_deg = np.float32(fixed_angle)
         elif RANDOMIZE_PHANTOM and phantom_body_id >= 0:
             phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(
                 model, data, phantom_body_id, rotating_id)
 
-        # 팬텀 이동 시 재정렬 (align과 동일: entry 0.1mm까지)
-        need_realign = (PHANTOM_POS is not None or RANDOMIZE_PHANTOM) and phantom_body_id >= 0
+        # 팬텀 이동 시 재정렬 (RANDOMIZE_PHANTOM만 — 고정 위치는 불필요)
+        need_realign = RANDOMIZE_PHANTOM and phantom_body_id >= 0
         if need_realign:
             p_entry = data.site_xpos[target_entry_id].copy()
             p_depth = data.site_xpos[target_depth_id].copy()
@@ -483,12 +512,13 @@ def main():
             curr_back = data.site_xpos[back_id].copy()
             needle_len_local = np.linalg.norm(curr_tip - curr_back)
             axis_dir_local = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-            re_goal_tip = p_entry - (axis_dir_local * 0.0001)
-            re_goal_back = p_entry - (axis_dir_local * (0.0001 + needle_len_local))
+            retreat_m_local = RETREAT_MM / 1000.0
+            re_goal_tip = p_entry - (axis_dir_local * retreat_m_local)
+            re_goal_back = p_entry - (axis_dir_local * (retreat_m_local + needle_len_local))
 
             ok = run_smooth_ik(
                 data.site_xpos[tip_id].copy(), data.site_xpos[back_id].copy(),
-                re_goal_tip, re_goal_back, ALIGN_SPEED)
+                re_goal_tip, re_goal_back, ALIGN_SPEED, label="re-align")
 
             # 진행된 만큼 갱신 (다음 에피소드 시작점이 더 가까워짐)
             aligned_qpos = data.qpos[:n_motors].copy()
@@ -506,13 +536,14 @@ def main():
         # ============================================================
         # Step 1: entry에서 approach_offset만큼 뒤로 이동 (비녹화)
         # ============================================================
+        retreat_m = RETREAT_MM / 1000.0
         approach_offset_m = APPROACH_OFFSET_MM / 1000.0
-        back_tip = p_entry - (axis_dir * approach_offset_m)
+        back_tip = p_entry - (axis_dir * (retreat_m + approach_offset_m))
         back_back = back_tip - (axis_dir * needle_len)
 
         ok = run_smooth_ik(
             data.site_xpos[tip_id].copy(), data.site_xpos[back_id].copy(),
-            back_tip, back_back, 0.05, timeout=10.0)
+            back_tip, back_back, 0.05, timeout=10.0, label="move-back")
         if not ok:
             print(f"  Episode {episode_count}: move-back failed, skipping...")
             continue
@@ -536,7 +567,7 @@ def main():
 
         ok = run_smooth_ik(
             data.site_xpos[tip_id].copy(), data.site_xpos[back_id].copy(),
-            offset_tip, offset_back, 0.05, timeout=10.0)
+            offset_tip, offset_back, 0.05, timeout=10.0, label="xy-offset")
         if not ok:
             print(f"  Episode {episode_count}: XY offset failed, skipping...")
             continue
@@ -553,9 +584,9 @@ def main():
         # ============================================================
         insertion_depth_m = TARGET_INSERTION_DEPTH_MM / 1000.0
 
-        # 정렬 목표: entry 0.1mm (align 스크립트와 동일)
-        align_goal_tip = p_entry - (axis_dir * 0.0001)
-        align_goal_back = p_entry - (axis_dir * (0.0001 + needle_len))
+        # 정렬 목표: retreat point (align 스크립트 종료 지점과 동일)
+        align_goal_tip = p_entry - (axis_dir * retreat_m)
+        align_goal_back = p_entry - (axis_dir * (retreat_m + needle_len))
 
         # 삽입 목표: entry에서 axis 방향으로 depth만큼
         insert_goal_tip = p_entry + (axis_dir * insertion_depth_m)
@@ -568,6 +599,7 @@ def main():
             "aligned_qpos": np.rad2deg(aligned_qpos).astype(np.float32),
             "approach_xy_offset_mm": (xy_offset_vec * 1000).astype(np.float32),
             "insertion_depth_m": np.float32(insertion_depth_m),
+            "retreat_mm": np.float32(RETREAT_MM),
             "target_entry_world": p_entry.astype(np.float32),
             "target_depth_world": p_depth.astype(np.float32),
             "phantom_offset": phantom_offset,
@@ -603,6 +635,17 @@ def main():
         traj_start_time = data.time
         depth_hold_timer = 0
 
+        # --- Perturbation state: kick → 즉시 fade-out ---
+        perturb_offset_base = np.zeros(3)  # kick 방향/크기
+        perturb_cooldown = 0               # fade-out 잔여 프레임 (FRAMES → 0)
+
+        # Lateral basis vectors (trocar axis에 수직)
+        _up = np.array([0, 0, 1])
+        lat1 = np.cross(axis_dir, _up)
+        lat1 /= (np.linalg.norm(lat1) + 1e-10)
+        lat2 = np.cross(axis_dir, lat1)
+        lat2 /= (np.linalg.norm(lat2) + 1e-10)
+
         while True:
             elapsed = data.time - traj_start_time
             global_t = min(elapsed / total_duration, 1.0) if total_duration > 0 else 1.0
@@ -618,6 +661,12 @@ def main():
                 target_tip_pos = (1 - alpha) * align_goal_tip + alpha * insert_goal_tip
                 target_back_pos = (1 - alpha) * align_goal_back + alpha * insert_goal_back
 
+            # Perturbation: kick 후 점진 복귀 (IK target이 offset → axis로 fade-out)
+            if perturb_cooldown > 0:
+                fade = perturb_cooldown / INSERTION_PERTURB_FRAMES  # 1.0 → 0.0
+                target_tip_pos = target_tip_pos + perturb_offset_base * fade
+                target_back_pos = target_back_pos + perturb_offset_base * fade
+
             run_ik_step(target_tip_pos, target_back_pos)
             mujoco.mj_step(model, data)
             step_count += 1
@@ -627,7 +676,35 @@ def main():
                 curr_tip = data.site_xpos[tip_id].copy()
                 depth_along_axis = np.dot(curr_tip - p_entry, axis_dir)
                 phase = 1 if depth_along_axis < 0 else 2
+
+                # --- DAgger-style lateral perturbation ---
+                # Fade-out 카운트다운
+                if perturb_cooldown > 0:
+                    perturb_cooldown -= 1
+                    if perturb_cooldown == 0:
+                        perturb_offset_base = np.zeros(3)
+
+                # 녹화 먼저 (kick 전 정상 상태)
                 last_ee_pose = record_step(last_ee_pose, phase)
+
+                # 녹화 후 kick 적용 → 다음 프레임 이미지에 kicked 상태 반영
+                if (phase == 2 and global_t < 0.75
+                        and perturb_cooldown == 0
+                        and INSERTION_PERTURB_MM > 0 and np.random.random() < INSERTION_PERTURB_PROB):
+                    direction = lat1 * np.random.randn() + lat2 * np.random.randn()
+                    direction /= (np.linalg.norm(direction) + 1e-10)
+                    magnitude = np.random.uniform(0, INSERTION_PERTURB_MM) / 1000.0
+                    perturb_offset_base = direction * magnitude
+                    # qpos kick: 바늘을 물리적으로 순간 이동 (Jacobian 이용)
+                    jac_kick = np.zeros((3, dof))
+                    mujoco.mj_jacSite(model, data, jac_kick, None, tip_id)
+                    dq_kick = np.linalg.pinv(jac_kick[:, :n_motors], rcond=1e-4) @ perturb_offset_base
+                    saved_qvel = data.qvel.copy()
+                    data.qpos[:n_motors] += dq_kick
+                    mujoco.mj_forward(model, data)
+                    data.qvel[:] = saved_qvel  # kick 전 속도 복원
+                    last_ee_pose = get_ee_pose_6d_scaled()  # delta 기준점을 post-kick으로
+                    perturb_cooldown = INSERTION_PERTURB_FRAMES  # fade-out 시작
 
             # 성공 조건: 목표 깊이 도달
             if global_t >= 1.0:
@@ -663,11 +740,14 @@ def main():
                 last_ee_pose = record_step(last_ee_pose, 2)  # phase=2
 
         if success and len(recorder.buffer) > 0:
+            print(f"  Episode {episode_count}: SUCCESS ({len(recorder.buffer)} frames)", flush=True)
             recorder.save_async()
             episode_count += 1
             pbar.update(1)
         else:
             fail_reason = "Timeout" if not success else "Empty"
+            elapsed_ep = data.time - record_start_time if 'record_start_time' in dir() else 0
+            print(f"  Episode {episode_count}: DISCARD [{fail_reason}] elapsed={elapsed_ep:.1f}s frames={len(recorder.buffer)}", flush=True)
             recorder.discard()
             print(f"  Episode {episode_count} discarded [{fail_reason}]")
 
@@ -696,6 +776,14 @@ if __name__ == "__main__":
                         help=f"XY perturbation range (±mm, default: {APPROACH_XY_OFFSET_MM})")
     parser.add_argument("--target-depth", type=float, default=TARGET_INSERTION_DEPTH_MM,
                         help=f"Target insertion depth (mm, default: {TARGET_INSERTION_DEPTH_MM})")
+    parser.add_argument("--retreat-mm", type=float, default=RETREAT_MM,
+                        help=f"Retreat distance from entry (mm, default: {RETREAT_MM})")
+    parser.add_argument("--perturb-mm", type=float, default=INSERTION_PERTURB_MM,
+                        help=f"Lateral perturbation during insertion (mm, default: {INSERTION_PERTURB_MM})")
+    parser.add_argument("--perturb-prob", type=float, default=INSERTION_PERTURB_PROB,
+                        help=f"Perturbation probability per control frame (default: {INSERTION_PERTURB_PROB})")
+    parser.add_argument("--perturb-frames", type=int, default=INSERTION_PERTURB_FRAMES,
+                        help=f"Perturbation duration in control frames (default: {INSERTION_PERTURB_FRAMES})")
     parser.add_argument("--no-side-camera", action="store_true",
                         help="Skip side_camera rendering/saving (saves storage)")
     args = parser.parse_args()
@@ -709,6 +797,10 @@ if __name__ == "__main__":
     APPROACH_OFFSET_MM = args.approach_offset
     APPROACH_XY_OFFSET_MM = args.xy_offset
     TARGET_INSERTION_DEPTH_MM = args.target_depth
+    RETREAT_MM = args.retreat_mm
+    INSERTION_PERTURB_MM = args.perturb_mm
+    INSERTION_PERTURB_PROB = args.perturb_prob
+    INSERTION_PERTURB_FRAMES = args.perturb_frames
 
     if args.no_side_camera:
         CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]

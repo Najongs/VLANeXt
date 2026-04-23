@@ -75,7 +75,7 @@ CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
+FINE_ALIGN_SPEED = 0.0075    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
@@ -95,8 +95,11 @@ HOLD_RECORD_STEPS = 10           # 정렬 완료 후 녹화 control steps
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
-TIMEOUT_SEC = 10.0          # 에피소드 전체 타임아웃 (초)
+TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
 MAX_CTRL_STEPS = 300        # 녹화 control step 상한 (초과 시 에피소드 폐기)
+
+# --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
+RETREAT_MM = 10.0           # insertion axis 반대 방향 retreat (mm)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
@@ -413,8 +416,9 @@ def main():
     needle_len = np.linalg.norm(curr_tip - curr_back)
 
     axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-    goal_tip = p_entry - (axis_dir * 0.0001)
-    goal_back = p_entry - (axis_dir * (0.0001 + needle_len))
+    retreat_m = RETREAT_MM / 1000.0
+    goal_tip = p_entry - (axis_dir * retreat_m)
+    goal_back = p_entry - (axis_dir * (retreat_m + needle_len))
 
     start_tip_pos = curr_tip.copy()
     start_back_pos = curr_back.copy()
@@ -505,8 +509,9 @@ def main():
             curr_back = data.site_xpos[back_id].copy()
             needle_len_local = np.linalg.norm(curr_tip - curr_back)
             axis_dir_local = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-            re_goal_tip = p_entry - (axis_dir_local * 0.0001)
-            re_goal_back = p_entry - (axis_dir_local * (0.0001 + needle_len_local))
+            retreat_m_local = RETREAT_MM / 1000.0
+            re_goal_tip = p_entry - (axis_dir_local * retreat_m_local)
+            re_goal_back = p_entry - (axis_dir_local * (retreat_m_local + needle_len_local))
 
             start_tip = data.site_xpos[tip_id].copy()
             start_back = data.site_xpos[back_id].copy()
@@ -550,8 +555,9 @@ def main():
             p_entry = data.site_xpos[target_entry_id].copy()
             p_depth = data.site_xpos[target_depth_id].copy()
             axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-            goal_tip = p_entry - (axis_dir * 0.0001)
-            goal_back = p_entry - (axis_dir * (0.0001 + needle_len))
+            retreat_m = RETREAT_MM / 1000.0
+            goal_tip = p_entry - (axis_dir * retreat_m)
+            goal_back = p_entry - (axis_dir * (retreat_m + needle_len))
 
         # ============================================================
         # Phase 1: Perturbation 적용 (녹화 X)
@@ -664,6 +670,7 @@ def main():
             "perturb_angle_deg": np.array(np.rad2deg(perturb_angle_rad), dtype=np.float32),
             "target_entry_world": p_entry.astype(np.float32),
             "target_depth_world": p_depth.astype(np.float32),
+            "retreat_mm": np.float32(RETREAT_MM),
         }
         if RANDOMIZE_PHANTOM:
             episode_meta["phantom_offset"] = phantom_offset
@@ -870,6 +877,9 @@ if __name__ == "__main__":
                         help="Fraction of perturbations in biased direction (default: 0.8)")
     parser.add_argument("--grid-cells-file", type=str, default=None,
                         help="JSON file with grid cells [[x_lo,x_hi,y_lo,y_hi,z_lo,z_hi], ...]")
+    parser.add_argument("--perturb", type=float, nargs=3, default=None,
+                        metavar=("X", "Y", "Z"),
+                        help="Fixed perturbation in mm. e.g. --perturb 30 30 30")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducible perturbations")
     parser.add_argument("--randomize-phantom-pos", dest="randomize_phantom_pos",
@@ -881,6 +891,8 @@ if __name__ == "__main__":
     parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
                         metavar=("X", "Y"),
                         help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.2")
+    parser.add_argument("--retreat-mm", type=float, default=RETREAT_MM,
+                        help="Retreat goal_tip from trocar entry along -axis_dir (mm, default: 20)")
     parser.add_argument("--no-side-camera", action="store_true",
                         help="Skip side_camera rendering/saving (saves storage)")
     args = parser.parse_args()
@@ -888,6 +900,7 @@ if __name__ == "__main__":
     # Override globals from CLI args
     SAVE_DIR = args.save_dir
     MAX_EPISODES = args.num_episodes
+    RETREAT_MM = args.retreat_mm
 
     # Store bias config as global for use in main()
     BIAS_DIRECTION = args.bias
@@ -905,11 +918,19 @@ if __name__ == "__main__":
         CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
         print(f"Cameras: {CAMERA_LIST}")
 
+    # Fixed perturbation mode
+    if args.perturb is not None:
+        x, y, z = args.perturb
+        GRID_CELLS = [[x, x, y, y, z, z]]
+        print(f"Fixed perturbation mode: X={x}mm Y={y}mm Z={z}mm")
+
     # Grid mode
     if args.grid_cells_file:
         with open(args.grid_cells_file, 'r') as f:
             GRID_CELLS = json.load(f)
-        MAX_EPISODES = len(GRID_CELLS)
         print(f"Grid mode: {len(GRID_CELLS)} cells loaded from {args.grid_cells_file}")
+
+    if GRID_CELLS is not None:
+        MAX_EPISODES = len(GRID_CELLS)
 
     main()
