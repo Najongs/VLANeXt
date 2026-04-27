@@ -66,6 +66,7 @@ INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 1.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 MAX_CTRL_STEPS = 500        # 녹화 control step 상한 (초과 시 에피소드 폐기)
+HOLD_STEPS = 50             # 도달 후 hold 프레임 수 (control steps, action≈0 기록)
 WARMUP_STEPS = 500          # 녹화 전 J6 settling 대기 (sim steps, 67 control step ≈ 7 control frames)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
@@ -266,12 +267,18 @@ def _parse_args():
         "--no-side-camera", action="store_true",
         help="Skip side_camera rendering/saving (saves storage)",
     )
+    parser.add_argument(
+        "--hold-steps", type=int, default=None,
+        help="Number of hold frames to record after reaching target (default: 50)",
+    )
     return parser.parse_args()
 
 # === Main Script ===
 def main():
-    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM, CAMERA_LIST
+    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM, CAMERA_LIST, HOLD_STEPS
     args = _parse_args()
+    if args.hold_steps is not None:
+        HOLD_STEPS = args.hold_steps
     if args.no_insertion:
         NO_INSERTION = True
     if args.phantom_pos is not None:
@@ -327,13 +334,14 @@ def main():
     episode_count = 0
     while episode_count < MAX_EPISODES:
         mujoco.mj_resetData(model, data)
+        # 초기 home pose (정렬 시작점)
         home_pose = np.array([
             np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
-            np.random.uniform(-0.3, 0.3),    # J2 (shoulder pitch)
-            np.random.uniform(-0.5, 0.2),    # J3 (elbow pitch)
+            np.random.uniform(-0.6, -0.4),    # J2 (shoulder pitch)
+            np.random.uniform(0.75, 0.25),    # J3 (elbow pitch)
             np.random.uniform(-0.3, 0.3),    # J4 (roll)
-            np.random.uniform(0.4, 1.0),     # J5 (wrist pitch)
-            np.random.uniform(-1.0, 1.0),    # J6
+            np.random.uniform(0.4, 0.6),     # J5 (wrist pitch)
+            np.random.uniform(0.9, 1.1),    # J6
         ])
         data.qpos[:6] = home_pose
         phantom_offset = np.zeros(3, dtype=np.float32)
@@ -359,6 +367,7 @@ def main():
         
         last_ee_pose = get_ee_pose_6d_scaled()
         task_state, traj_start_time, insertion_started, accumulated_depth, align_timer, traj_initialized, hold_start_time = 1, data.time, False, 0.0, 0, False, None
+        hold_frame_count = 0  # hold 프레임 카운터 (NO_INSERTION 모드용)
         
         p_entry, p_depth = data.site_xpos[target_entry_id].copy(), data.site_xpos[target_depth_id].copy()
         start_tip, start_back = data.site_xpos[tip_id].copy(), data.site_xpos[back_id].copy()
@@ -440,9 +449,14 @@ def main():
                     else: align_timer = 0
                     if align_timer > 50:
                         if NO_INSERTION:
-                            success = True; break
+                            task_state = 3  # Hold 상태로 전환
                         else:
                             task_state, insertion_started = 2, False
+            elif task_state == 3:  # State 3: Hold (NO_INSERTION 모드 — 도달 후 위치 유지)
+                # goal 위치 고정, IK가 현재 위치 유지 → action ≈ 0 프레임 기록
+                axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
+                target_tip_pos = p_entry - (axis_dir * 0.0001)
+                target_back_pos = target_tip_pos - (axis_dir * needle_len)
             elif task_state == 2:  # State 2: Insert + Hold (삽입 + 대기 통합)
                 if not insertion_started:
                     phase3_base_tip, insertion_started, accumulated_depth, hold_start_time = curr_tip.copy(), True, 0.0, None
@@ -544,6 +558,12 @@ def main():
                              keypoints_wrist=keypoints_wrist, keypoints_visibility=keypoints_visibility,
                              instruction=TASK_INSTRUCTION)
                 last_ee_pose = current_ee_pose_mm.copy()
+
+                # Hold 프레임 카운터: task_state==3이면 hold 프레임 기록 중
+                if task_state == 3:
+                    hold_frame_count += 1
+                    if hold_frame_count >= HOLD_STEPS:
+                        success = True; break
 
             if data.time - traj_start_time > 50.0: break
             if len(recorder.buffer) >= MAX_CTRL_STEPS: break

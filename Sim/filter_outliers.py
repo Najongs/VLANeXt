@@ -34,6 +34,8 @@ python Sim/filter_outliers.py \
     --max-detour 3.0 \
     --max-path-length 200 \
     --max-rot 0.02 \
+    --max-steps 250 \
+    --min-steps 100 \
     --execute
     
 """
@@ -150,6 +152,10 @@ def main():
                         help="Flag episodes with total path length > this (mm). 0=disable (default: 0)")
     parser.add_argument('--max-rot', type=float, default=0.0,
                         help="Flag episodes with any rotation delta > this (rad). 0=disable (default: 0)")
+    parser.add_argument('--min-steps', type=int, default=0,
+                        help="Flag episodes with fewer than this many steps. 0=disable (default: 0)")
+    parser.add_argument('--max-steps', type=int, default=0,
+                        help="Flag episodes with more than this many steps. 0=disable (default: 0)")
     parser.add_argument('--execute', action='store_true',
                         help="Actually move files. Without this flag, only reports.")
     args = parser.parse_args()
@@ -172,6 +178,10 @@ def main():
         print(f"  5. Path length: total > {args.max_path_length} mm")
     if args.max_rot > 0:
         print(f"  6. Rotation outlier: max |rot delta| > {args.max_rot} rad")
+    if args.min_steps > 0:
+        print(f"  7. Min step count: n_steps < {args.min_steps}")
+    if args.max_steps > 0:
+        print(f"  8. Max step count: n_steps > {args.max_steps}")
     print()
 
     all_stats = []
@@ -256,6 +266,22 @@ def main():
         for s in all_stats:
             if s['max_abs_rot'] > args.max_rot and s['path'] not in outlier_paths:
                 s['reason'] = f'rot_outlier (max_rot={s["max_abs_rot"]:.4f} > {args.max_rot})'
+                outliers.append(s)
+
+    # --- 7. Min step count filter ---
+    if all_stats and args.min_steps > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            if s['n_steps'] < args.min_steps and s['path'] not in outlier_paths:
+                s['reason'] = f'too_few_steps ({s["n_steps"]} < {args.min_steps})'
+                outliers.append(s)
+
+    # --- 8. Max step count filter ---
+    if all_stats and args.max_steps > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            if s['n_steps'] > args.max_steps and s['path'] not in outlier_paths:
+                s['reason'] = f'too_many_steps ({s["n_steps"]} > {args.max_steps})'
                 outliers.append(s)
 
     print(f"\nResults: {len(outliers)} outliers / {len(files)} total ({len(outliers)/len(files)*100:.2f}%)")

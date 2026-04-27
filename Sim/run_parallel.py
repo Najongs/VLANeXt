@@ -100,6 +100,8 @@ def main():
                         help="(insertion only) Perturbation probability per control frame")
     parser.add_argument("--perturb-frames", type=int, default=None,
                         help="(insertion only) Perturbation duration in control frames")
+    parser.add_argument("--hold-steps", type=int, default=None,
+                        help="(approach only) Hold frames after reaching target")
     # Basic motion mode
     parser.add_argument("--direction", type=str, default=None,
                         help="(basic only) Direction to collect, or 'all' for 10-direction parallel")
@@ -230,6 +232,9 @@ def main():
     # Basic motion: steps per episode
     basic_steps_line = f"{module_name}.STEPS_PER_EPISODE = {args.steps_per_episode}" if args.script == "basic" else ""
 
+    # Approach: hold steps
+    hold_steps_line = f"{module_name}.HOLD_STEPS = {args.hold_steps}" if args.hold_steps is not None and args.script == "approach" else ""
+
     # Insertion overrides
     insertion_lines = ""
     if args.script == "insertion":
@@ -309,6 +314,7 @@ import {module_name}
 {no_side_cam_line}
 {basic_steps_line}
 {basic_dir_line}
+{hold_steps_line}
 {insertion_lines}
 
 if __name__ == "__main__":

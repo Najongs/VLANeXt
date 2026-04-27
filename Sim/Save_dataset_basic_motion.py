@@ -322,8 +322,14 @@ def main():
     while episode_count < MAX_EPISODES:
         # --- Reset with random joint angles ---
         mujoco.mj_resetData(model, data)
+        # 초기 home pose (정렬 시작점)
         home_pose = np.array([
-            np.random.uniform(*JOINT_RANGES[i]) for i in range(6)
+            np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
+            np.random.uniform(-0.6, -0.4),    # J2 (shoulder pitch)
+            np.random.uniform(0.75, 0.25),    # J3 (elbow pitch)
+            np.random.uniform(-0.3, 0.3),    # J4 (roll)
+            np.random.uniform(0.4, 0.6),     # J5 (wrist pitch)
+            np.random.uniform(0.9, 1.1),    # J6
         ])
         data.qpos[:6] = home_pose
         mujoco.mj_forward(model, data)

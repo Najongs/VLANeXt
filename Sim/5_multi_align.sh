@@ -12,14 +12,14 @@
 # python run_parallel.py --script align --workers 1 --episodes 1 \
 #     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_02 --phantom-pos 0.0 -0.2 --no-side-camera
 
-python run_parallel.py --script approach --workers 20 --episodes 250 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 --phantom-pos 0.0 -0.0 --no-side-camera --no-insertion
-python run_parallel.py --script approach --workers 20 --episodes 250 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_01 --phantom-pos 0.0 -0.1 --no-side-camera --no-insertion
-python run_parallel.py --script approach --workers 20 --episodes 250 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_03 --phantom-pos 0.0 -0.3 --no-side-camera --no-insertion
-python run_parallel.py --script approach --workers 20 --episodes 250 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_04 --phantom-pos 0.0 -0.4 --no-side-camera --no-insertion
+# python run_parallel.py --script approach --workers 1 --episodes 5 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 --phantom-pos 0.0 -0.0 --no-side-camera --no-insertion --hold-steps 20
+# python run_parallel.py --script approach --workers 1 --episodes 5 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_01 --phantom-pos 0.0 -0.1 --no-side-camera --no-insertion --hold-steps 20
+# python run_parallel.py --script approach --workers 20 --episodes 250 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_03 --phantom-pos 0.0 -0.3 --no-side-camera --no-insertion --hold-steps 20
+python run_parallel.py --script approach --workers 1 --episodes 5 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_04 --phantom-pos 0.0 -0.4 --no-side-camera --no-insertion --hold-steps 20
 
 # python run_parallel.py --script insertion --workers 20 --episodes 250 \
 #     --base-dir /data/public/NAS/VLANeXt/dataset/insertion/insertion_00 \
