@@ -27,15 +27,15 @@ Usage:
         --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/approach \
+    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
     --max-range 200 \
     --max-detour 3.0 \
     --max-path-length 200 \
     --max-rot 0.02 \
-    --max-steps 250 \
-    --min-steps 100 \
+    --max-steps 150 \
+    --min-steps 30 \
     --execute
     
 """

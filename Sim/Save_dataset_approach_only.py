@@ -67,6 +67,7 @@ TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar po
 ACTION_CLIP_MM = 1.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 MAX_CTRL_STEPS = 500        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 HOLD_STEPS = 50             # 도달 후 hold 프레임 수 (control steps, action≈0 기록)
+RETREAT_MM = 10.0           # goal_tip을 trocar entry에서 뒤로 빼는 거리 (mm) — align과 동일
 WARMUP_STEPS = 500          # 녹화 전 J6 settling 대기 (sim steps, 67 control step ≈ 7 control frames)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
@@ -271,21 +272,33 @@ def _parse_args():
         "--hold-steps", type=int, default=None,
         help="Number of hold frames to record after reaching target (default: 50)",
     )
+    parser.add_argument(
+        "--retreat-mm", type=float, default=RETREAT_MM,
+        help="Retreat goal_tip from trocar entry along -axis_dir (mm, default: 10)",
+    )
+    parser.add_argument(
+        "--cameras", type=str, nargs="+", default=None,
+        help="Explicit camera list (overrides --no-side-camera)",
+    )
     return parser.parse_args()
 
 # === Main Script ===
 def main():
-    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM, CAMERA_LIST, HOLD_STEPS
+    global NO_INSERTION, PHANTOM_POS, RANDOMIZE_PHANTOM, CAMERA_LIST, HOLD_STEPS, RETREAT_MM
     args = _parse_args()
     if args.hold_steps is not None:
         HOLD_STEPS = args.hold_steps
+    RETREAT_MM = args.retreat_mm
     if args.no_insertion:
         NO_INSERTION = True
     if args.phantom_pos is not None:
         PHANTOM_POS = tuple(args.phantom_pos)
     if args.randomize_phantom_pos:
         RANDOMIZE_PHANTOM = True
-    if args.no_side_camera:
+    if args.cameras is not None:
+        CAMERA_LIST = args.cameras
+        print(f"Cameras: {CAMERA_LIST}")
+    elif args.no_side_camera:
         CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
         print(f"Cameras: {CAMERA_LIST}")
     print(f"Loading Model: {MODEL_PATH}")
@@ -437,12 +450,14 @@ def main():
                     traj_start_time, start_tip_pos, start_back_pos, traj_initialized = t_curr, curr_tip.copy(), curr_back.copy(), True
                     # 거리 기반 동적 duration 계산: duration = distance / speed
                     axis_dir_init = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-                    goal_tip_init = p_entry - (axis_dir_init * 0.0001)
+                    retreat_m = RETREAT_MM / 1000.0
+                    goal_tip_init = p_entry - (axis_dir_init * retreat_m)
                     align_distance = np.linalg.norm(goal_tip_init - start_tip_pos)
                     dynamic_duration = align_distance / ALIGN_SPEED
                 progress = smooth_step((t_curr - traj_start_time) / dynamic_duration) if dynamic_duration > 0 else 1.0
                 axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-                goal_tip, goal_back = p_entry - (axis_dir * 0.0001), p_entry - (axis_dir * (0.0001 + needle_len))
+                retreat_m = RETREAT_MM / 1000.0
+                goal_tip, goal_back = p_entry - (axis_dir * retreat_m), p_entry - (axis_dir * (retreat_m + needle_len))
                 target_tip_pos, target_back_pos = (1 - progress) * start_tip_pos + progress * goal_tip, (1 - progress) * start_back_pos + progress * goal_back
                 if progress >= 1.0:
                     if np.linalg.norm(curr_tip - goal_tip) < 0.002: align_timer += 1
@@ -455,7 +470,8 @@ def main():
             elif task_state == 3:  # State 3: Hold (NO_INSERTION 모드 — 도달 후 위치 유지)
                 # goal 위치 고정, IK가 현재 위치 유지 → action ≈ 0 프레임 기록
                 axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
-                target_tip_pos = p_entry - (axis_dir * 0.0001)
+                retreat_m = RETREAT_MM / 1000.0
+                target_tip_pos = p_entry - (axis_dir * retreat_m)
                 target_back_pos = target_tip_pos - (axis_dir * needle_len)
             elif task_state == 2:  # State 2: Insert + Hold (삽입 + 대기 통합)
                 if not insertion_started:

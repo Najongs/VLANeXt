@@ -102,6 +102,8 @@ def main():
                         help="(insertion only) Perturbation duration in control frames")
     parser.add_argument("--hold-steps", type=int, default=None,
                         help="(approach only) Hold frames after reaching target")
+    parser.add_argument("--cameras", type=str, nargs="+", default=None,
+                        help="Camera list to save (e.g. --cameras top_camera tool_camera)")
     # Basic motion mode
     parser.add_argument("--direction", type=str, default=None,
                         help="(basic only) Direction to collect, or 'all' for 10-direction parallel")
@@ -229,6 +231,9 @@ def main():
     # No side camera line
     no_side_cam_line = f"{module_name}.CAMERA_LIST = [c for c in {module_name}.CAMERA_LIST if c != 'side_camera']" if args.no_side_camera else ""
 
+    # Explicit camera list (overrides no_side_cam_line if both given)
+    cameras_line = f"{module_name}.CAMERA_LIST = {args.cameras}" if args.cameras is not None else ""
+
     # Basic motion: steps per episode
     basic_steps_line = f"{module_name}.STEPS_PER_EPISODE = {args.steps_per_episode}" if args.script == "basic" else ""
 
@@ -284,6 +289,7 @@ with open(r'{grid_json}', 'r') as _f:
 {phantom_line}
 {no_insertion_line}
 {no_side_cam_line}
+{cameras_line}
 {insertion_lines}
 
 if __name__ == "__main__":
@@ -312,6 +318,7 @@ import {module_name}
 {phantom_line}
 {no_insertion_line}
 {no_side_cam_line}
+{cameras_line}
 {basic_steps_line}
 {basic_dir_line}
 {hold_steps_line}

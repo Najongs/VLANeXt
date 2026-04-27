@@ -78,7 +78,7 @@ ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
 FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
-PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
+PERTURB_POS_XY_MM = 40.0    # XY 평면 perturbation 범위 (±mm)
 PERTURB_POS_Z_MIN_MM = -20.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
 PERTURB_POS_Z_MAX_MM = 20.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
@@ -99,7 +99,7 @@ TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
 MAX_CTRL_STEPS = 300        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 
 # --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
-RETREAT_MM = 0.0           # insertion axis 반대 방향 retreat (mm)
+RETREAT_MM = 10.0           # insertion axis 반대 방향 retreat (mm)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
@@ -324,14 +324,7 @@ def main():
     recorder = SimRecorder(SAVE_DIR)
 
     # 초기 home pose (정렬 시작점)
-    home_pose = np.array([
-        np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
-        np.random.uniform(-0.6, -0.4),    # J2 (shoulder pitch)
-        np.random.uniform(0.75, 0.25),    # J3 (elbow pitch)
-        np.random.uniform(-0.3, 0.3),    # J4 (roll)
-        np.random.uniform(0.4, 0.6),     # J5 (wrist pitch)
-        np.random.uniform(0.9, 1.1),    # J6
-    ])
+    home_pose = np.array([0, 0, 0, 0, 0, 0])
     ik_speed = 0.5
 
     def get_ee_pose_6d_scaled():
@@ -398,14 +391,7 @@ def main():
     # ============================================================
     print("Running initial pre-alignment (one-time)...")
     mujoco.mj_resetData(model, data)
-    home_pose = np.array([
-        np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
-        np.random.uniform(-0.3, 0.3),    # J2 (shoulder pitch)
-        np.random.uniform(-0.5, 0.2),    # J3 (elbow pitch)
-        np.random.uniform(-0.3, 0.3),    # J4 (roll)
-        np.random.uniform(0.4, 1.0),     # J5 (wrist pitch)
-        np.random.uniform(-1.0, 1.0),    # J6
-    ])
+    home_pose = np.array([0, 0, 0, 0, 0, 0])
     data.qpos[:6] = home_pose
     mujoco.mj_forward(model, data)
 
@@ -897,6 +883,8 @@ if __name__ == "__main__":
                         help="Retreat goal_tip from trocar entry along -axis_dir (mm, default: 20)")
     parser.add_argument("--no-side-camera", action="store_true",
                         help="Skip side_camera rendering/saving (saves storage)")
+    parser.add_argument("--cameras", type=str, nargs="+", default=None,
+                        help="Explicit camera list (overrides --no-side-camera)")
     args = parser.parse_args()
 
     # Override globals from CLI args
@@ -916,7 +904,10 @@ if __name__ == "__main__":
     if args.phantom_pos is not None:
         PHANTOM_POS = tuple(args.phantom_pos)
 
-    if args.no_side_camera:
+    if args.cameras is not None:
+        CAMERA_LIST = args.cameras
+        print(f"Cameras: {CAMERA_LIST}")
+    elif args.no_side_camera:
         CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
         print(f"Cameras: {CAMERA_LIST}")
 

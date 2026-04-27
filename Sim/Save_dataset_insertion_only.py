@@ -788,6 +788,8 @@ if __name__ == "__main__":
                         help=f"Perturbation duration in control frames (default: {INSERTION_PERTURB_FRAMES})")
     parser.add_argument("--no-side-camera", action="store_true",
                         help="Skip side_camera rendering/saving (saves storage)")
+    parser.add_argument("--cameras", type=str, nargs="+", default=None,
+                        help="Explicit camera list (overrides --no-side-camera)")
     args = parser.parse_args()
 
     SAVE_DIR = args.save_dir
@@ -804,7 +806,10 @@ if __name__ == "__main__":
     INSERTION_PERTURB_PROB = args.perturb_prob
     INSERTION_PERTURB_FRAMES = args.perturb_frames
 
-    if args.no_side_camera:
+    if args.cameras is not None:
+        CAMERA_LIST = args.cameras
+        print(f"Cameras: {CAMERA_LIST}")
+    elif args.no_side_camera:
         CAMERA_LIST = [c for c in CAMERA_LIST if c != "side_camera"]
         print(f"Cameras: {CAMERA_LIST}")
 
