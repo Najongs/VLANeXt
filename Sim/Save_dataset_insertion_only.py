@@ -73,7 +73,7 @@ APPROACH_XY_OFFSET_MM = 15.0 # align 모델의 XY 잔여 오차 (±mm)
 TARGET_INSERTION_DEPTH_MM = 25.0  # 목표 삽입 깊이 (mm)
 
 # --- 성공 조건 ---
-ALIGN_THRESHOLD_M = 0.0075   # pre-alignment 수렴 (m)
+ALIGN_THRESHOLD_M = 0.005   # pre-alignment 수렴 (m)
 ALIGN_HOLD_STEPS = 0       # 수렴 유지 횟수
 INSERTION_DEPTH_THRESHOLD_MM = 1.0   # 목표 깊이 허용 오차 (mm)
 INSERTION_LATERAL_THRESHOLD_MM = 3.0  # lateral error 허용 (mm)
@@ -382,6 +382,7 @@ def main():
         current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
         current_ee_pose_mm = get_ee_pose_6d_scaled()
         delta_ee_action = current_ee_pose_mm - last_ee_pose
+        delta_ee_action[3:6] = (delta_ee_action[3:6] + np.pi) % (2 * np.pi) - np.pi
 
         pos_mag = np.linalg.norm(delta_ee_action[:3])
         if pos_mag > ACTION_CLIP_MM:

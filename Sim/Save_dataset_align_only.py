@@ -75,7 +75,7 @@ CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.0075    # 미세 정렬 속도 (m/s) — 녹화 중
+FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
@@ -99,7 +99,7 @@ TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
 MAX_CTRL_STEPS = 300        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 
 # --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
-RETREAT_MM = 10.0           # insertion axis 반대 방향 retreat (mm)
+RETREAT_MM = 0.0           # insertion axis 반대 방향 retreat (mm)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
@@ -713,6 +713,7 @@ def main():
                 current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
                 current_ee_pose_mm = get_ee_pose_6d_scaled()
                 delta_ee_action = current_ee_pose_mm - last_ee_pose
+                delta_ee_action[3:6] = (delta_ee_action[3:6] + np.pi) % (2 * np.pi) - np.pi
 
                 pos_mag = np.linalg.norm(delta_ee_action[:3])
                 if pos_mag > ACTION_CLIP_MM:
@@ -781,6 +782,7 @@ def main():
                 current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
                 current_ee_pose_mm = get_ee_pose_6d_scaled()
                 delta_ee_action = current_ee_pose_mm - last_ee_pose
+                delta_ee_action[3:6] = (delta_ee_action[3:6] + np.pi) % (2 * np.pi) - np.pi
 
                 pos_mag = np.linalg.norm(delta_ee_action[:3])
                 if pos_mag > ACTION_CLIP_MM:

@@ -8,10 +8,9 @@ project:
 data:
   dataset_name: "sim_approach"
   data_root:
-    - path: "/data/public/NAS/VLANeXt/dataset/approach_00/collected_data_merged"
-      max_episodes: 5000
-    - path: "/data/public/NAS/VLANeXt/dataset/approach_04/collected_data_merged"
-      max_episodes: 3600
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_03/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_04/collected_data_merged"
+    max_episodes: 10000
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true
@@ -21,7 +20,7 @@ data:
   buffer_size: 2000
 
   batch_size: 100
-  max_steps: 20000
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"

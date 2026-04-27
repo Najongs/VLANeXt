@@ -2,7 +2,7 @@ project:
   name: "VLANeXt_Qwen3.5_fine_align"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 5000
+  save_interval: 2500
   use_wandb: true
 
 data:
@@ -10,9 +10,9 @@ data:
   data_root:
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
-  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_02/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align_Random/uniform_new/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
+  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align_Random/uniform_new/collected_data_merged"
     max_episodes: 10000
   task_suite_name: ""
   full_sequence: true
@@ -23,7 +23,7 @@ data:
   buffer_size: 2000
 
   batch_size: 100
-  max_steps: 20000
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
@@ -115,11 +115,11 @@ model:
 train:
   seed: 2026
   resume_path: ""
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/output_dir_motion_wrist"
+  pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true

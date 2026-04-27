@@ -438,7 +438,7 @@ def main():
                 if progress >= 1.0:
                     if np.linalg.norm(curr_tip - goal_tip) < 0.002: align_timer += 1
                     else: align_timer = 0
-                    if align_timer > 20:
+                    if align_timer > 50:
                         if NO_INSERTION:
                             success = True; break
                         else:
@@ -514,6 +514,7 @@ def main():
                 current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
                 current_ee_pose_mm = get_ee_pose_6d_scaled()
                 delta_ee_action = current_ee_pose_mm - last_ee_pose
+                delta_ee_action[3:6] = (delta_ee_action[3:6] + np.pi) % (2 * np.pi) - np.pi
 
                 # Phase 전환 시 IK spike 방지: position delta 클리핑
                 pos_mag = np.linalg.norm(delta_ee_action[:3])

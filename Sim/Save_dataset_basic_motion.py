@@ -441,6 +441,7 @@ def main():
             current_qpos_deg = np.rad2deg(data.qpos[:n_motors].copy())
             current_ee_pose_mm = get_ee_pose_6d_scaled()
             delta_ee_action = current_ee_pose_mm - last_ee_pose
+            delta_ee_action[3:6] = (delta_ee_action[3:6] + np.pi) % (2 * np.pi) - np.pi
 
             # Clip position delta
             pos_mag = np.linalg.norm(delta_ee_action[:3])

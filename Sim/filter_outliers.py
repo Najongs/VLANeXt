@@ -27,12 +27,13 @@ Usage:
         --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align \
+    --data-dir /data/public/NAS/VLANeXt/dataset/approach \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
-    --max-range 50 \
+    --max-range 200 \
     --max-detour 3.0 \
-    --max-path-length 50 \
+    --max-path-length 200 \
+    --max-rot 0.02 \
     --execute
     
 """
@@ -110,6 +111,11 @@ def analyze_episode(h5_path):
     # Detour ratio: path_length / direct_dist — 1에 가까우면 직선, 클수록 돌아감
     detour_ratio = path_length / max(direct_dist, 1e-6)
 
+    # Rotation delta stats (dims 3:6 = roll, pitch, yaw)
+    rot_deltas = act[:, 3:6]
+    max_abs_rot = float(np.max(np.abs(rot_deltas)))
+    n_rot_outlier_frames = 0  # will be set by caller if threshold given
+
     return {
         'path': h5_path,
         'n_steps': n_steps,
@@ -123,6 +129,7 @@ def analyze_episode(h5_path):
         'path_length': path_length,
         'direct_dist': direct_dist,
         'detour_ratio': detour_ratio,
+        'max_abs_rot': max_abs_rot,
     }
 
 
@@ -141,6 +148,8 @@ def main():
                         help="Flag episodes with detour_ratio (path_length/direct_dist) > this. 0=disable (default: 0)")
     parser.add_argument('--max-path-length', type=float, default=0.0,
                         help="Flag episodes with total path length > this (mm). 0=disable (default: 0)")
+    parser.add_argument('--max-rot', type=float, default=0.0,
+                        help="Flag episodes with any rotation delta > this (rad). 0=disable (default: 0)")
     parser.add_argument('--execute', action='store_true',
                         help="Actually move files. Without this flag, only reports.")
     args = parser.parse_args()
@@ -161,6 +170,8 @@ def main():
         print(f"  4. Detour ratio: path_length/direct_dist > {args.max_detour}")
     if args.max_path_length > 0:
         print(f"  5. Path length: total > {args.max_path_length} mm")
+    if args.max_rot > 0:
+        print(f"  6. Rotation outlier: max |rot delta| > {args.max_rot} rad")
     print()
 
     all_stats = []
@@ -237,6 +248,14 @@ def main():
         for s in all_stats:
             if s['path_length'] > args.max_path_length and s['path'] not in outlier_paths:
                 s['reason'] = f'long_path ({s["path_length"]:.0f}mm > {args.max_path_length}mm)'
+                outliers.append(s)
+
+    # --- 6. Rotation outlier filter ---
+    if all_stats and args.max_rot > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            if s['max_abs_rot'] > args.max_rot and s['path'] not in outlier_paths:
+                s['reason'] = f'rot_outlier (max_rot={s["max_abs_rot"]:.4f} > {args.max_rot})'
                 outliers.append(s)
 
     print(f"\nResults: {len(outliers)} outliers / {len(files)} total ({len(outliers)/len(files)*100:.2f}%)")
