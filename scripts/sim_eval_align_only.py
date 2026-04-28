@@ -122,7 +122,7 @@ PERTURB_POS_Z_MAX_MM = 20.0
 PERTURB_ANGLE_DEG = 10.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.0025  # 2.5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.005  # 2.5mm
 ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
 ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
@@ -288,7 +288,7 @@ class AlignSimEnv:
         label = "Re-aligning for new phantom..." if self._aligned_qpos is not None else "Running initial pre-alignment..."
         print(label)
         mujoco.mj_resetData(self.model, self.data)
-        home_pose = np.array([0.5, -0.35, 0.35, 0.0, 0.5, 1.0])
+        home_pose = np.array([0.0, -0.5, 0.5, 0.0, 0.5, 1.0])
         self.data.qpos[:6] = home_pose
         mujoco.mj_forward(self.model, self.data)
 

@@ -117,12 +117,12 @@ TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar po
 
 # Home pose joint ranges (same as Save_dataset.py)
 HOME_POSE_RANGES = [
-    (-0.45, 0.55),   # joint 0
-    (-0.6, -0.1),    # joint 1
-    (0.1, 0.6),      # joint 2
-    (0.0, 0.0),      # joint 3 (fixed)
-    (0.3, 0.7),      # joint 4
-    (0.8, 1.2),      # joint 5
+    (-0.5, 0.5),   # joint 0
+    (-0.6, -0.4),    # joint 1
+    (0.75, 0.25),      # joint 2
+    (-0.3, 0.3),      # joint 3 (fixed)
+    (0.4, 0.6),      # joint 4
+    (0.9, 1.1),      # joint 5
 ]
 
 # Success: needle tip within distance of trocar entry
