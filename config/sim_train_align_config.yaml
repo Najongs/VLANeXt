@@ -9,9 +9,9 @@ data:
   dataset_name: "sim_align"
   data_root:
   - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
+  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
+  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
+  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align_Random/uniform_new/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
@@ -22,7 +22,7 @@ data:
   buffer_size: 3000
 
   batch_size: 128
-  max_steps: 40000
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
@@ -52,7 +52,7 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3.5-2B"
+  lmm_path: "Qwen/Qwen3-VL-2B-Instruct" # "Qwen/Qwen3.5-2B"
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:
@@ -114,7 +114,7 @@ model:
 train:
   seed: 2026
   resume_path: ""
-  pretrained_checkpoint: ""
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_droid.pt"
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
