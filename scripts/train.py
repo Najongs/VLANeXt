@@ -357,6 +357,25 @@ class DataCollatorForVLANeXt:
 
         return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights, source_info_list
 
+def _collect_per_module_grad_norm(model_root, mod_names=("meta_queries", "meta_queries_norm", "action_head", "connector", "action_projector", "vision_projector")):
+    """Best-effort per-module grad norm. Under ZeRO-2 only the local partition is observed
+    on each rank, but rank-0 partial values are sufficient for spotting which submodule's
+    gradient is exploding."""
+    out = {}
+    for name in mod_names:
+        mod = getattr(model_root, name, None)
+        if mod is None:
+            continue
+        params = [mod] if isinstance(mod, torch.nn.Parameter) else list(mod.parameters())
+        sq = 0.0
+        for p in params:
+            if p.grad is not None:
+                sq += p.grad.detach().float().norm(2).item() ** 2
+        if sq > 0:
+            out[name] = sq ** 0.5
+    return out
+
+
 def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
@@ -827,7 +846,9 @@ def train(config):
     optimizer = optimizer_cls(
         trainable_params,
         lr=float(config['train']['learning_rate']),
-        weight_decay=float(config['train']['weight_decay'])
+        weight_decay=float(config['train']['weight_decay']),
+        eps=1e-6,
+        betas=(0.9, 0.95),
     )
     
     # If resuming, schedule LR over remaining steps only
@@ -1012,6 +1033,7 @@ def train(config):
         valid_keys = {"input_ids", "attention_mask", "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
         do_update = (batch_idx + 1) % gradient_accumulation_steps == 0
+        per_module_gn = {}
         if use_deepspeed:
             loss, loss_dict = model(
                 actions=gt_actions,
@@ -1025,6 +1047,8 @@ def train(config):
             loss = loss / gradient_accumulation_steps
             did_update = model.is_gradient_accumulation_boundary()
             model.backward(loss)
+            if did_update and global_rank == 0 and (step + 1) % 50 == 0:
+                per_module_gn = _collect_per_module_grad_norm(model_unwrapped)
             model.step()
         else:
             sync_context = model.no_sync if (is_distributed and not do_update) else nullcontext
@@ -1041,6 +1065,8 @@ def train(config):
                 loss = loss / gradient_accumulation_steps
                 loss.backward()
             did_update = do_update
+            if did_update and global_rank == 0 and (step + 1) % 50 == 0:
+                per_module_gn = _collect_per_module_grad_norm(model)
         
         if did_update:
             # Compute gradient norm for monitoring
@@ -1097,6 +1123,8 @@ def train(config):
                         log_data["train/grad_norm"] = grad_norm
                     for k, v in loss_dict.items():
                         log_data[f"train/{k}"] = v
+                    for mod_name, gn in per_module_gn.items():
+                        log_data[f"grad_norm/{mod_name}"] = gn
                     wandb.log(log_data)
             if config['project']['save_interval'] > 0 and step % config['project']['save_interval'] == 0:
                 if use_deepspeed:

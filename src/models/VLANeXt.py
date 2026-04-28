@@ -420,8 +420,9 @@ class VLANeXt(nn.Module):
             self.action_projector = None
         
         self.meta_queries = nn.Parameter(
-            torch.randn(num_queries, self.hidden_size)
+            torch.randn(num_queries, self.hidden_size) * 0.02
         )
+        self.meta_queries_norm = nn.RMSNorm(self.hidden_size)
         if self.condition_type == "loose":
             if use_transformer_connector:
                 self.connector = ConnectorTransformer(
@@ -635,7 +636,7 @@ class VLANeXt(nn.Module):
             input_ids = torch.cat([proprio_ids, input_ids], dim=1)
 
         if self.condition_type != "tight":
-            queries_embeds = self.meta_queries.unsqueeze(0).expand(B, -1, -1).to(inputs_embeds.dtype)
+            queries_embeds = self.meta_queries_norm(self.meta_queries).unsqueeze(0).expand(B, -1, -1).to(inputs_embeds.dtype)
             inputs_embeds = torch.cat([inputs_embeds, queries_embeds], dim=1)
             if attention_mask is not None:
                 queries_mask = torch.ones(B, self.num_queries, device=attention_mask.device, dtype=attention_mask.dtype)
@@ -723,7 +724,7 @@ class VLANeXt(nn.Module):
         mask_list.append(attention_mask)
 
         if self.condition_type != "tight":
-            queries_embeds = self.meta_queries.unsqueeze(0).expand(B, -1, -1).to(text_embeds.dtype)
+            queries_embeds = self.meta_queries_norm(self.meta_queries).unsqueeze(0).expand(B, -1, -1).to(text_embeds.dtype)
             embeds_list.append(queries_embeds)
             queries_mask = torch.ones(B, self.num_queries, device=attention_mask.device, dtype=attention_mask.dtype)
             mask_list.append(queries_mask)
@@ -770,7 +771,7 @@ class VLANeXt(nn.Module):
                 attention_mask = torch.cat([proprio_mask, attention_mask], dim=1)
 
         if self.condition_type != "tight":
-            queries_embeds = self.meta_queries.unsqueeze(0).expand(B, -1, -1).to(inputs_embeds.dtype)
+            queries_embeds = self.meta_queries_norm(self.meta_queries).unsqueeze(0).expand(B, -1, -1).to(inputs_embeds.dtype)
             inputs_embeds = torch.cat([inputs_embeds, queries_embeds], dim=1)
             if attention_mask is not None:
                 queries_mask = torch.ones(B, self.num_queries, device=attention_mask.device, dtype=attention_mask.dtype)
