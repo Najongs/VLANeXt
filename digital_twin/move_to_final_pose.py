@@ -269,9 +269,25 @@ def main():
         raise RuntimeError(f"Failed to connect to robot at {args.robot_address}")
 
     try:
-        logger.info("🔋 ActivateAndHome…")
+        logger.info("🔋 ActivateAndHome… (15~30s, camera preview may stay blank meanwhile)")
         robot.ActivateAndHome()
         robot.SetRealTimeMonitoring(1)
+
+        # Clear any stale error / paused state from a previous crashed run.
+        # Without this, the first MoveJoints just queues silently and the user
+        # sees "no motion" until they manually reset on the controller.
+        try:
+            status = robot.GetStatusRobot()
+            if getattr(status, "error_status", False):
+                logger.warning("⚠️  Robot in ERROR state — ResetError")
+                robot.ResetError()
+            # Always resume motion — paused state persists across disconnects on
+            # some firmwares.
+            logger.info("▶️  ResumeMotion (clears any prior PauseMotion state)")
+            robot.ResumeMotion()
+        except Exception as e:
+            logger.warning(f"Resume/ResetError failed (non-fatal): {e}")
+
         try:
             robot.SetJointVelLimit(float(args.joint_vel_limit))
         except Exception as e:
