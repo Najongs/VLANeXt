@@ -70,15 +70,21 @@ INSERTION_SPEED_MPS = 0.005  # slow, mirrors FINE_ALIGN_SPEED for stable IK
 
 
 def _solve_insertion_qpos(model, data, h: SimHandles, p_entry, p_depth, needle_len,
-                          ik_speed: float = 0.5):
-    """From current sim state (assumed at aligned pose), drive needle tip from
-    p_entry-retreat to p_depth along the trocar axis, returning the converged
-    qpos. Mirrors `_pre_align_sim`'s smooth-IK loop, just for insertion."""
+                          insertion_depth_mm=None, ik_speed: float = 0.5):
+    """From current sim state (assumed at aligned pose), drive needle tip along
+    the trocar axis to a target depth, returning the converged qpos.
+
+    insertion_depth_mm: distance from p_entry along the trocar axis (toward
+    p_depth) to drive the tip. None → use full sim depth (p_depth).
+    """
     axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
     start_tip = data.site_xpos[h.tip_id].copy()
     start_back = data.site_xpos[h.back_id].copy()
-    goal_tip = p_depth.copy()
-    goal_back = p_depth - axis_dir * needle_len
+    if insertion_depth_mm is None:
+        goal_tip = p_depth.copy()
+    else:
+        goal_tip = p_entry + axis_dir * (float(insertion_depth_mm) / 1000.0)
+    goal_back = goal_tip - axis_dir * needle_len
 
     insert_dist = float(np.linalg.norm(goal_tip - start_tip))
     duration = max(insert_dist / INSERTION_SPEED_MPS, 1e-3)
@@ -128,6 +134,9 @@ def _parse_args():
                     help="Which final pose(s) to send to the real robot")
     ap.add_argument("--pause-sec", type=float, default=5.0,
                     help="Seconds to hold at each pose for visual verification")
+    ap.add_argument("--insertion-depth-mm", type=float, default=None,
+                    help="Insertion depth from trocar entry along axis (mm). "
+                         "Default: None → full sim depth (p_depth site).")
     ap.add_argument("--mujoco-xml", type=str,
                     default=str(_PROJECT_ROOT / "Sim" / "meca_add.xml"))
     ap.add_argument("--robot-address", type=str, default=ROBOT_ADDRESS_DEFAULT)
@@ -168,8 +177,13 @@ def main():
 
     insertion_deg = None
     if args.phase in ("insertion", "both"):
-        logger.info("🧮 Solving sim INSERTION-final qpos (tip → trocar depth)…")
-        insertion_qpos = _solve_insertion_qpos(model, data, h, p_entry, p_depth, needle_len)
+        depth_label = (f"{args.insertion_depth_mm:.1f}mm from entry"
+                       if args.insertion_depth_mm is not None else "full sim depth")
+        logger.info(f"🧮 Solving sim INSERTION-final qpos (tip → {depth_label})…")
+        insertion_qpos = _solve_insertion_qpos(
+            model, data, h, p_entry, p_depth, needle_len,
+            insertion_depth_mm=args.insertion_depth_mm,
+        )
         insertion_deg = np.rad2deg(insertion_qpos)
         logger.info(f"   INSERTION qpos (deg) = {insertion_deg.round(2).tolist()}")
 
@@ -198,10 +212,20 @@ def main():
         robot.WaitIdle()
         time.sleep(0.5)
 
-        if args.phase in ("align", "both"):
-            _move_robot_to(robot, align_deg, "ALIGN final", args.pause_sec)
+        # ALIGN is always traversed — it's the safe gateway between HOME and the
+        # phantom (going HOME → INSERTION directly would drive the needle into
+        # the phantom from an unsafe angle). Pause only when user requested it.
+        align_pause = args.pause_sec if args.phase in ("align", "both") else 0.0
+        _move_robot_to(robot, align_deg, "ALIGN final", align_pause)
+
         if args.phase in ("insertion", "both") and insertion_deg is not None:
             _move_robot_to(robot, insertion_deg, "INSERTION final", args.pause_sec)
+            # Retract along trocar axis: insertion → align (reverse the path the
+            # needle just took). HOME from inside the phantom would yank the
+            # needle out at an angle — must un-insert first.
+            logger.info("↩️  Retracting needle along trocar axis (insertion → align)…")
+            robot.MoveJoints(*[float(j) for j in align_deg])
+            robot.WaitIdle()
 
         if args.return_home:
             logger.info("🏠 Returning to HOME…")
