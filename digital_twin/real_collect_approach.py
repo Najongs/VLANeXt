@@ -717,6 +717,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
                 keypoints_wrist=keypoints_wrist,
                 keypoints_visibility=keypoints_visibility,
                 instruction=TASK_INSTRUCTION,
+                action_sim=sim_delta_ee.astype(np.float32),
             )
 
             last_ee_pose_sim = sim_ee_pose_mm.copy()

@@ -827,6 +827,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
                 keypoints_wrist=keypoints_wrist,
                 keypoints_visibility=keypoints_visibility,
                 instruction=TASK_INSTRUCTION,
+                action_sim=sim_delta_ee.astype(np.float32),
             )
             if cfg.diag is not None:
                 cfg.diag.log_action(
@@ -962,6 +963,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             keypoints_wrist=keypoints_wrist,
             keypoints_visibility=keypoints_visibility,
             instruction=TASK_INSTRUCTION,
+            action_sim=sim_delta_ee.astype(np.float32),
         )
         if cfg.diag is not None:
             cfg.diag.log_action(

@@ -42,6 +42,8 @@ sys.path.insert(0, str(_PROJECT_ROOT / "Sim"))
 from Save_dataset_align_only import (  # noqa: E402
     SimRecorder,
     project_to_2d,
+    smooth_step,
+    FINE_ALIGN_SPEED,
     ALIGN_THRESHOLD_M,
     ALIGN_HOLD_STEPS,
     HOLD_RECORD_STEPS,
@@ -60,6 +62,7 @@ from digital_twin.real_collect_approach import (  # noqa: E402
     _set_phantom,
     _wrap_pi,
     _build_display_frame,
+    _solve_ik_step,
 )
 
 from digital_twin.real_collect_align import (  # noqa: E402
@@ -75,6 +78,60 @@ from digital_twin.real_collect_align import (  # noqa: E402
 from digital_twin.real_eval_approach import ROBOT_ADDRESS_DEFAULT, HOME_JOINTS  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _plan_fine_align_traj(model, data, h: SimHandles, perturbed_qpos,
+                          goal_tip, goal_back, max_ctrl_steps: int):
+    """Sim-only: replicate the fine-align loop from `perturbed_qpos` to aligned
+    and capture qpos (rad) at every recording boundary (every 67 sim steps).
+    Returns ndarray (T, 6) of waypoints in joint-space, paced to sim's record_dt.
+    Operates on a *clone* (caller passes already-cloned data)."""
+    data.qpos[: h.n_motors] = perturbed_qpos
+    data.qvel[: h.n_motors] = 0.0
+    mujoco.mj_forward(model, data)
+
+    start_tip = data.site_xpos[h.tip_id].copy()
+    start_back = data.site_xpos[h.back_id].copy()
+    fine_distance = np.linalg.norm(goal_tip - start_tip)
+    fine_duration = max(fine_distance / FINE_ALIGN_SPEED, 1e-3)
+    t0 = data.time
+    waypoints = []
+    step_count = 0
+    ctrl_step = 0
+
+    while True:
+        progress = smooth_step((data.time - t0) / fine_duration)
+        target_tip = (1 - progress) * start_tip + progress * goal_tip
+        target_back = (1 - progress) * start_back + progress * goal_back
+        _solve_ik_step(model, data, h, target_tip, target_back, 0.5)
+        mujoco.mj_step(model, data)
+        step_count += 1
+
+        if step_count % 67 == 0:
+            ctrl_step += 1
+            waypoints.append((data.qpos[: h.n_motors].copy(),
+                              h.ee_pose_mm_rad(data).copy()))
+            if ctrl_step >= max_ctrl_steps:
+                break
+
+        if progress >= 1.0:
+            curr_tip = data.site_xpos[h.tip_id].copy()
+            if np.linalg.norm(curr_tip - goal_tip) < ALIGN_THRESHOLD_M:
+                # Pad ALIGN_HOLD_STEPS+1 final waypoints for hold-to-success tail.
+                for _ in range(ALIGN_HOLD_STEPS + 1):
+                    waypoints.append((data.qpos[: h.n_motors].copy(),
+                                      h.ee_pose_mm_rad(data).copy()))
+                break
+
+        if data.time - t0 > TIMEOUT_SEC:
+            break
+
+    if not waypoints:
+        waypoints.append((data.qpos[: h.n_motors].copy(),
+                          h.ee_pose_mm_rad(data).copy()))
+    qpos_arr = np.asarray([w[0] for w in waypoints], dtype=np.float64)
+    ee_arr = np.asarray([w[1] for w in waypoints], dtype=np.float64)
+    return qpos_arr, ee_arr
 
 
 def _sync_sim_to_real(model, data, h: SimHandles, real_qpos_deg):
@@ -106,6 +163,8 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
 
     # ── ② Sample + validate perturbation (sim-only dry-run) ──
     perturbed_qpos = None
+    perturb_xyz_used = np.zeros(3, dtype=np.float64)
+    perturb_ang_used = 0.0
     if cfg.skip_safety_validation:
         # Need a perturbed_qpos still — quick sim solve via dryrun_validate
         # with a single attempt and zero tolerance (we'll trust it).
@@ -117,6 +176,8 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
             qpos_path_steps=cfg.qpos_path_steps,
             start_qpos=path_anchor_qpos if path_anchor_qpos is not None else aligned_qpos,
         )
+        perturb_xyz_used = np.asarray(xyz, dtype=np.float64)
+        perturb_ang_used = float(ang)
         logger.info(f"  Episode {ep_idx}: perturb [SAFETY OFF] solved={ok}")
     else:
         n_attempts = max(1, int(cfg.max_perturb_retries))
@@ -133,6 +194,8 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
             )
             if ok:
                 perturbed_qpos = candidate_qpos
+                perturb_xyz_used = np.asarray(xyz, dtype=np.float64)
+                perturb_ang_used = float(ang)
                 logger.info(
                     f"  Episode {ep_idx}: perturb attempt {attempt} ✓ "
                     f"xyz_mm={(xyz*1000).round(1).tolist()} ang_deg={np.rad2deg(ang):.1f}"
@@ -147,23 +210,69 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     perturbed_deg = np.rad2deg(perturbed_qpos)
     aligned_deg = np.rad2deg(aligned_qpos)
 
+    # ── ②.5 Plan sim trajectory (traj mode only) ──
+    traj_qpos_deg = None
+    traj_ee_mm = None
+    if cfg.mode == "traj":
+        sim_clone = _clone_state(model, data)
+        traj_rad, traj_ee_mm = _plan_fine_align_traj(
+            model, sim_clone, h, perturbed_qpos, goal_tip, goal_back,
+            max_ctrl_steps=cfg.max_steps,
+        )
+        traj_qpos_deg = np.rad2deg(traj_rad)
+        # Optional smoothing — moving average per joint to kill IK tick noise.
+        # Endpoints preserved (mode='nearest').
+        w = int(cfg.smooth_window)
+        if w >= 3 and len(traj_qpos_deg) >= w:
+            half = w // 2
+            pad = np.pad(traj_qpos_deg, ((half, half), (0, 0)), mode='edge')
+            kernel = np.ones(w) / w
+            traj_qpos_deg = np.stack([
+                np.convolve(pad[:, j], kernel, mode='valid')
+                for j in range(traj_qpos_deg.shape[1])
+            ], axis=1)
+            logger.info(f"  Episode {ep_idx}: traj smoothed (window={w})")
+        logger.info(
+            f"  Episode {ep_idx}: planned sim traj → {len(traj_qpos_deg)} waypoints "
+            f"(~{len(traj_qpos_deg) * cfg.record_dt:.2f}s)"
+        )
+
     # ── ③ Move real to perturbed (blocking) ──
     logger.info(f"  Episode {ep_idx}: → perturbed pose (blocking MoveJoints)")
     env.reset_to_joints(perturbed_deg)
 
-    # ── ④ Send aligned target as ONE non-blocking MoveJoints ──
-    logger.info(f"  Episode {ep_idx}: ▶ MoveJoints(aligned) — Mecademic plans trajectory")
-    if env.robot is not None and not env.dry_run:
-        try:
-            env.robot.MoveJoints(*[float(j) for j in aligned_deg])
-        except Exception as e:
-            logger.warning(f"MoveJoints(aligned) failed: {e}; recover + retry")
-            env._recover()
+    # ── ④ Issue motion plan to real ──
+    if cfg.mode == "single":
+        # Single non-blocking MoveJoints — Mecademic plans its own (fast) trajectory.
+        logger.info(f"  Episode {ep_idx}: ▶ MoveJoints(aligned) — Mecademic plans trajectory")
+        if env.robot is not None and not env.dry_run:
             try:
                 env.robot.MoveJoints(*[float(j) for j in aligned_deg])
-            except Exception as e2:
-                logger.error(f"MoveJoints retry failed: {e2}")
-                return False
+            except Exception as e:
+                logger.warning(f"MoveJoints(aligned) failed: {e}; recover + retry")
+                env._recover()
+                try:
+                    env.robot.MoveJoints(*[float(j) for j in aligned_deg])
+                except Exception as e2:
+                    logger.error(f"MoveJoints retry failed: {e2}")
+                    return False
+    else:
+        logger.info(
+            f"  Episode {ep_idx}: ▶ streaming {len(traj_qpos_deg)} sim waypoints "
+            f"@ {1.0/cfg.record_dt:.2f} Hz (sim-paced)"
+        )
+
+    # ── Episode metadata (matches sim's episode_meta keys) ──
+    episode_meta = {
+        "aligned_qpos": np.rad2deg(aligned_qpos).astype(np.float32),
+        "perturb_xyz_mm": (perturb_xyz_used * 1000.0).astype(np.float32),
+        "perturb_angle_deg": np.array(np.rad2deg(perturb_ang_used), dtype=np.float32),
+        "target_entry_world": p_entry.astype(np.float32),
+        "target_depth_world": p_depth.astype(np.float32),
+        "retreat_mm": np.float32(RETREAT_MM),
+        "phantom_offset": np.array([cfg.phantom_pos[0], cfg.phantom_pos[1], 0.0], dtype=np.float32),
+    }
+    recorder.start(episode_meta)
 
     # ── ⑤ Recording loop (wall-clock paced) ──
     record_dt = float(cfg.record_dt)  # seconds, default 1/7.46 ≈ 0.134
@@ -175,11 +284,27 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     # Initialize last_real_ee from current state
     real_state0 = env.read_state()
     last_real_ee = real_state0["ee_pose"].copy()
+    last_sim_ee = traj_ee_mm[0].copy() if traj_ee_mm is not None else None
 
     record_start = time.time()
     next_t = record_start
 
     while True:
+        # Send next sim-paced waypoint (traj mode only) BEFORE pacing sleep
+        if cfg.mode == "traj" and traj_qpos_deg is not None:
+            wp_idx = min(ctrl_step, len(traj_qpos_deg) - 1)
+            wp = traj_qpos_deg[wp_idx]
+            if env.robot is not None and not env.dry_run:
+                try:
+                    env.robot.MoveJoints(*[float(j) for j in wp])
+                except Exception as e:
+                    logger.warning(f"stream MoveJoints failed @ wp{wp_idx}: {e}; recover")
+                    env._recover()
+                    try:
+                        env.robot.MoveJoints(*[float(j) for j in wp])
+                    except Exception:
+                        pass
+
         # Wall-clock pacing
         now = time.time()
         if now < next_t:
@@ -199,6 +324,19 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
         mag = np.linalg.norm(real_delta_ee[:3])
         if mag > real_clip_mm:
             real_delta_ee[:3] *= real_clip_mm / mag
+
+        # sim_delta_ee from planned waypoints (traj mode); None in single mode
+        sim_delta_ee = None
+        if traj_ee_mm is not None and last_sim_ee is not None:
+            wp_idx_curr = min(ctrl_step, len(traj_ee_mm) - 1)
+            curr_sim_ee = traj_ee_mm[wp_idx_curr]
+            sd = curr_sim_ee - last_sim_ee
+            sd[3:6] = _wrap_pi(sd[3:6])
+            sm = np.linalg.norm(sd[:3])
+            if sm > ACTION_CLIP_MM:
+                sd[:3] *= ACTION_CLIP_MM / sm
+            sim_delta_ee = sd
+            last_sim_ee = curr_sim_ee.copy()
 
         # sim aux at real pose
         curr_tip = data.site_xpos[h.tip_id].copy()
@@ -241,6 +379,8 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
             keypoints_wrist=keypoints_wrist,
             keypoints_visibility=keypoints_visibility,
             instruction=TASK_INSTRUCTION,
+            action_sim=(sim_delta_ee.astype(np.float32)
+                        if sim_delta_ee is not None else None),
         )
         last_real_ee = real_ee.copy()
         ctrl_step += 1
@@ -286,9 +426,14 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
             break
 
     if user_quit or not success:
+        final_dist_mm = float(np.linalg.norm(curr_tip - goal_tip) * 1000.0) if 'curr_tip' in dir() else float('nan')
         recorder.discard()
         reason = "user_quit" if user_quit else "no_success"
-        logger.warning(f"  ❌ Episode {ep_idx} discarded ({reason})")
+        logger.warning(
+            f"  ❌ Episode {ep_idx} discarded ({reason})  "
+            f"final tip→goal={final_dist_mm:.2f}mm (thresh={ALIGN_THRESHOLD_M*1000:.1f}mm)  "
+            f"ctrl_step={ctrl_step}  align_timer={align_timer}"
+        )
         return False
 
     # ── ⑥ Hold phase (continue recording at aligned for HOLD_RECORD_STEPS) ──
@@ -311,6 +456,10 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
         mag = np.linalg.norm(real_delta_ee[:3])
         if mag > real_clip_mm:
             real_delta_ee[:3] *= real_clip_mm / mag
+
+        # Hold phase: sim trajectory is plateaued at aligned → zero sim delta
+        hold_sim_delta_ee = (np.zeros(6, dtype=np.float64)
+                             if traj_ee_mm is not None else None)
 
         curr_tip = data.site_xpos[h.tip_id].copy()
         curr_back = data.site_xpos[h.back_id].copy()
@@ -351,6 +500,8 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
             keypoints_wrist=keypoints_wrist,
             keypoints_visibility=keypoints_visibility,
             instruction=TASK_INSTRUCTION,
+            action_sim=(hold_sim_delta_ee.astype(np.float32)
+                        if hold_sim_delta_ee is not None else None),
         )
         last_real_ee = real_ee.copy()
 
@@ -382,6 +533,12 @@ def _parse_args():
                     help="Wall-clock recording rate (Hz). Matches sim's 67-step rate.")
     ap.add_argument("--joint-vel-limit", type=float, default=25.0,
                     help="SetJointVelLimit (deg/s). Lower = slower + smoother motion.")
+    ap.add_argument("--mode", choices=["single", "traj"], default="traj",
+                    help="single = one MoveJoints to aligned (Mecademic native speed). "
+                         "traj = stream sim waypoints at sim's pace (default).")
+    ap.add_argument("--smooth-window", type=int, default=5,
+                    help="Moving-average window over traj waypoints (per joint) to "
+                         "reduce IK tick noise. 0 or 1 = disable. Default 5.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--cameras", nargs="+", default=["tool_camera"],
                     choices=["top_camera", "tool_camera", "side_camera"])
@@ -432,6 +589,9 @@ def main():
     cfg.phantom_rot = args.phantom_rot
     cfg.record_dt = 1.0 / max(1e-3, float(args.record_rate_hz))
     cfg.max_steps = int(args.max_steps)
+    cfg.mode = str(args.mode)
+    cfg.smooth_window = int(args.smooth_window)
+    logger.info(f"🛤  Replay mode: {cfg.mode}  smooth_window={cfg.smooth_window}")
     cfg.record_cameras = list(args.cameras)
     logger.info(f"📸 Recording cameras: {cfg.record_cameras}  rate={1.0/cfg.record_dt:.2f}Hz")
     cfg.show_preview = not (args.no_display or not os.environ.get("DISPLAY"))

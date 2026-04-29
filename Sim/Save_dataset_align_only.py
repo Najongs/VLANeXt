@@ -128,7 +128,7 @@ class SimRecorder:
 
     def add(self, frames, qpos, ee_pose, action, timestamp, phase, sensor_dist,
             needle_tip_mm=None, trocar_entry_mm=None, keypoints_wrist=None,
-            keypoints_visibility=None, instruction=""):
+            keypoints_visibility=None, instruction="", action_sim=None):
         if not self.recording: return
         self.buffer.append({
             "ts": timestamp,
@@ -136,6 +136,7 @@ class SimRecorder:
             "q": qpos,
             "p": ee_pose,
             "act": action,
+            "act_sim": action_sim,
             "phase": phase,
             "sd": sensor_dist,
             "needle_tip_mm": needle_tip_mm,
@@ -178,6 +179,21 @@ class SimRecorder:
                     obs.create_dataset("ee_pose", data=p_data, compression="gzip")
                     obs.create_dataset("sensor_dist", data=sensor_data, compression="gzip")
                     f.create_dataset("action", data=act_data, compression="gzip")
+
+                    # Optional sim-side action label (if any frame supplied it).
+                    if any(x.get("act_sim") is not None for x in data):
+                        n = len(data)
+                        sim_act_arr = np.full((n, 6), np.nan, dtype=np.float32)
+                        for i, x in enumerate(data):
+                            v = x.get("act_sim")
+                            if v is not None:
+                                sim_act_arr[i] = np.asarray(v, dtype=np.float32)[:6]
+                        sim_act_arr = np.concatenate(
+                            [sim_act_arr, np.full((n, 1), -1.0, dtype=np.float32)],
+                            axis=-1,
+                        )
+                        f.create_dataset("action_sim", data=sim_act_arr, compression="gzip")
+
                     f.create_dataset("timestamp", data=ts_data, compression="gzip")
                     f.create_dataset("phase", data=phase_data, compression="gzip")
 
