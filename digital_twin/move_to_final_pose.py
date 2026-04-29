@@ -21,6 +21,16 @@ Usage
     # Sim only — print solved qpos, no robot motion
     python -m digital_twin.move_to_final_pose --phantom-pos 0.0 0.0 --dry-run
 
+python -m digital_twin.move_to_final_pose \
+    --phantom-pos 0.0 0.0 \
+    --phase insertion \
+    --insertion-depth-mm 1 \
+    --cycles 5 \
+    --cycle-pause-sec 0.5 \
+    --pause-sec 5 \
+    --joint-vel-limit 5 --joint-acc-limit 5 \
+    --return-home
+
 Workflow
 --------
   1) Load sim, place phantom at requested (x, y) in robot base.
@@ -176,6 +186,14 @@ def _parse_args():
                     help="Which final pose(s) to send to the real robot")
     ap.add_argument("--pause-sec", type=float, default=5.0,
                     help="Seconds to hold at each pose for visual verification")
+    ap.add_argument("--cycles", type=int, default=1,
+                    help="With --phase insertion/both: repeat insertion ↔ align this "
+                         "many times (poke-and-pull). Each cycle pauses --cycle-pause-sec "
+                         "at the inserted and retracted endpoints; the very last hold "
+                         "uses --pause-sec instead.")
+    ap.add_argument("--cycle-pause-sec", type=float, default=0.5,
+                    help="Brief hold at each cycle endpoint (insertion/align). "
+                         "Final cycle's last hold uses --pause-sec instead.")
     ap.add_argument("--insertion-depth-mm", type=float, default=None,
                     help="Insertion depth from trocar entry along axis (mm). "
                          "Default: None → full sim depth (p_depth site).")
@@ -183,7 +201,11 @@ def _parse_args():
                     default=str(_PROJECT_ROOT / "Sim" / "meca_add.xml"))
     ap.add_argument("--robot-address", type=str, default=ROBOT_ADDRESS_DEFAULT)
     ap.add_argument("--joint-vel-limit", type=float, default=30.0,
-                    help="Mecademic SetJointVelLimit (deg/s). Conservative for verification.")
+                    help="Mecademic SetJointVelLimit (deg/s). Lower = slower motion. "
+                         "Try 10 or 5 for very slow verification.")
+    ap.add_argument("--joint-acc-limit", type=float, default=None,
+                    help="Mecademic SetJointAcc (%% of max accel, 1~100). Lower = "
+                         "smoother start/stop. Try 10~25 for slow verification.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Sim only — print solved qpos, do not move robot")
     ap.add_argument("--return-home", action="store_true",
@@ -262,8 +284,15 @@ def main():
         robot.SetRealTimeMonitoring(1)
         try:
             robot.SetJointVelLimit(float(args.joint_vel_limit))
+            logger.info(f"⚙️  SetJointVelLimit = {args.joint_vel_limit} deg/s")
         except Exception as e:
             logger.warning(f"SetJointVelLimit failed (non-fatal): {e}")
+        if args.joint_acc_limit is not None:
+            try:
+                robot.SetJointAcc(float(args.joint_acc_limit))
+                logger.info(f"⚙️  SetJointAcc = {args.joint_acc_limit}%")
+            except Exception as e:
+                logger.warning(f"SetJointAcc failed (non-fatal): {e}")
 
         logger.info(f"🏠 MoveJoints HOME = {HOME_JOINTS}")
         robot.MoveJoints(*HOME_JOINTS)
@@ -277,13 +306,27 @@ def main():
         _move_robot_to(robot, cam_mgr, align_deg, "ALIGN final", align_pause)
 
         if args.phase in ("insertion", "both") and insertion_deg is not None:
-            _move_robot_to(robot, cam_mgr, insertion_deg, "INSERTION final", args.pause_sec)
-            # Retract along trocar axis: insertion → align (reverse the path the
-            # needle just took). HOME from inside the phantom would yank the
-            # needle out at an angle — must un-insert first.
-            logger.info("↩️  Retracting needle along trocar axis (insertion → align)…")
-            robot.MoveJoints(*[float(j) for j in align_deg])
-            robot.WaitIdle()
+            n_cycles = max(1, int(args.cycles))
+            for c in range(n_cycles):
+                is_last = (c == n_cycles - 1)
+                in_pause = args.pause_sec if is_last else args.cycle_pause_sec
+                _move_robot_to(
+                    robot, cam_mgr, insertion_deg,
+                    f"INSERTION ({c+1}/{n_cycles})", in_pause,
+                )
+                # Always retract along trocar axis before next cycle / HOME.
+                # HOME from inside phantom would yank the needle out at an angle.
+                logger.info(f"↩️  Retracting (cycle {c+1}/{n_cycles}) insertion → align…")
+                robot.MoveJoints(*[float(j) for j in align_deg])
+                robot.WaitIdle()
+                # Brief pause at align between cycles (skipped after final retract
+                # since user is done — script proceeds to HOME / shutdown).
+                if not is_last:
+                    _hold_with_display(
+                        cam_mgr,
+                        status=f"HOLD: ALIGN (cycle {c+1}/{n_cycles})",
+                        hold_sec=args.cycle_pause_sec,
+                    )
 
         if args.return_home:
             logger.info("🏠 Returning to HOME…")

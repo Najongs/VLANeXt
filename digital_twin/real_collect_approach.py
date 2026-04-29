@@ -9,10 +9,9 @@ Architecture
 - The sim's scripted approach trajectory (smooth_step + hierarchical IK toward the
   trocar entry, exactly as in `Sim/Save_dataset_approach_only.py`) decides each
   control frame.
-- Per recording frame (every 67 sim steps ≈ 0.134 s) we either:
-    * `joint`  mode: send sim's `data.qpos[:6]` (deg) to the robot via `MoveJoints`
-    * `cartesian` mode: send sim's frame-to-frame `delta_ee` via `MovePose`
-- After the real robot has had `control_dt` to move, we capture **real** OAK frames
+- High-rate joint streaming sends sim's `data.qpos[:6]` (deg) to the robot via
+  `MoveJoints` (queued, blended) at ~15 Hz so motion is smooth.
+- Per recording frame (every 67 sim steps ≈ 0.134 s) we capture **real** OAK frames
   + **real** GetPose / GetJoints, compute `delta_ee = real_ee_now - real_ee_last`,
   and append to HDF5 in the **same schema** used by the sim collector
   (`Sim/Save_dataset_approach_only.py:SimRecorder`).
@@ -83,8 +82,6 @@ from digital_twin.real_eval_approach import (  # noqa: E402
     OAKCameraManager,
     HOME_JOINTS,
     ROBOT_ADDRESS_DEFAULT,
-    SAFETY_CLAMP_POS_MM,
-    SAFETY_CLAMP_ROT_RAD,
 )
 
 
@@ -95,18 +92,18 @@ logger = logging.getLogger(__name__)
 # Real env: thin extension of ApproachRealEnv with joint-mirror + state read APIs
 # ─────────────────────────────────────────────────────────────────────────────
 class RealCollectEnv:
-    """Mecademic + OAK wrapper for sim-twin data collection.
-
-    Joint mirror (`stream_joints`) and Cartesian delta (`stream_cartesian_delta`)
-    are both supported; the caller picks per `cfg.mirror_mode`.
-    """
+    """Mecademic + OAK wrapper for sim-twin data collection. Joint mirror only."""
 
     def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False,
-                 dry_run=False, joint_vel_limit_deg_s=50.0, cart_lin_vel_mm_s=50.0):
+                 dry_run=False, joint_vel_limit_deg_s=50.0, ema_alpha=0.0):
         self.swap_cameras = swap_cameras
         self.dry_run = dry_run
         self.robot = None
         self.cam_mgr = None
+        # EMA low-pass on streamed qpos commands. alpha in (0,1]: smaller = more
+        # smoothing. 0.0 disables filtering (raw sim qpos sent through).
+        self.ema_alpha = float(ema_alpha)
+        self._ema_q = None  # last filtered qpos (deg, 6)
 
         # Robot
         if not dry_run:
@@ -122,13 +119,12 @@ class RealCollectEnv:
                 # Conservative speed limits for sim-driven motion; user can override
                 # downstream if 7.5 Hz frame rate produces visible lag.
                 self.robot.SetJointVelLimit(joint_vel_limit_deg_s)
-                self.robot.SetCartLinVel(cart_lin_vel_mm_s)
                 # Maximum motion blending so consecutive MoveJoints chain smoothly
                 # instead of decel-stop-accel between waypoints (the cause of
                 # observed jitter when streaming at low rates).
                 self.robot.SetBlending(100)
             except Exception as e:
-                logger.warning(f"SetJointVelLimit/SetCartLinVel/SetBlending failed (non-fatal): {e}")
+                logger.warning(f"SetJointVelLimit/SetBlending failed (non-fatal): {e}")
             self.robot.MoveJoints(*HOME_JOINTS)
             self.robot.WaitIdle()
             logger.info(f"🏠 Home joints {HOME_JOINTS} reached")
@@ -155,6 +151,9 @@ class RealCollectEnv:
     # ─── lifecycle ──────────────────────────────────────────────────────────
     def reset_to_joints(self, joints_deg):
         """Move to a specific home pose synchronously (used at episode start only)."""
+        # Reset EMA state to destination so the first streamed command after this
+        # blocking move doesn't pull the filter back through interpolation.
+        self._ema_q = np.asarray(joints_deg, dtype=np.float64).copy()
         if self.dry_run or self.robot is None:
             return
         try:
@@ -181,42 +180,27 @@ class RealCollectEnv:
 
     # ─── streaming APIs (per control frame) ─────────────────────────────────
     def stream_joints(self, joints_deg):
-        """Joint-space mirror — queued, no WaitIdle."""
+        """Joint-space mirror — queued, no WaitIdle. Returns the qpos actually
+        sent (post-EMA if enabled) for diagnostics."""
+        q_new = np.asarray(joints_deg, dtype=np.float64)
+        if self.ema_alpha > 0.0:
+            if self._ema_q is None:
+                self._ema_q = q_new.copy()
+            else:
+                self._ema_q = self.ema_alpha * q_new + (1.0 - self.ema_alpha) * self._ema_q
+            q_send = self._ema_q
+        else:
+            self._ema_q = q_new.copy()
+            q_send = q_new
         if self.dry_run or self.robot is None:
-            logger.debug(f"[DRY] MoveJoints {[round(float(j), 2) for j in joints_deg]}")
-            return
+            logger.debug(f"[DRY] MoveJoints {[round(float(j), 2) for j in q_send]}")
+            return q_send
         try:
-            self.robot.MoveJoints(*[float(j) for j in joints_deg])
+            self.robot.MoveJoints(*[float(j) for j in q_send])
         except Exception as e:
             logger.warning(f"MoveJoints failed: {e}")
             self._recover()
-
-    def stream_cartesian_delta(self, delta_ee_6d):
-        """Cartesian delta mirror — target = current_pose + delta, MovePose absolute."""
-        delta = np.asarray(delta_ee_6d, dtype=np.float32).copy()
-        delta[:3] = np.clip(delta[:3], -SAFETY_CLAMP_POS_MM, SAFETY_CLAMP_POS_MM)
-        delta[3:6] = np.clip(delta[3:6], -SAFETY_CLAMP_ROT_RAD, SAFETY_CLAMP_ROT_RAD)
-        if self.dry_run or self.robot is None:
-            logger.debug(f"[DRY] MovePose delta={delta.round(3).tolist()}")
-            return
-        try:
-            current = list(self.robot.GetPose())[:6]
-        except Exception as e:
-            logger.warning(f"GetPose failed in stream_cartesian_delta: {e}")
-            return
-        target = [
-            float(current[0] + delta[0]),
-            float(current[1] + delta[1]),
-            float(current[2] + delta[2]),
-            float(current[3] + np.rad2deg(delta[3])),
-            float(current[4] + np.rad2deg(delta[4])),
-            float(current[5] + np.rad2deg(delta[5])),
-        ]
-        try:
-            self.robot.MovePose(*target)
-        except Exception as e:
-            logger.warning(f"MovePose failed: {e}")
-            self._recover()
+        return q_send
 
     # ─── observation ─────────────────────────────────────────────────────────
     def read_state(self) -> dict:
@@ -415,12 +399,11 @@ def _wrap_pi(a):
 
 
 def _build_display_frame(real_frames, ctrl_step, max_steps, task_state,
-                         sim_delta_pos_mm, sim_delta_rot_deg, mirror_mode,
-                         dry_run):
+                         sim_delta_pos_mm, sim_delta_rot_deg, dry_run):
     top = real_frames["top_camera"]
     tool = real_frames["tool_camera"]
     combined = np.concatenate([top, tool], axis=1)
-    cv2.putText(combined, f"step {ctrl_step}/{max_steps}  phase {task_state}  mode={mirror_mode}",
+    cv2.putText(combined, f"step {ctrl_step}/{max_steps}  phase {task_state}",
                 (5, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1, cv2.LINE_AA)
     cv2.putText(combined, f"sim_dpos_mm={sim_delta_pos_mm.round(2).tolist()}",
                 (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1, cv2.LINE_AA)
@@ -436,17 +419,128 @@ def _build_display_frame(real_frames, ctrl_step, max_steps, task_state,
 # Main collection loop (mirrors Sim/Save_dataset_approach_only.py main loop,
 # with real-robot streaming + real frame/state recording at each control frame)
 # ─────────────────────────────────────────────────────────────────────────────
+def _solve_inter_episode_retreat_qpos(model, data, h: SimHandles, retreat_mm: float):
+    """Run IK to pull the needle tip retreat_mm back along the trocar axis from
+    the current sim state. Used as a safe inter-episode waypoint — replaces a
+    full HOME visit. Mutates `data`; caller may clone first if desired.
+
+    Returns the resulting qpos (rad, 6) on convergence; raises on timeout.
+    """
+    p_entry = data.site_xpos[h.target_entry_id].copy()
+    p_depth = data.site_xpos[h.target_depth_id].copy()
+    axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
+    start_tip = data.site_xpos[h.tip_id].copy()
+    start_back = data.site_xpos[h.back_id].copy()
+    needle_len = float(np.linalg.norm(start_tip - start_back))
+    goal_tip = start_tip - axis_dir * (retreat_mm / 1000.0)
+    goal_back = goal_tip - axis_dir * needle_len
+    dist = float(np.linalg.norm(goal_tip - start_tip))
+    duration = max(dist / ALIGN_SPEED, 1e-3)
+    t0 = data.time
+    align_timer = 0
+    while True:
+        progress = smooth_step((data.time - t0) / duration)
+        target_tip = (1 - progress) * start_tip + progress * goal_tip
+        target_back = (1 - progress) * start_back + progress * goal_back
+        _solve_ik_step(model, data, h, target_tip, target_back, 0.5)
+        mujoco.mj_step(model, data)
+        if progress >= 1.0:
+            curr_tip = data.site_xpos[h.tip_id].copy()
+            if np.linalg.norm(curr_tip - goal_tip) < 2e-3:
+                align_timer += 1
+            else:
+                align_timer = 0
+            if align_timer > 30:
+                break
+        if data.time - t0 > 30.0:
+            raise RuntimeError("inter-episode retreat IK timeout")
+    return data.qpos[: h.n_motors].copy()
+
+
+def _sample_safe_home(model, h: SimHandles, cfg, rng: np.random.Generator,
+                      ep_idx: int, anchor_rad=None):
+    """Sample a random home pose and validate it (and the joint-linear path
+    from HOME_JOINTS) against tip-occlusion in a sim clone. Resamples up to
+    `cfg.max_home_retries` times. Returns (home_pose_rad or None, info_str).
+
+    Phantom must already be placed via `_set_phantom` on a *separate* data
+    object owned by the caller before calling this — we set up our own clone
+    here so caller state is untouched.
+    """
+    from digital_twin.real_collect_align import (  # local import: avoid cycle at module load
+        _check_tip_occluded,
+        _check_qpos_path_safe,
+    )
+    if anchor_rad is None:
+        home_rad_anchor = np.deg2rad(np.asarray(HOME_JOINTS, dtype=np.float64))
+    else:
+        home_rad_anchor = np.asarray(anchor_rad, dtype=np.float64)
+    n_attempts = max(1, int(cfg.max_home_retries))
+    last_reason = "no_attempts"
+    for attempt in range(1, n_attempts + 1):
+        candidate_rad = _sample_home_pose(cfg.randomize_home, rng)
+        # Fresh clone with phantom already on model.body_pos (set by caller)
+        clone = mujoco.MjData(model)
+        clone.qpos[: h.n_motors] = candidate_rad
+        mujoco.mj_forward(model, clone)
+        # (1) Endpoint occlusion at the candidate home
+        if _check_tip_occluded(model, clone, h, cfg.occlusion_tol_m):
+            last_reason = f"home_endpoint_occluded(att{attempt})"
+            logger.info(f"   ⚠️  Episode {ep_idx} home attempt {attempt}/{n_attempts}: occluded at endpoint — resample")
+            if not cfg.randomize_home:
+                break  # fixed home: no point resampling identical pose
+            continue
+        # (2) Joint-linear path HOME_JOINTS → candidate (real robot's actual trajectory)
+        clone2 = mujoco.MjData(model)
+        ok, reason = _check_qpos_path_safe(
+            model, clone2, h, home_rad_anchor, candidate_rad,
+            n_steps=cfg.qpos_path_steps, tolerance_m=cfg.occlusion_tol_m,
+        )
+        if not ok:
+            last_reason = f"home_path_{reason}(att{attempt})"
+            logger.info(f"   ⚠️  Episode {ep_idx} home attempt {attempt}/{n_attempts}: HOME→home path unsafe ({reason}) — resample")
+            if not cfg.randomize_home:
+                break
+            continue
+        if attempt > 1:
+            logger.info(f"   ✓ Episode {ep_idx} home accepted on attempt {attempt}/{n_attempts}")
+        return candidate_rad, "ok"
+    return None, last_reason
+
+
 def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecorder,
-                           cfg, h: SimHandles, ep_idx: int, rng: np.random.Generator) -> bool:
-    """One sim-driven, real-recorded episode. Returns True on success."""
+                           cfg, h: SimHandles, ep_idx: int, rng: np.random.Generator,
+                           anchor_rad=None) -> bool:
+    """One sim-driven, real-recorded episode. Returns True on success.
+
+    `anchor_rad`: qpos (rad, 6) the real robot is currently parked at — used as
+    the source for joint-linear path safety validation. Defaults to HOME_JOINTS
+    when None (e.g. very first episode after env init).
+    """
 
     # === Reset sim ===
     mujoco.mj_resetData(model, data)
-    home_pose_rad = _sample_home_pose(cfg.randomize_home, rng)
-    data.qpos[:6] = home_pose_rad
+    # Place phantom on the model first (shared model.body_pos) so the safety
+    # validator sees the correct phantom geometry.
     phantom_offset, phantom_quat, phantom_angle_deg = _set_phantom(
         model, data, h, cfg.phantom_pos, cfg.phantom_rot
     )
+
+    # === Sample + validate random home pose (skip episode if all retries fail) ===
+    if cfg.skip_safety_validation:
+        home_pose_rad = _sample_home_pose(cfg.randomize_home, rng)
+    else:
+        home_pose_rad, reason = _sample_safe_home(
+            model, h, cfg, rng, ep_idx, anchor_rad=anchor_rad
+        )
+        if home_pose_rad is None:
+            logger.warning(
+                f"  ❌ Episode {ep_idx} skipped: no safe home after "
+                f"{cfg.max_home_retries} attempts (last={reason})"
+            )
+            return False
+
+    data.qpos[:6] = home_pose_rad
     mujoco.mj_forward(model, data)
 
     # === Reset real to same home (deg) ===
@@ -480,8 +574,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
     last_ee_pose_sim = h.ee_pose_mm_rad(data)
     # Sync real to post-warmup sim pose so the first recorded delta isn't a giant jump
     post_warmup_qpos_deg = np.rad2deg(data.qpos[:6].copy())
-    if cfg.mirror_mode == "joint":
-        env.stream_joints(post_warmup_qpos_deg)
+    env.stream_joints(post_warmup_qpos_deg)
     time.sleep(0.4)
     last_real_state = env.read_state()
     last_real_ee = last_real_state["ee_pose"]
@@ -561,7 +654,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         # (default 50 Hz) so Mecademic's motion blending can chain MoveJoints
         # commands continuously. Recording frame rate (7.46 Hz) is unchanged
         # — only the joint command rate is decoupled and raised.
-        if cfg.mirror_mode == "joint" and step_count % cfg.stream_every == 0:
+        if step_count % cfg.stream_every == 0:
             env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
             time.sleep(cfg.stream_dt)
 
@@ -577,11 +670,6 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             if pos_mag > ACTION_CLIP_MM:
                 sim_delta_ee[:3] *= ACTION_CLIP_MM / pos_mag
 
-            # 5a. Cartesian mode drives real here (joint mode already streamed
-            # above at high rate; recording boundary is just for capture).
-            if cfg.mirror_mode == "cartesian":
-                env.stream_cartesian_delta(sim_delta_ee)
-                time.sleep(cfg.control_dt)
 
             # 5c. Capture real frames + real state (post-motion)
             real_frames = env.render_frames()
@@ -613,12 +701,8 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
 
             # 5e. Append to recorder — REAL frames, REAL state, REAL action
             frames_for_recorder = {
-                "top_camera": real_frames["top_camera"],
-                "tool_camera": real_frames["tool_camera"],
-                "side_camera": real_frames["side_camera"],
+                cam: real_frames[cam] for cam in cfg.record_cameras if cam in real_frames
             }
-            if cfg.skip_side_camera:
-                frames_for_recorder.pop("side_camera", None)
 
             recorder.add(
                 frames_for_recorder,
@@ -644,7 +728,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
                     disp = _build_display_frame(
                         real_frames, ctrl_step, cfg.max_steps, task_state,
                         sim_delta_ee[:3], np.rad2deg(sim_delta_ee[3:6]),
-                        cfg.mirror_mode, env.dry_run,
+                        env.dry_run,
                     )
                     cv2.imshow("Real Collect (top | tool) — 'q' abort", disp)
                     if (cv2.waitKey(1) & 0xFF) == ord('q'):
@@ -713,25 +797,37 @@ def _parse_args():
     ap.add_argument("--max-steps", type=int, default=500)
     ap.add_argument("--hold-steps", type=int, default=SIM_HOLD_STEPS,
                     help="Frames to record at hold (post-approach)")
-    ap.add_argument("--mirror-mode", choices=["joint", "cartesian"], default="joint")
-    ap.add_argument("--control-dt", type=float, default=0.134,
-                    help="Wall-time per recorded frame (~67 mj_steps × 0.002s). "
-                         "Used by cartesian mode only; joint mode paces via --stream-rate-hz.")
     ap.add_argument("--stream-rate-hz", type=float, default=15.0,
-                    help="Joint-mode streaming rate to the robot (Hz). 15 Hz empirically "
+                    help="Joint streaming rate to the robot (Hz). 15 Hz empirically "
                          "minimizes wrist-camera jitter (motion duration ≈ command interval). "
                          "Recording rate stays 7.46 Hz regardless.")
     ap.add_argument("--joint-vel-limit", type=float, default=50.0,
                     help="Mecademic SetJointVelLimit (deg/s).")
-    ap.add_argument("--cart-lin-vel", type=float, default=50.0,
-                    help="Mecademic SetCartLinVel (mm/s). Cartesian-mode only.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip robot connect; sim+OAK only")
-    ap.add_argument("--skip-side-camera", action="store_true",
-                    help="Don't record side_camera (real has only 2 cams)")
+    ap.add_argument("--cameras", nargs="+", default=["top_camera"],
+                    choices=["top_camera", "tool_camera", "side_camera"],
+                    help="Cameras to record into HDF5 (default: top_camera only for approach phase)")
+    ap.add_argument("--no-return-home", dest="return_home",
+                    action="store_false", default=True,
+                    help="Skip the final MoveJoints(HOME) at shutdown")
     ap.add_argument("--no-display", action="store_true",
                     help="Disable cv2.imshow live preview (auto-on if $DISPLAY unset)")
     ap.add_argument("--seed", type=int, default=None)
+    # Safety: home-pose pre-flight validation
+    ap.add_argument("--no-safety-validation", action="store_true",
+                    help="Disable sim dry-run safety check on the random home pose "
+                         "(NOT recommended on real robot)")
+    ap.add_argument("--max-home-retries", type=int, default=10,
+                    help="Resample budget per episode if home is occluded or HOME→home "
+                         "joint-linear path is unsafe. Episode skipped after exhausting retries.")
+    ap.add_argument("--occlusion-tolerance-mm", type=float, default=1.0,
+                    help="Tip-occlusion tolerance. Smaller → stricter rejection.")
+    ap.add_argument("--qpos-path-steps", type=int, default=20,
+                    help="Number of intermediate samples to validate along HOME→home joint-linear path.")
+    ap.add_argument("--inter-episode-retreat-mm", type=float, default=50.0,
+                    help="Distance (mm) to retreat the needle tip along the trocar axis "
+                         "between episodes — replaces a full HOME visit. 0 → just go straight to next home (less safe).")
     return ap.parse_args()
 
 
@@ -760,7 +856,6 @@ def main():
         swap_cameras=args.swap_cameras,
         dry_run=args.dry_run,
         joint_vel_limit_deg_s=float(args.joint_vel_limit),
-        cart_lin_vel_mm_s=float(args.cart_lin_vel),
     )
 
     # Recorder
@@ -771,10 +866,8 @@ def main():
     cfg = _Cfg()
     cfg.phantom_pos = tuple(args.phantom_pos)
     cfg.phantom_rot = args.phantom_rot
-    cfg.mirror_mode = args.mirror_mode
-    cfg.control_dt = float(args.control_dt)
-    # Joint-mode high-rate streaming: derive stream_every (sim steps) and
-    # stream_dt (wall-time pacing per stream tick) from the requested rate.
+    # Derive stream_every (sim steps) and stream_dt (wall-time pacing per
+    # stream tick) from the requested streaming rate.
     sim_dt = 0.002  # MuJoCo default timestep used by meca_add.xml
     target_dt = 1.0 / max(1e-3, float(args.stream_rate_hz))
     cfg.stream_every = max(1, int(round(target_dt / sim_dt)))
@@ -786,17 +879,53 @@ def main():
     cfg.randomize_home = bool(args.randomize_home)
     cfg.max_steps = int(args.max_steps)
     cfg.hold_steps = int(args.hold_steps)
-    cfg.skip_side_camera = bool(args.skip_side_camera)
+    cfg.record_cameras = list(args.cameras)
+    logger.info(f"📸 Recording cameras: {cfg.record_cameras}")
+    cfg.skip_safety_validation = bool(args.no_safety_validation)
+    cfg.max_home_retries = int(args.max_home_retries)
+    cfg.occlusion_tol_m = float(args.occlusion_tolerance_mm) / 1000.0
+    cfg.qpos_path_steps = int(args.qpos_path_steps)
+    cfg.inter_episode_retreat_mm = float(args.inter_episode_retreat_mm)
+    if cfg.skip_safety_validation:
+        logger.warning("⚠️  Safety: home-pose validation DISABLED (--no-safety-validation)")
+    else:
+        logger.info(
+            f"🛡  Safety: home validation ON (retries≤{cfg.max_home_retries}, "
+            f"occl_tol={cfg.occlusion_tol_m*1000:.1f}mm, path_steps={cfg.qpos_path_steps})"
+        )
     # Auto-disable cv2 preview when there's no display server (headless boxes)
     cfg.show_preview = not (args.no_display or not os.environ.get("DISPLAY"))
 
     n_ok = 0
     try:
+        # Anchor = qpos the real robot is currently parked at. Updated per
+        # episode end (after retreat). Drives joint-linear path validation
+        # and the actual MoveJoints chain that real will execute.
+        current_anchor_rad = np.deg2rad(np.asarray(HOME_JOINTS, dtype=np.float64))
         for ep in range(1, args.num_episodes + 1):
             logger.info("\n" + "=" * 60 + f"\n▶ Episode {ep}/{args.num_episodes}\n" + "=" * 60)
-            ok = run_collection_episode(model, data, env, recorder, cfg, h, ep, rng)
+            ok = run_collection_episode(
+                model, data, env, recorder, cfg, h, ep, rng,
+                anchor_rad=current_anchor_rad,
+            )
             if ok:
                 n_ok += 1
+            # Inter-episode retreat: pull tip back along trocar axis from sim's
+            # current (post-episode) state. Replaces a full HOME visit — same
+            # collision-avoidance role, much shorter travel.
+            if ep < args.num_episodes and not args.dry_run:
+                try:
+                    retreat_qpos_rad = _solve_inter_episode_retreat_qpos(
+                        model, data, h, retreat_mm=cfg.inter_episode_retreat_mm,
+                    )
+                    retreat_deg = np.rad2deg(retreat_qpos_rad).tolist()
+                    logger.info(f"↩️  Inter-episode retreat ({cfg.inter_episode_retreat_mm:.0f} mm along axis)")
+                    env.reset_to_joints(retreat_deg)
+                    current_anchor_rad = retreat_qpos_rad
+                except Exception as e:
+                    logger.warning(f"Inter-episode retreat failed ({e}); falling back to HOME visit")
+                    env.reset_to_joints(HOME_JOINTS)
+                    current_anchor_rad = np.deg2rad(np.asarray(HOME_JOINTS, dtype=np.float64))
     except KeyboardInterrupt:
         logger.warning("\n🛑 KeyboardInterrupt — finishing pending saves and shutting down")
     finally:
@@ -805,6 +934,13 @@ def main():
         except Exception:
             pass
         recorder.wait_for_all()
+        if args.return_home and env.robot is not None and not args.dry_run:
+            try:
+                logger.info(f"🏠 Returning to HOME {HOME_JOINTS} before disconnect…")
+                env.robot.MoveJoints(*HOME_JOINTS)
+                env.robot.WaitIdle()
+            except Exception as e:
+                logger.warning(f"Return-home failed: {e}")
         env.close()
         logger.info(f"\n✅ Done. {n_ok}/{args.num_episodes} episodes saved to {save_dir}")
 

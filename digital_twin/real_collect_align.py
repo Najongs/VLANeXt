@@ -16,7 +16,7 @@ Episode flow (matches sim):
         the real robot with `MoveJoints` + `WaitIdle`.
      ④ **Recording — Fine alignment**: sim does smooth_step IK from perturbed
         back to aligned at FINE_ALIGN_SPEED (~0.005 m/s). Real mirrors per
-        control frame (joint or cartesian mirror), captures real OAK frames +
+        control frame via high-rate joint streaming, captures real OAK frames +
         real GetPose/GetJoints, writes to HDF5.
      ⑤ **Recording — Hold**: HOLD_RECORD_STEPS more ctrl frames at aligned.
      ⑥ HDF5 saved.
@@ -100,6 +100,174 @@ from digital_twin.real_eval_approach import ROBOT_ADDRESS_DEFAULT, HOME_JOINTS  
 
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jitter diagnostics (opt-in via --diagnose-jitter)
+#
+# At every stream_joints call, log: t_send, qpos_cmd (deg), qpos_real (deg),
+# ee_real (mm,rad). Per-episode CSV + console summary.
+#   - send-interval jitter (target stream_dt vs actual)
+#   - |Δq_cmd| step distribution (sim IK noise indicator)
+#   - real tracking lag: |qpos_real - qpos_cmd| stats
+#   - real |Δq| step distribution (actual joint motion smoothness)
+class JitterDiag:
+    def __init__(self, out_dir, dry_run=False):
+        self.out_dir = pathlib.Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.dry_run = dry_run
+        self.t0 = None
+        self.rows = []  # list of (t, qcmd[6], qreal[6] or None, ee[6] or None, phase_label)
+
+    def begin_episode(self, ep_idx: int, label: str = ""):
+        self.ep_idx = ep_idx
+        self.label = label
+        self.t0 = time.time()
+        self.rows = []
+        self.action_rows = []  # (t, sim_ee[6], real_ee[6], sim_dee[6], real_dee[6], sim_q[6], real_q[6], phase)
+
+    def log_action(self, sim_ee, real_ee, sim_dee, real_dee, sim_qpos_deg, real_qpos_deg, phase_label=""):
+        t = time.time() - (self.t0 if self.t0 is not None else time.time())
+        self.action_rows.append((
+            t,
+            np.asarray(sim_ee, dtype=np.float64),
+            np.asarray(real_ee, dtype=np.float64),
+            np.asarray(sim_dee, dtype=np.float64),
+            np.asarray(real_dee, dtype=np.float64),
+            np.asarray(sim_qpos_deg, dtype=np.float64),
+            np.asarray(real_qpos_deg, dtype=np.float64),
+            phase_label,
+        ))
+
+    def log(self, robot, qcmd_deg, phase_label: str = ""):
+        t = time.time() - (self.t0 if self.t0 is not None else time.time())
+        qreal = None  # encoder feedback (RT monitoring)
+        qtgt = None   # controller's interpolated target (RT monitoring)
+        ee = None     # encoder cartesian pose (RT)
+        if not self.dry_run and robot is not None:
+            try:
+                qreal = list(robot.GetRtJointPos())[:6]
+            except Exception:
+                pass
+            try:
+                qtgt = list(robot.GetRtTargetJointPos())[:6]
+            except Exception:
+                pass
+            try:
+                ee = list(robot.GetRtCartPos())[:6]
+            except Exception:
+                pass
+        self.rows.append((t, np.asarray(qcmd_deg, dtype=np.float64),
+                          np.asarray(qreal, dtype=np.float64) if qreal is not None else None,
+                          np.asarray(qtgt, dtype=np.float64) if qtgt is not None else None,
+                          np.asarray(ee, dtype=np.float64) if ee is not None else None,
+                          phase_label))
+
+    def finalize(self):
+        if not self.rows:
+            return
+        csv_path = self.out_dir / f"jitter_ep{self.ep_idx:03d}.csv"
+        with open(csv_path, "w") as f:
+            f.write("t,phase,"
+                    + ",".join(f"qcmd{i}" for i in range(6)) + ","
+                    + ",".join(f"qreal{i}" for i in range(6)) + ","
+                    + ",".join(f"qtgt{i}" for i in range(6)) + ","
+                    + ",".join(f"ee{i}" for i in range(6)) + "\n")
+            for t, qc, qr, qt, ee, ph in self.rows:
+                qr_s = qr if qr is not None else [float('nan')] * 6
+                qt_s = qt if qt is not None else [float('nan')] * 6
+                ee_s = ee if ee is not None else [float('nan')] * 6
+                f.write(f"{t:.6f},{ph}," +
+                        ",".join(f"{v:.6f}" for v in qc) + "," +
+                        ",".join(f"{v:.6f}" for v in qr_s) + "," +
+                        ",".join(f"{v:.6f}" for v in qt_s) + "," +
+                        ",".join(f"{v:.6f}" for v in ee_s) + "\n")
+
+        ts = np.array([r[0] for r in self.rows])
+        qcmds = np.stack([r[1] for r in self.rows])
+        dt = np.diff(ts)
+        dq_cmd = np.linalg.norm(np.diff(qcmds, axis=0), axis=1)  # deg, L2 over 6 joints
+        max_dq_cmd_per_joint = np.max(np.abs(np.diff(qcmds, axis=0)), axis=0)
+
+        lines = [
+            f"\n📊 Jitter diag — episode {self.ep_idx} ({self.label})  N={len(self.rows)} samples",
+            f"   send interval (s):  mean={dt.mean()*1000:.2f}ms  std={dt.std()*1000:.2f}ms  "
+            f"min={dt.min()*1000:.2f}  max={dt.max()*1000:.2f}",
+            f"   |Δqcmd| step (deg): mean={dq_cmd.mean():.3f}  p50={np.median(dq_cmd):.3f}  "
+            f"p95={np.percentile(dq_cmd,95):.3f}  max={dq_cmd.max():.3f}",
+            f"   per-joint max |Δqcmd| (deg): {max_dq_cmd_per_joint.round(3).tolist()}",
+        ]
+
+        valid_real = [r for r in self.rows if r[2] is not None]
+        if len(valid_real) >= 2:
+            qreals = np.stack([r[2] for r in valid_real])
+            qcmds_r = np.stack([r[1] for r in valid_real])
+            lag = np.linalg.norm(qreals - qcmds_r, axis=1)  # deg
+            dq_real = np.linalg.norm(np.diff(qreals, axis=0), axis=1)
+            max_dq_real_per_joint = np.max(np.abs(np.diff(qreals, axis=0)), axis=0)
+            lines += [
+                f"   real-vs-cmd lag (deg, L2): mean={lag.mean():.3f}  "
+                f"p95={np.percentile(lag,95):.3f}  max={lag.max():.3f}",
+                f"   |Δqreal| step (deg): mean={dq_real.mean():.3f}  p50={np.median(dq_real):.3f}  "
+                f"p95={np.percentile(dq_real,95):.3f}  max={dq_real.max():.3f}",
+                f"   per-joint max |Δqreal| (deg): {max_dq_real_per_joint.round(3).tolist()}",
+            ]
+            ees = np.stack([r[4] for r in valid_real if r[4] is not None])
+            if len(ees) >= 2:
+                d_ee_pos = np.linalg.norm(np.diff(ees[:, :3], axis=0), axis=1)  # mm
+                lines.append(
+                    f"   |Δee_pos| step (mm):  mean={d_ee_pos.mean():.3f}  "
+                    f"p50={np.median(d_ee_pos):.3f}  p95={np.percentile(d_ee_pos,95):.3f}  "
+                    f"max={d_ee_pos.max():.3f}"
+                )
+        else:
+            lines.append("   (no real readings — dry-run or robot unavailable)")
+        lines.append(f"   csv → {csv_path}")
+
+        # ── action comparison (sim vs real, recording-rate samples) ─────────
+        if getattr(self, "action_rows", None):
+            act_path = self.out_dir / f"actions_ep{self.ep_idx:03d}.csv"
+            with open(act_path, "w") as f:
+                cols = ["t", "phase"]
+                for prefix in ("sim_ee", "real_ee", "sim_dee", "real_dee", "sim_q", "real_q"):
+                    cols += [f"{prefix}{i}" for i in range(6)]
+                f.write(",".join(cols) + "\n")
+                for t, see, ree, sde, rde, sq, rq, ph in self.action_rows:
+                    f.write(f"{t:.6f},{ph}," +
+                            ",".join(f"{v:.6f}" for v in see) + "," +
+                            ",".join(f"{v:.6f}" for v in ree) + "," +
+                            ",".join(f"{v:.6f}" for v in sde) + "," +
+                            ",".join(f"{v:.6f}" for v in rde) + "," +
+                            ",".join(f"{v:.6f}" for v in sq)  + "," +
+                            ",".join(f"{v:.6f}" for v in rq)  + "\n")
+
+            n = len(self.action_rows)
+            sim_ee = np.stack([r[1] for r in self.action_rows])
+            real_ee = np.stack([r[2] for r in self.action_rows])
+            sim_dee = np.stack([r[3] for r in self.action_rows])
+            real_dee = np.stack([r[4] for r in self.action_rows])
+            sim_q = np.stack([r[5] for r in self.action_rows])
+            real_q = np.stack([r[6] for r in self.action_rows])
+
+            ee_pos_diff = np.linalg.norm(sim_ee[:, :3] - real_ee[:, :3], axis=1)  # mm
+            ee_rot_diff_deg = np.linalg.norm(np.rad2deg(sim_ee[:, 3:6] - real_ee[:, 3:6]), axis=1)
+            dee_pos_diff = np.linalg.norm(sim_dee[:, :3] - real_dee[:, :3], axis=1)  # mm
+            dee_rot_diff_deg = np.linalg.norm(np.rad2deg(sim_dee[:, 3:6] - real_dee[:, 3:6]), axis=1)
+            qdiff = np.linalg.norm(sim_q - real_q, axis=1)
+            sim_dpos = np.linalg.norm(sim_dee[:, :3], axis=1)
+            real_dpos = np.linalg.norm(real_dee[:, :3], axis=1)
+
+            lines += [
+                f"\n📐 Action sim-vs-real comparison (recording-rate, N={n})",
+                f"   |ee_pos_sim - ee_pos_real|  mm:  mean={ee_pos_diff.mean():.3f}  p95={np.percentile(ee_pos_diff,95):.3f}  max={ee_pos_diff.max():.3f}",
+                f"   |ee_rot_sim - ee_rot_real|  deg: mean={ee_rot_diff_deg.mean():.3f}  p95={np.percentile(ee_rot_diff_deg,95):.3f}  max={ee_rot_diff_deg.max():.3f}",
+                f"   |Δee_pos sim vs real|       mm:  mean={dee_pos_diff.mean():.3f}  p95={np.percentile(dee_pos_diff,95):.3f}  max={dee_pos_diff.max():.3f}",
+                f"   |Δee_rot sim vs real|       deg: mean={dee_rot_diff_deg.mean():.3f}  p95={np.percentile(dee_rot_diff_deg,95):.3f}  max={dee_rot_diff_deg.max():.3f}",
+                f"   |qpos_sim - qpos_real|      deg: mean={qdiff.mean():.3f}  p95={np.percentile(qdiff,95):.3f}  max={qdiff.max():.3f}",
+                f"   |Δee_pos| step             mm:  sim mean={sim_dpos.mean():.3f}  real mean={real_dpos.mean():.3f}  (real/sim ratio={real_dpos.mean()/(sim_dpos.mean()+1e-9):.2f})",
+                f"   action csv → {act_path}",
+            ]
+        logger.info("\n".join(lines))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -230,7 +398,8 @@ def _dryrun_validate_episode(model, live_data, h: SimHandles,
                               perturb_xyz, perturb_angle_rad, perturb_axis,
                               max_ctrl_steps: int,
                               tolerance_m: float = 0.001,
-                              qpos_path_steps: int = 20):
+                              qpos_path_steps: int = 20,
+                              start_qpos=None):
     """Full sim-only dry-run of one candidate episode. `live_data` is NOT
     mutated — all work happens on a clone. Returns (ok, reason, perturbed_qpos).
 
@@ -259,14 +428,17 @@ def _dryrun_validate_episode(model, live_data, h: SimHandles,
     if _check_tip_occluded(model, sim_a, h, tolerance_m):
         return False, "occluded_at_perturbed", None
 
-    # (b) Joint-linear path check on clone-B (real's actual trajectory)
+    # (b) Joint-linear path check on clone-B (real's actual trajectory).
+    # Source defaults to aligned_qpos but can be overridden (e.g., retreat qpos
+    # when we're skipping the aligned waypoint between episodes).
     sim_b = _clone_state(model, live_data)
+    path_start = aligned_qpos if start_qpos is None else np.asarray(start_qpos, dtype=np.float64)
     ok, reason = _check_qpos_path_safe(
-        model, sim_b, h, aligned_qpos, perturbed_qpos,
+        model, sim_b, h, path_start, perturbed_qpos,
         n_steps=qpos_path_steps, tolerance_m=tolerance_m,
     )
     if not ok:
-        return False, f"path_aligned→perturbed_{reason}", None
+        return False, f"path_start→perturbed_{reason}", None
 
     # (c) Fine-align dry-run continues from sim_a (already at perturbed)
     ok, reason = _dryrun_fine_align(
@@ -444,8 +616,15 @@ def _move_to_perturbed_sim(model, data, h: SimHandles, goal_tip, goal_back,
 # ─────────────────────────────────────────────────────────────────────────────
 def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecorder,
                            cfg, h: SimHandles, ep_idx: int, rng: np.random.Generator,
-                           aligned_qpos, aligned_qvel, p_entry, p_depth, needle_len) -> bool:
-    """One sim-driven, real-recorded fine-alignment episode."""
+                           aligned_qpos, aligned_qvel, p_entry, p_depth, needle_len,
+                           path_anchor_qpos=None) -> bool:
+    """One sim-driven, real-recorded fine-alignment episode.
+
+    `path_anchor_qpos`: where the real robot is currently parked (rad, 6).
+    Used as the source for the joint-linear safety path check
+    (real_robot_now → perturbed). When None, defaults to aligned_qpos
+    (legacy behavior — assumes robot is at aligned).
+    """
 
     # ② Reset sim to aligned state
     mujoco.mj_resetData(model, data)
@@ -485,6 +664,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
                 max_ctrl_steps=cfg.max_steps,
                 tolerance_m=cfg.occlusion_tol_m,
                 qpos_path_steps=cfg.qpos_path_steps,
+                start_qpos=path_anchor_qpos,
             )
             if ok:
                 perturb_xyz, perturb_angle_rad, perturb_axis = xyz, ang, ax
@@ -582,11 +762,16 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         mujoco.mj_step(model, data)
         step_count += 1
 
-        # High-rate joint streaming for smooth Mecademic blending (joint mode only).
-        # Recording rate (7.46 Hz) stays unchanged below; only the joint command rate
-        # is decoupled and raised so consecutive MoveJoints chain without stop-start.
-        if cfg.mirror_mode == "joint" and step_count % cfg.stream_every == 0:
-            env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
+        # High-rate joint streaming for smooth Mecademic blending. Recording rate
+        # (7.46 Hz) stays unchanged below; only the joint command rate is decoupled
+        # and raised so consecutive MoveJoints chain without stop-start.
+        if step_count % cfg.stream_every == 0:
+            qcmd_deg = np.rad2deg(data.qpos[:6].copy())
+            q_sent = env.stream_joints(qcmd_deg)
+            if cfg.diag is not None:
+                # Log the post-EMA value (what was actually sent to the robot).
+                cfg.diag.log(env.robot, q_sent if q_sent is not None else qcmd_deg,
+                             phase_label="align")
             time.sleep(cfg.stream_dt)
 
         if step_count % 67 == 0:
@@ -599,10 +784,6 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             if pos_mag > ACTION_CLIP_MM:
                 sim_delta_ee[:3] *= ACTION_CLIP_MM / pos_mag
 
-            # Cartesian mode drives real here (joint mode already streamed above).
-            if cfg.mirror_mode == "cartesian":
-                env.stream_cartesian_delta(sim_delta_ee)
-                time.sleep(cfg.control_dt)
 
             real_frames = env.render_frames()
             real_state = env.read_state()
@@ -630,12 +811,8 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             keypoints_visibility = np.array([tip_visible, trocar_visible], dtype=np.float32)
 
             frames_for_recorder = {
-                "top_camera": real_frames["top_camera"],
-                "tool_camera": real_frames["tool_camera"],
-                "side_camera": real_frames["side_camera"],
+                cam: real_frames[cam] for cam in cfg.record_cameras if cam in real_frames
             }
-            if cfg.skip_side_camera:
-                frames_for_recorder.pop("side_camera", None)
 
             recorder.add(
                 frames_for_recorder,
@@ -651,6 +828,14 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
                 keypoints_visibility=keypoints_visibility,
                 instruction=TASK_INSTRUCTION,
             )
+            if cfg.diag is not None:
+                cfg.diag.log_action(
+                    sim_ee=sim_ee_pose_mm, real_ee=real_ee,
+                    sim_dee=sim_delta_ee, real_dee=real_delta_ee,
+                    sim_qpos_deg=np.rad2deg(data.qpos[:6]),
+                    real_qpos_deg=real_qpos_deg,
+                    phase_label="align",
+                )
             last_ee_pose_sim = sim_ee_pose_mm.copy()
             last_real_ee = real_ee.copy()
 
@@ -660,7 +845,7 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
                     disp = _build_display_frame(
                         real_frames, ctrl_step, cfg.max_steps, 1,
                         sim_delta_ee[:3], np.rad2deg(sim_delta_ee[3:6]),
-                        cfg.mirror_mode, env.dry_run,
+                        env.dry_run,
                     )
                     cv2.imshow("Real Collect Align (top | tool) — 'q' abort", disp)
                     if (cv2.waitKey(1) & 0xFF) == ord('q'):
@@ -710,8 +895,12 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         for inner_i in range(1, 68):
             _solve_ik_step(model, data, h, goal_tip, goal_back, 0.5)
             mujoco.mj_step(model, data)
-            if cfg.mirror_mode == "joint" and inner_i % cfg.stream_every == 0:
-                env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
+            if inner_i % cfg.stream_every == 0:
+                qcmd_deg = np.rad2deg(data.qpos[:6].copy())
+                q_sent = env.stream_joints(qcmd_deg)
+                if cfg.diag is not None:
+                    cfg.diag.log(env.robot, q_sent if q_sent is not None else qcmd_deg,
+                                 phase_label="hold")
                 time.sleep(cfg.stream_dt)
 
         # Sensor + sim state
@@ -731,11 +920,6 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         if pos_mag > ACTION_CLIP_MM:
             sim_delta_ee[:3] *= ACTION_CLIP_MM / pos_mag
 
-        # Cartesian mode drives real here (joint mode streamed inside the inner
-        # 67-step loop above). Sim is essentially still at aligned, so deltas tiny.
-        if cfg.mirror_mode == "cartesian":
-            env.stream_cartesian_delta(sim_delta_ee)
-            time.sleep(cfg.control_dt)
 
         real_frames = env.render_frames()
         real_state = env.read_state()
@@ -762,12 +946,8 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         keypoints_visibility = np.array([tip_visible, trocar_visible], dtype=np.float32)
 
         frames_for_recorder = {
-            "top_camera": real_frames["top_camera"],
-            "tool_camera": real_frames["tool_camera"],
-            "side_camera": real_frames["side_camera"],
+            cam: real_frames[cam] for cam in cfg.record_cameras if cam in real_frames
         }
-        if cfg.skip_side_camera:
-            frames_for_recorder.pop("side_camera", None)
 
         recorder.add(
             frames_for_recorder,
@@ -783,6 +963,14 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             keypoints_visibility=keypoints_visibility,
             instruction=TASK_INSTRUCTION,
         )
+        if cfg.diag is not None:
+            cfg.diag.log_action(
+                sim_ee=sim_ee_pose_mm, real_ee=real_ee,
+                sim_dee=sim_delta_ee, real_dee=real_delta_ee,
+                sim_qpos_deg=np.rad2deg(data.qpos[:6]),
+                real_qpos_deg=real_qpos_deg,
+                phase_label="hold",
+            )
         last_ee_pose_sim = sim_ee_pose_mm.copy()
         last_real_ee = real_ee.copy()
 
@@ -814,22 +1002,22 @@ def _parse_args():
                     help="Swap camera1↔camera2 → top/tool mapping")
     ap.add_argument("--max-steps", type=int, default=MAX_CTRL_STEPS,
                     help=f"Max recording ctrl frames before discard (default: {MAX_CTRL_STEPS})")
-    ap.add_argument("--mirror-mode", choices=["joint", "cartesian"], default="joint")
-    ap.add_argument("--control-dt", type=float, default=0.134,
-                    help="Wall-time per recorded frame (~67 mj_steps × 0.002s). "
-                         "Used by cartesian mode only; joint mode paces via --stream-rate-hz.")
     ap.add_argument("--stream-rate-hz", type=float, default=15.0,
-                    help="Joint-mode streaming rate to the robot (Hz). 15 Hz empirically "
+                    help="Joint streaming rate to the robot (Hz). 15 Hz empirically "
                          "minimizes wrist-camera jitter (motion duration ≈ command interval). "
                          "Recording rate stays 7.46 Hz regardless.")
-    ap.add_argument("--joint-vel-limit", type=float, default=50.0,
-                    help="Mecademic SetJointVelLimit (deg/s).")
-    ap.add_argument("--cart-lin-vel", type=float, default=50.0,
-                    help="Mecademic SetCartLinVel (mm/s). Cartesian-mode only.")
+    ap.add_argument("--joint-vel-limit", type=float, default=25.0,
+                    help="Mecademic SetJointVelLimit (deg/s). Caps initial HOME→aligned and "
+                         "inter-episode retreat→perturbed moves; live streaming during episodes "
+                         "is paced by --stream-rate-hz independently.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip robot connect; sim+OAK only")
-    ap.add_argument("--skip-side-camera", action="store_true",
-                    help="Don't record side_camera (real has only 2 cams)")
+    ap.add_argument("--cameras", nargs="+", default=["tool_camera"],
+                    choices=["top_camera", "tool_camera", "side_camera"],
+                    help="Cameras to record into HDF5 (default: tool_camera only for align phase)")
+    ap.add_argument("--no-return-home", dest="return_home",
+                    action="store_false", default=True,
+                    help="Skip the final MoveJoints(HOME) at shutdown")
     ap.add_argument("--no-display", action="store_true",
                     help="Disable cv2.imshow live preview (auto-on if $DISPLAY unset)")
     ap.add_argument("--seed", type=int, default=None)
@@ -847,7 +1035,16 @@ def _parse_args():
     ap.add_argument("--qpos-path-steps", type=int, default=20,
                     help="Number of intermediate samples along the joint-linear path "
                          "real takes from aligned→perturbed (Mecademic MoveJoints).")
-    ap.add_argument("--inter-episode-retreat-mm", type=float, default=30.0,
+    ap.add_argument("--ema-alpha", type=float, default=0.0,
+                    help="EMA low-pass alpha on streamed qpos commands (0=off, "
+                         "smaller=more smoothing, typical 0.2-0.5). Mitigates "
+                         "sim IK noise propagating to motors.")
+    ap.add_argument("--diagnose-jitter", action="store_true",
+                    help="Per-stream-tick log of (t, qpos_cmd, qpos_real, ee_real). "
+                         "Writes CSV per episode + console summary.")
+    ap.add_argument("--diagnose-out", type=str, default=None,
+                    help="Output dir for jitter CSVs (default: <save-dir>/jitter_diag)")
+    ap.add_argument("--inter-episode-retreat-mm", type=float, default=50.0,
                     help="Between episodes, retract the needle by this many mm beyond "
                          "RETREAT_MM along the trocar axis, then go to HOME, then back "
                          "to ALIGN before the next episode. Avoids continuous joint-space "
@@ -880,8 +1077,10 @@ def main():
         swap_cameras=args.swap_cameras,
         dry_run=args.dry_run,
         joint_vel_limit_deg_s=float(args.joint_vel_limit),
-        cart_lin_vel_mm_s=float(args.cart_lin_vel),
+        ema_alpha=float(args.ema_alpha),
     )
+    if args.ema_alpha > 0.0:
+        logger.info(f"🎚  EMA low-pass ON (alpha={args.ema_alpha})")
 
     # Recorder
     recorder = SimRecorder(str(save_dir))
@@ -891,9 +1090,7 @@ def main():
     cfg = _Cfg()
     cfg.phantom_pos = tuple(args.phantom_pos)
     cfg.phantom_rot = args.phantom_rot
-    cfg.mirror_mode = args.mirror_mode
-    cfg.control_dt = float(args.control_dt)
-    # Joint-mode high-rate streaming (Mecademic motion blending stays continuous).
+    # High-rate joint streaming (Mecademic motion blending stays continuous).
     sim_dt = 0.002
     target_dt = 1.0 / max(1e-3, float(args.stream_rate_hz))
     cfg.stream_every = max(1, int(round(target_dt / sim_dt)))
@@ -903,7 +1100,8 @@ def main():
         f"{1.0/cfg.stream_dt:.1f} Hz (pace {cfg.stream_dt*1000:.1f} ms/tick)"
     )
     cfg.max_steps = int(args.max_steps)
-    cfg.skip_side_camera = bool(args.skip_side_camera)
+    cfg.record_cameras = list(args.cameras)
+    logger.info(f"📸 Recording cameras: {cfg.record_cameras}")
     cfg.show_preview = not (args.no_display or not os.environ.get("DISPLAY"))
     # Safety knobs (sim dry-run validation)
     cfg.skip_safety_validation = bool(args.no_safety_validation)
@@ -911,6 +1109,12 @@ def main():
     cfg.occlusion_tol_m = float(args.occlusion_tolerance_mm) / 1000.0
     cfg.qpos_path_steps = int(args.qpos_path_steps)
     cfg.inter_episode_retreat_mm = float(args.inter_episode_retreat_mm)
+    if args.diagnose_jitter:
+        diag_dir = pathlib.Path(args.diagnose_out) if args.diagnose_out else (save_dir / "jitter_diag")
+        cfg.diag = JitterDiag(diag_dir, dry_run=args.dry_run)
+        logger.info(f"🔬 Jitter diagnostics ON → {diag_dir}")
+    else:
+        cfg.diag = None
     if cfg.skip_safety_validation:
         logger.warning("⚠️  Safety validation DISABLED — needle may collide with phantom on real robot.")
     else:
@@ -980,25 +1184,38 @@ def main():
         home_deg = list(HOME_JOINTS)
 
         # ② Per-episode loop
+        # Anchor = qpos the real robot is currently parked at; used for
+        # joint-linear safety validation. ep1 starts at aligned (we just sent
+        # robot there above). After ep1, robot ends each episode at aligned
+        # post-fine-align, then we retreat → next perturbed directly (skip
+        # the redundant aligned re-visit).
+        current_anchor_rad = aligned_qpos.copy()
         for ep in range(1, args.num_episodes + 1):
             logger.info("\n" + "=" * 60 + f"\n▶ Align Episode {ep}/{args.num_episodes}\n" + "=" * 60)
+            if cfg.diag is not None:
+                cfg.diag.begin_episode(ep, label=f"align ep{ep}")
             ok = run_collection_episode(
                 model, data, env, recorder, cfg, h, ep, rng,
                 aligned_qpos, aligned_qvel, p_entry, p_depth, needle_len,
+                path_anchor_qpos=current_anchor_rad,
             )
+            if cfg.diag is not None:
+                cfg.diag.finalize()
             if ok:
                 n_ok += 1
 
-            # Inter-episode safety: retreat → HOME → re-approach aligned for next ep.
-            # Skip the re-approach after the very last episode (just retreat → HOME
-            # for a clean shutdown state).
+            # Post-episode: robot is at aligned (fine-align endpoint). Retreat
+            # along axis for inter-episode safety. Next episode goes
+            # retreat → next perturbed directly (no aligned re-visit).
             if retreated_deg is not None:
-                logger.info("↩️  Inter-episode safety: retreat along axis → HOME")
-                env.reset_to_joints(retreated_deg)
-                env.reset_to_joints(home_deg)
                 if ep < args.num_episodes:
-                    logger.info("🤖 Re-approach: HOME → ALIGN for next episode")
-                    env.reset_to_joints(aligned_deg)
+                    logger.info("↩️  Inter-episode retreat along axis (next ep starts from retreat)")
+                else:
+                    logger.info("↩️  Final retreat along axis (shutdown prep)")
+                env.reset_to_joints(retreated_deg)
+                current_anchor_rad = retreated_qpos.copy()
+            else:
+                current_anchor_rad = aligned_qpos.copy()
     except KeyboardInterrupt:
         logger.warning("\n🛑 KeyboardInterrupt — finishing pending saves and shutting down")
     finally:
@@ -1007,6 +1224,13 @@ def main():
         except Exception:
             pass
         recorder.wait_for_all()
+        if args.return_home and env.robot is not None and not args.dry_run:
+            try:
+                logger.info(f"🏠 Returning to HOME {HOME_JOINTS} before disconnect…")
+                env.robot.MoveJoints(*[float(j) for j in HOME_JOINTS])
+                env.robot.WaitIdle()
+            except Exception as e:
+                logger.warning(f"Return-home failed: {e}")
         env.close()
         logger.info(f"\n✅ Done. {n_ok}/{args.num_episodes} episodes saved to {save_dir}")
 

@@ -79,7 +79,7 @@ FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 40.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MIN_MM = -20.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
+PERTURB_POS_Z_MIN_MM = -10.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
 PERTURB_POS_Z_MAX_MM = 20.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
 

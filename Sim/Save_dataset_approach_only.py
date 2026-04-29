@@ -66,7 +66,7 @@ INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 1.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 MAX_CTRL_STEPS = 500        # 녹화 control step 상한 (초과 시 에피소드 폐기)
-HOLD_STEPS = 50             # 도달 후 hold 프레임 수 (control steps, action≈0 기록)
+HOLD_STEPS = 25             # 도달 후 hold 프레임 수 (control steps, action≈0 기록)
 RETREAT_MM = 10.0           # goal_tip을 trocar entry에서 뒤로 빼는 거리 (mm) — align과 동일
 WARMUP_STEPS = 500          # 녹화 전 J6 settling 대기 (sim steps, 67 control step ≈ 7 control frames)
 
