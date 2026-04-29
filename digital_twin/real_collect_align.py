@@ -309,6 +309,13 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         mujoco.mj_step(model, data)
         step_count += 1
 
+        # High-rate joint streaming for smooth Mecademic blending (joint mode only).
+        # Recording rate (7.46 Hz) stays unchanged below; only the joint command rate
+        # is decoupled and raised so consecutive MoveJoints chain without stop-start.
+        if cfg.mirror_mode == "joint" and step_count % cfg.stream_every == 0:
+            env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
+            time.sleep(cfg.stream_dt)
+
         if step_count % 67 == 0:
             ctrl_step += 1
 
@@ -319,13 +326,10 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             if pos_mag > ACTION_CLIP_MM:
                 sim_delta_ee[:3] *= ACTION_CLIP_MM / pos_mag
 
-            # Drive real (joint mirror or cartesian)
-            if cfg.mirror_mode == "joint":
-                env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
-            else:
+            # Cartesian mode drives real here (joint mode already streamed above).
+            if cfg.mirror_mode == "cartesian":
                 env.stream_cartesian_delta(sim_delta_ee)
-
-            time.sleep(cfg.control_dt)
+                time.sleep(cfg.control_dt)
 
             real_frames = env.render_frames()
             real_state = env.read_state()
@@ -427,10 +431,15 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
 
     # ⑤ Recording — Hold
     for hold_step in range(HOLD_RECORD_STEPS):
-        # Run 67 sim steps holding the aligned target
-        for _ in range(67):
+        # Run 67 sim steps holding the aligned target. In joint mode, stream qpos
+        # at high rate inside this inner loop so the robot stays continuously fed
+        # (queue active) instead of going idle between recording boundaries.
+        for inner_i in range(1, 68):
             _solve_ik_step(model, data, h, goal_tip, goal_back, 0.5)
             mujoco.mj_step(model, data)
+            if cfg.mirror_mode == "joint" and inner_i % cfg.stream_every == 0:
+                env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
+                time.sleep(cfg.stream_dt)
 
         # Sensor + sim state
         curr_tip = data.site_xpos[h.tip_id].copy()
@@ -449,13 +458,11 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         if pos_mag > ACTION_CLIP_MM:
             sim_delta_ee[:3] *= ACTION_CLIP_MM / pos_mag
 
-        # Drive real (sim is essentially still at aligned, so deltas are tiny)
-        if cfg.mirror_mode == "joint":
-            env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
-        else:
+        # Cartesian mode drives real here (joint mode streamed inside the inner
+        # 67-step loop above). Sim is essentially still at aligned, so deltas tiny.
+        if cfg.mirror_mode == "cartesian":
             env.stream_cartesian_delta(sim_delta_ee)
-
-        time.sleep(cfg.control_dt)
+            time.sleep(cfg.control_dt)
 
         real_frames = env.render_frames()
         real_state = env.read_state()
@@ -536,7 +543,11 @@ def _parse_args():
                     help=f"Max recording ctrl frames before discard (default: {MAX_CTRL_STEPS})")
     ap.add_argument("--mirror-mode", choices=["joint", "cartesian"], default="joint")
     ap.add_argument("--control-dt", type=float, default=0.134,
-                    help="Wall-time per recorded frame (~67 mj_steps × 0.002s)")
+                    help="Wall-time per recorded frame (~67 mj_steps × 0.002s). "
+                         "Used by cartesian mode only; joint mode paces via --stream-rate-hz.")
+    ap.add_argument("--stream-rate-hz", type=float, default=50.0,
+                    help="Joint-mode streaming rate to the robot (Hz). Higher → smoother "
+                         "Mecademic blending. Recording rate stays 7.46 Hz regardless.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip robot connect; sim+OAK only")
     ap.add_argument("--skip-side-camera", action="store_true",
@@ -583,6 +594,15 @@ def main():
     cfg.phantom_rot = args.phantom_rot
     cfg.mirror_mode = args.mirror_mode
     cfg.control_dt = float(args.control_dt)
+    # Joint-mode high-rate streaming (Mecademic motion blending stays continuous).
+    sim_dt = 0.002
+    target_dt = 1.0 / max(1e-3, float(args.stream_rate_hz))
+    cfg.stream_every = max(1, int(round(target_dt / sim_dt)))
+    cfg.stream_dt = cfg.stream_every * sim_dt
+    logger.info(
+        f"⚙️  Joint streaming: every {cfg.stream_every} sim-steps → "
+        f"{1.0/cfg.stream_dt:.1f} Hz (pace {cfg.stream_dt*1000:.1f} ms/tick)"
+    )
     cfg.max_steps = int(args.max_steps)
     cfg.skip_side_camera = bool(args.skip_side_camera)
     cfg.show_preview = not (args.no_display or not os.environ.get("DISPLAY"))
