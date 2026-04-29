@@ -123,8 +123,12 @@ class RealCollectEnv:
                 # downstream if 7.5 Hz frame rate produces visible lag.
                 self.robot.SetJointVelLimit(joint_vel_limit_deg_s)
                 self.robot.SetCartLinVel(cart_lin_vel_mm_s)
+                # Maximum motion blending so consecutive MoveJoints chain smoothly
+                # instead of decel-stop-accel between waypoints (the cause of
+                # observed jitter when streaming at low rates).
+                self.robot.SetBlending(100)
             except Exception as e:
-                logger.warning(f"SetJointVelLimit/SetCartLinVel failed (non-fatal): {e}")
+                logger.warning(f"SetJointVelLimit/SetCartLinVel/SetBlending failed (non-fatal): {e}")
             self.robot.MoveJoints(*HOME_JOINTS)
             self.robot.WaitIdle()
             logger.info(f"🏠 Home joints {HOME_JOINTS} reached")
@@ -552,6 +556,15 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
         mujoco.mj_step(model, data)
         step_count += 1
 
+        # ─── 4b. High-rate joint streaming (joint mode only) ─────────────
+        # Stream sim qpos to the robot every `cfg.stream_every` sim steps
+        # (default 50 Hz) so Mecademic's motion blending can chain MoveJoints
+        # commands continuously. Recording frame rate (7.46 Hz) is unchanged
+        # — only the joint command rate is decoupled and raised.
+        if cfg.mirror_mode == "joint" and step_count % cfg.stream_every == 0:
+            env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
+            time.sleep(cfg.stream_dt)
+
         # ─── 5. Recording frame (every 67 sim steps) ─────────────────────
         if step_count % 67 == 0:
             ctrl_step += 1
@@ -564,14 +577,11 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
             if pos_mag > ACTION_CLIP_MM:
                 sim_delta_ee[:3] *= ACTION_CLIP_MM / pos_mag
 
-            # 5a. Drive real
-            if cfg.mirror_mode == "joint":
-                env.stream_joints(np.rad2deg(data.qpos[:6].copy()))
-            else:
+            # 5a. Cartesian mode drives real here (joint mode already streamed
+            # above at high rate; recording boundary is just for capture).
+            if cfg.mirror_mode == "cartesian":
                 env.stream_cartesian_delta(sim_delta_ee)
-
-            # 5b. Wall-time matched to sim (67 mj_step ≈ 0.134 s with default timestep)
-            time.sleep(cfg.control_dt)
+                time.sleep(cfg.control_dt)
 
             # 5c. Capture real frames + real state (post-motion)
             real_frames = env.render_frames()
@@ -705,7 +715,11 @@ def _parse_args():
                     help="Frames to record at hold (post-approach)")
     ap.add_argument("--mirror-mode", choices=["joint", "cartesian"], default="joint")
     ap.add_argument("--control-dt", type=float, default=0.134,
-                    help="Wall-time per recorded frame (~67 mj_steps × 0.002s)")
+                    help="Wall-time per recorded frame (~67 mj_steps × 0.002s). "
+                         "Used by cartesian mode only; joint mode paces via --stream-rate-hz.")
+    ap.add_argument("--stream-rate-hz", type=float, default=50.0,
+                    help="Joint-mode streaming rate to the robot (Hz). Higher → smoother "
+                         "Mecademic blending. Recording rate stays 7.46 Hz regardless.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip robot connect; sim+OAK only")
     ap.add_argument("--skip-side-camera", action="store_true",
@@ -752,6 +766,16 @@ def main():
     cfg.phantom_rot = args.phantom_rot
     cfg.mirror_mode = args.mirror_mode
     cfg.control_dt = float(args.control_dt)
+    # Joint-mode high-rate streaming: derive stream_every (sim steps) and
+    # stream_dt (wall-time pacing per stream tick) from the requested rate.
+    sim_dt = 0.002  # MuJoCo default timestep used by meca_add.xml
+    target_dt = 1.0 / max(1e-3, float(args.stream_rate_hz))
+    cfg.stream_every = max(1, int(round(target_dt / sim_dt)))
+    cfg.stream_dt = cfg.stream_every * sim_dt
+    logger.info(
+        f"⚙️  Joint streaming: every {cfg.stream_every} sim-steps → "
+        f"{1.0/cfg.stream_dt:.1f} Hz (pace {cfg.stream_dt*1000:.1f} ms/tick)"
+    )
     cfg.randomize_home = bool(args.randomize_home)
     cfg.max_steps = int(args.max_steps)
     cfg.hold_steps = int(args.hold_steps)
