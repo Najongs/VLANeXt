@@ -25,7 +25,7 @@ import pygame
 import depthai as dai
 import mecademicpy.robot as mdr
 import mecademicpy.robot_initializer as initializer
-from lerobot.utils.utils import init_logging
+# from lerobot.utils.utils import init_logging
 
 # --- Configuration ---
 ROBOT_ADDRESS = "192.168.0.100"
@@ -42,7 +42,7 @@ DEADZONE = 0.2    # 노이즈 제거
 # 초기 위치 (Safe Start Pose)
 HOME_JOINTS = (30, -20, 20, 0, 30, 60)
 
-init_logging()
+# init_logging()
 logger = logging.getLogger(__name__)
 
 # ============================================================

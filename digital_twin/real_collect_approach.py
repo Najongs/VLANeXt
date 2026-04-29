@@ -22,6 +22,19 @@ The `needle_tip_pos`, `trocar_entry_pos`, `keypoints_wrist`, `keypoints_visibili
 real cannot observe these directly. This keeps the HDF5 100% drop-in compatible
 with `src/datasets/sim_act_approach.py` for sim+real merged training.
 
+  실 로봇 첫 실행 권장 절차:                     
+                                                                                                                            
+  # 1) Sim+OAK만 (real 미연결 / dry-run)                                                                                                                                   
+  bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 \                                                                                                                  
+      --dry-run --num-episodes 1                                                                                                                                           
+                                                                                                                                                                           
+  # 2) 실 로봇 라이브 1 에피소드 — 첫 큰 이동(HOME→aligned) collision-free 시각 확인                                                                                       
+  bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 --num-episodes 1                                                                                                   
+                                                                                                                                                                           
+  # 3) 본격 수집                                                                                                                                                           
+  bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 --num-episodes 50 \                                                                                                
+      --save-dir /data/public/NAS/VLANeXt/dataset/real_align/run_0429 --seed 42 
+
 Usage
 -----
     bash Run_Collect_Real_Approach.sh --num-episodes 10 --phantom-pos 0.0 -0.4

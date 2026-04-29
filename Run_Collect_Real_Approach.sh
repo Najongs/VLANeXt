@@ -6,27 +6,27 @@
 #
 # Usage:
 #   bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 -0.4 [extra_flags...]
-#
+
 # Examples:
 #   # Dry-run (no robot motion — recommended first):
-#   bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 -0.4 \
-#       --dry-run --num-episodes 1 --max-steps 30
-#
-#   # Live, joint-space mirror, 10 episodes:
-#   bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 -0.4 --num-episodes 10
-#
-#   # Cartesian-delta mirror (alternative; compare against joint mode):
-#   bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 -0.4 \
-#       --num-episodes 5 --mirror-mode cartesian
-#
-#   # Camera order swap if camera1/2 came up flipped:
-#   bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 -0.4 --swap-cameras
-#
+#   bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 0.0 --dry-run --num-episodes 1 --max-steps 30
+#       
+
+# # Live, joint-space mirror, 10 episodes:
+# bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 0.0 --num-episodes 10
+
+# # Cartesian-delta mirror (alternative; compare against joint mode):
+# bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 0.0 --num-episodes 5 --mirror-mode cartesian
+
+# # Camera order swap if camera1/2 came up flipped:
+# bash Run_Collect_Real_Approach.sh --phantom-pos 0.0 -0.4 --swap-cameras
+
 # Notes:
-#   - --phantom-pos is REQUIRED (real phantom XY in robot base frame, meters).
-#     CALIBRATE for your physical setup; defaults below are placeholders.
-#   - Press 'q' on the OAK display window to abort the current episode.
-#   - Ctrl-C also stops cleanly (deactivates + disconnects robot).
+# - --phantom-pos is REQUIRED (real phantom XY in robot base frame, meters).
+# CALIBRATE for your physical setup; defaults below are placeholders.
+# - Press 'q' on the OAK display window to abort the current episode.
+# - Ctrl-C also stops cleanly (deactivates + disconnects robot).
+
 
 EXTRA_ARGS=("$@")
 
