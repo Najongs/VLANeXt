@@ -42,6 +42,7 @@ import logging
 import pathlib
 
 import numpy as np
+import cv2
 import mujoco
 import mecademicpy.robot as mdr
 
@@ -61,7 +62,11 @@ from digital_twin.real_collect_approach import (  # noqa: E402
     _set_phantom,
 )
 from digital_twin.real_collect_align import _pre_align_sim  # noqa: E402
-from digital_twin.real_eval_approach import ROBOT_ADDRESS_DEFAULT, HOME_JOINTS  # noqa: E402
+from digital_twin.real_eval_approach import (  # noqa: E402
+    ROBOT_ADDRESS_DEFAULT,
+    HOME_JOINTS,
+    OAKCameraManager,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -113,13 +118,62 @@ def _solve_insertion_qpos(model, data, h: SimHandles, p_entry, p_depth, needle_l
     return data.qpos[: h.n_motors].copy()
 
 
-def _move_robot_to(robot, joints_deg, label: str, pause_sec: float):
+def _display_frames(cam_mgr, status: str = ""):
+    """Render available OAK frames side-by-side into a single window."""
+    if cam_mgr is None:
+        return
+    try:
+        frames = cam_mgr.get_frames()
+    except Exception:
+        return
+    if not frames:
+        return
+    keys = sorted(frames.keys())
+    imgs = []
+    for k in keys:
+        img = frames[k]
+        if img is None:
+            continue
+        img = img.copy()
+        cv2.putText(img, k, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if status:
+            cv2.putText(img, status, (10, img.shape[0] - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        imgs.append(img)
+    if not imgs:
+        return
+    disp = np.hstack(imgs) if len(imgs) > 1 else imgs[0]
+    cv2.imshow("OAK Live Preview ('q' to skip waits)", disp)
+    cv2.waitKey(1)
+
+
+def _wait_idle_with_display(robot, cam_mgr, status: str, poll_sec: float = 0.05):
+    """WaitIdle while pumping camera frames. Mecademic's WaitIdle(timeout)
+    raises on timeout — we use that as a polling beat."""
+    while True:
+        try:
+            robot.WaitIdle(timeout=poll_sec)
+            return
+        except Exception:
+            pass
+        _display_frames(cam_mgr, status)
+
+
+def _hold_with_display(cam_mgr, status: str, hold_sec: float, poll_sec: float = 0.03):
+    """Sleep for `hold_sec` while continuously displaying camera frames."""
+    t_end = time.time() + hold_sec
+    while time.time() < t_end:
+        _display_frames(cam_mgr, status)
+        time.sleep(poll_sec)
+
+
+def _move_robot_to(robot, cam_mgr, joints_deg, label: str, pause_sec: float):
     rounded = [round(float(j), 2) for j in joints_deg]
     logger.info(f"🤖 → {label}: MoveJoints {rounded}")
     robot.MoveJoints(*[float(j) for j in joints_deg])
-    robot.WaitIdle()
+    _wait_idle_with_display(robot, cam_mgr, status=f"Moving → {label}")
     logger.info(f"   ✅ {label} reached. Holding {pause_sec:.1f}s for visual check…")
-    time.sleep(pause_sec)
+    _hold_with_display(cam_mgr, status=f"HOLD: {label}", hold_sec=pause_sec)
 
 
 def _parse_args():
@@ -146,6 +200,8 @@ def _parse_args():
                     help="Sim only — print solved qpos, do not move robot")
     ap.add_argument("--return-home", action="store_true",
                     help="MoveJoints HOME at end before disconnect")
+    ap.add_argument("--no-camera", action="store_true",
+                    help="Skip OAK camera init / live preview window")
     return ap.parse_args()
 
 
@@ -191,6 +247,20 @@ def main():
         logger.info("🟡 DRY-RUN done — no robot motion.")
         return
 
+    # ── Camera init (live preview during motion + holds) ────────────────────
+    cam_mgr = None
+    if not args.no_camera:
+        try:
+            cam_mgr = OAKCameraManager(width=640, height=480)
+            n_cams = cam_mgr.initialize_cameras()
+            logger.info(f"📷 OAK cameras initialized ({n_cams})")
+            for _ in range(10):
+                cam_mgr.get_frames()
+                time.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Camera init failed: {e}; continuing without preview")
+            cam_mgr = None
+
     # ── Real robot motion ───────────────────────────────────────────────────
     robot = mdr.Robot()
     logger.info(f"🔌 Connecting Meca500 @ {args.robot_address}…")
@@ -209,28 +279,28 @@ def main():
 
         logger.info(f"🏠 MoveJoints HOME = {HOME_JOINTS}")
         robot.MoveJoints(*HOME_JOINTS)
-        robot.WaitIdle()
+        _wait_idle_with_display(robot, cam_mgr, status="Moving → HOME")
         time.sleep(0.5)
 
         # ALIGN is always traversed — it's the safe gateway between HOME and the
         # phantom (going HOME → INSERTION directly would drive the needle into
         # the phantom from an unsafe angle). Pause only when user requested it.
         align_pause = args.pause_sec if args.phase in ("align", "both") else 0.0
-        _move_robot_to(robot, align_deg, "ALIGN final", align_pause)
+        _move_robot_to(robot, cam_mgr, align_deg, "ALIGN final", align_pause)
 
         if args.phase in ("insertion", "both") and insertion_deg is not None:
-            _move_robot_to(robot, insertion_deg, "INSERTION final", args.pause_sec)
+            _move_robot_to(robot, cam_mgr, insertion_deg, "INSERTION final", args.pause_sec)
             # Retract along trocar axis: insertion → align (reverse the path the
             # needle just took). HOME from inside the phantom would yank the
             # needle out at an angle — must un-insert first.
             logger.info("↩️  Retracting needle along trocar axis (insertion → align)…")
             robot.MoveJoints(*[float(j) for j in align_deg])
-            robot.WaitIdle()
+            _wait_idle_with_display(robot, cam_mgr, status="Retracting → ALIGN")
 
         if args.return_home:
             logger.info("🏠 Returning to HOME…")
             robot.MoveJoints(*HOME_JOINTS)
-            robot.WaitIdle()
+            _wait_idle_with_display(robot, cam_mgr, status="Moving → HOME")
 
     except KeyboardInterrupt:
         logger.warning("\n🛑 KeyboardInterrupt — stopping")
@@ -241,6 +311,15 @@ def main():
             pass
         try:
             robot.Disconnect()
+        except Exception:
+            pass
+        if cam_mgr is not None:
+            try:
+                cam_mgr.close()
+            except Exception:
+                pass
+        try:
+            cv2.destroyAllWindows()
         except Exception:
             pass
         logger.info("✅ Done.")

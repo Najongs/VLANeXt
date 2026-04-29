@@ -342,6 +342,46 @@ def _pre_align_sim(model, data, h: SimHandles, ik_speed=0.5) -> tuple:
     )
 
 
+def _solve_retreat_qpos(model, data, h: SimHandles, p_entry, p_depth, needle_len,
+                         extra_retreat_mm: float, ik_speed: float = 0.5):
+    """Solve qpos with needle tip retreated by (RETREAT_MM + extra_retreat_mm)
+    from trocar entry along the trocar axis. Used as inter-episode safe
+    waypoint — pulls the needle further from the phantom before traveling to
+    HOME, so consecutive-episode joint-space transitions can't graze the
+    phantom. Mirrors `_pre_align_sim`'s smooth-IK loop.
+
+    `data` must currently be at the aligned pose. Mutates `data` (caller
+    should pass a clone if needed)."""
+    axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
+    total_retreat_m = (RETREAT_MM + float(extra_retreat_mm)) / 1000.0
+    goal_tip = p_entry - axis_dir * total_retreat_m
+    goal_back = p_entry - axis_dir * (total_retreat_m + needle_len)
+
+    start_tip = data.site_xpos[h.tip_id].copy()
+    start_back = data.site_xpos[h.back_id].copy()
+    dist = float(np.linalg.norm(goal_tip - start_tip))
+    duration = max(dist / ALIGN_SPEED, 1e-3)
+    t0 = data.time
+    align_timer = 0
+    while True:
+        progress = smooth_step((data.time - t0) / duration)
+        target_tip = (1 - progress) * start_tip + progress * goal_tip
+        target_back = (1 - progress) * start_back + progress * goal_back
+        _solve_ik_step(model, data, h, target_tip, target_back, ik_speed)
+        mujoco.mj_step(model, data)
+        if progress >= 1.0:
+            curr_tip = data.site_xpos[h.tip_id].copy()
+            if np.linalg.norm(curr_tip - goal_tip) < ALIGN_THRESHOLD_M:
+                align_timer += 1
+            else:
+                align_timer = 0
+            if align_timer > ALIGN_HOLD_STEPS:
+                break
+        if data.time - t0 > 30.0:
+            raise RuntimeError("retreat IK timeout")
+    return data.qpos[: h.n_motors].copy()
+
+
 def _sample_perturbation(rng: np.random.Generator) -> tuple:
     """xy ±PERTURB_POS_XY_MM, z in [PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM],
     angle ±PERTURB_ANGLE_DEG, axis isotropic on S². Returns (perturb_xyz_m, angle_rad, axis)."""
@@ -807,6 +847,11 @@ def _parse_args():
     ap.add_argument("--qpos-path-steps", type=int, default=20,
                     help="Number of intermediate samples along the joint-linear path "
                          "real takes from aligned→perturbed (Mecademic MoveJoints).")
+    ap.add_argument("--inter-episode-retreat-mm", type=float, default=30.0,
+                    help="Between episodes, retract the needle by this many mm beyond "
+                         "RETREAT_MM along the trocar axis, then go to HOME, then back "
+                         "to ALIGN before the next episode. Avoids continuous joint-space "
+                         "transitions near the phantom that risk collision. 0 disables.")
     return ap.parse_args()
 
 
@@ -865,6 +910,7 @@ def main():
     cfg.max_perturb_retries = int(args.max_perturb_retries)
     cfg.occlusion_tol_m = float(args.occlusion_tolerance_mm) / 1000.0
     cfg.qpos_path_steps = int(args.qpos_path_steps)
+    cfg.inter_episode_retreat_mm = float(args.inter_episode_retreat_mm)
     if cfg.skip_safety_validation:
         logger.warning("⚠️  Safety validation DISABLED — needle may collide with phantom on real robot.")
     else:
@@ -908,10 +954,30 @@ def main():
                 )
             logger.info("   ✓ Pre-align safety check passed (aligned endpoint + HOME→aligned path)")
 
+        # Pre-compute inter-episode safe retreat waypoint (sim-only; doesn't
+        # mutate live `data`). Pulled further back along the trocar axis than
+        # the aligned pose so HOME→aligned and post-episode retreat→HOME paths
+        # have a clean clearance margin.
+        retreated_deg = None
+        if cfg.inter_episode_retreat_mm > 0:
+            sim_clone = _clone_state(model, data)  # data is at aligned post pre-align
+            retreated_qpos = _solve_retreat_qpos(
+                model, sim_clone, h, p_entry, p_depth, needle_len,
+                extra_retreat_mm=cfg.inter_episode_retreat_mm,
+            )
+            retreated_deg = np.rad2deg(retreated_qpos)
+            logger.info(
+                f"   inter-episode retreat qpos (deg, +{cfg.inter_episode_retreat_mm:.0f}mm) = "
+                f"{retreated_deg.round(2).tolist()}"
+            )
+
         # Send the aligned pose to real robot (single big move).
         # CAUTION: real robot will travel from HOME_JOINTS to aligned_qpos.
         logger.info("🤖 Mirroring aligned_qpos to real robot (blocking MoveJoints)…")
         env.reset_to_joints(np.rad2deg(aligned_qpos))
+
+        aligned_deg = np.rad2deg(aligned_qpos)
+        home_deg = list(HOME_JOINTS)
 
         # ② Per-episode loop
         for ep in range(1, args.num_episodes + 1):
@@ -922,6 +988,17 @@ def main():
             )
             if ok:
                 n_ok += 1
+
+            # Inter-episode safety: retreat → HOME → re-approach aligned for next ep.
+            # Skip the re-approach after the very last episode (just retreat → HOME
+            # for a clean shutdown state).
+            if retreated_deg is not None:
+                logger.info("↩️  Inter-episode safety: retreat along axis → HOME")
+                env.reset_to_joints(retreated_deg)
+                env.reset_to_joints(home_deg)
+                if ep < args.num_episodes:
+                    logger.info("🤖 Re-approach: HOME → ALIGN for next episode")
+                    env.reset_to_joints(aligned_deg)
     except KeyboardInterrupt:
         logger.warning("\n🛑 KeyboardInterrupt — finishing pending saves and shutting down")
     finally:
