@@ -720,6 +720,11 @@ def _parse_args():
     ap.add_argument("--stream-rate-hz", type=float, default=50.0,
                     help="Joint-mode streaming rate to the robot (Hz). Higher → smoother "
                          "Mecademic blending. Recording rate stays 7.46 Hz regardless.")
+    ap.add_argument("--joint-vel-limit", type=float, default=20.0,
+                    help="Mecademic SetJointVelLimit (deg/s). Pair higher value with lower "
+                         "--stream-rate-hz so internal blending fills between waypoints.")
+    ap.add_argument("--cart-lin-vel", type=float, default=50.0,
+                    help="Mecademic SetCartLinVel (mm/s). Cartesian-mode only.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip robot connect; sim+OAK only")
     ap.add_argument("--skip-side-camera", action="store_true",
@@ -754,6 +759,8 @@ def main():
         robot_address=args.robot_address,
         swap_cameras=args.swap_cameras,
         dry_run=args.dry_run,
+        joint_vel_limit_deg_s=float(args.joint_vel_limit),
+        cart_lin_vel_mm_s=float(args.cart_lin_vel),
     )
 
     # Recorder
