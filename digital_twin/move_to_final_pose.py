@@ -147,18 +147,6 @@ def _display_frames(cam_mgr, status: str = ""):
     cv2.waitKey(1)
 
 
-def _wait_idle_with_display(robot, cam_mgr, status: str, poll_sec: float = 0.05):
-    """WaitIdle while pumping camera frames. Mecademic's WaitIdle(timeout)
-    raises on timeout — we use that as a polling beat."""
-    while True:
-        try:
-            robot.WaitIdle(timeout=poll_sec)
-            return
-        except Exception:
-            pass
-        _display_frames(cam_mgr, status)
-
-
 def _hold_with_display(cam_mgr, status: str, hold_sec: float, poll_sec: float = 0.03):
     """Sleep for `hold_sec` while continuously displaying camera frames."""
     t_end = time.time() + hold_sec
@@ -171,7 +159,7 @@ def _move_robot_to(robot, cam_mgr, joints_deg, label: str, pause_sec: float):
     rounded = [round(float(j), 2) for j in joints_deg]
     logger.info(f"🤖 → {label}: MoveJoints {rounded}")
     robot.MoveJoints(*[float(j) for j in joints_deg])
-    _wait_idle_with_display(robot, cam_mgr, status=f"Moving → {label}")
+    robot.WaitIdle()
     logger.info(f"   ✅ {label} reached. Holding {pause_sec:.1f}s for visual check…")
     _hold_with_display(cam_mgr, status=f"HOLD: {label}", hold_sec=pause_sec)
 
@@ -269,25 +257,9 @@ def main():
         raise RuntimeError(f"Failed to connect to robot at {args.robot_address}")
 
     try:
-        logger.info("🔋 ActivateAndHome… (15~30s, camera preview may stay blank meanwhile)")
+        logger.info("🔋 ActivateAndHome…")
         robot.ActivateAndHome()
         robot.SetRealTimeMonitoring(1)
-
-        # Clear any stale error / paused state from a previous crashed run.
-        # Without this, the first MoveJoints just queues silently and the user
-        # sees "no motion" until they manually reset on the controller.
-        try:
-            status = robot.GetStatusRobot()
-            if getattr(status, "error_status", False):
-                logger.warning("⚠️  Robot in ERROR state — ResetError")
-                robot.ResetError()
-            # Always resume motion — paused state persists across disconnects on
-            # some firmwares.
-            logger.info("▶️  ResumeMotion (clears any prior PauseMotion state)")
-            robot.ResumeMotion()
-        except Exception as e:
-            logger.warning(f"Resume/ResetError failed (non-fatal): {e}")
-
         try:
             robot.SetJointVelLimit(float(args.joint_vel_limit))
         except Exception as e:
@@ -295,7 +267,7 @@ def main():
 
         logger.info(f"🏠 MoveJoints HOME = {HOME_JOINTS}")
         robot.MoveJoints(*HOME_JOINTS)
-        _wait_idle_with_display(robot, cam_mgr, status="Moving → HOME")
+        robot.WaitIdle()
         time.sleep(0.5)
 
         # ALIGN is always traversed — it's the safe gateway between HOME and the
@@ -311,12 +283,12 @@ def main():
             # needle out at an angle — must un-insert first.
             logger.info("↩️  Retracting needle along trocar axis (insertion → align)…")
             robot.MoveJoints(*[float(j) for j in align_deg])
-            _wait_idle_with_display(robot, cam_mgr, status="Retracting → ALIGN")
+            robot.WaitIdle()
 
         if args.return_home:
             logger.info("🏠 Returning to HOME…")
             robot.MoveJoints(*HOME_JOINTS)
-            _wait_idle_with_display(robot, cam_mgr, status="Moving → HOME")
+            robot.WaitIdle()
 
     except KeyboardInterrupt:
         logger.warning("\n🛑 KeyboardInterrupt — stopping")
