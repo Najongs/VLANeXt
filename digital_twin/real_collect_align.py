@@ -96,10 +96,192 @@ from digital_twin.real_collect_approach import (  # noqa: E402
     _wrap_pi,
     _build_display_frame,
 )
-from digital_twin.real_eval_approach import ROBOT_ADDRESS_DEFAULT  # noqa: E402
+from digital_twin.real_eval_approach import ROBOT_ADDRESS_DEFAULT, HOME_JOINTS  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Safety: sim-only dry-run validation (occlusion + collision proxy)
+#
+# Mirrors Save_dataset_align_only.py:310-322 (`check_tip_occluded`). The check
+# ray-casts from `tool_camera` toward `needle_tip`; anything hit closer than
+# the tip indicates the tip is hidden behind a phantom geom (or, by proxy,
+# penetrating it). We use this as a *collision proxy* — a tip that ends up
+# inside/behind the phantom would crash the real robot.
+#
+# Strategy: before sending any perturbed pose to the real robot, we replay the
+# *entire planned trajectory* (perturb-move + fine-align + hold) in a copy of
+# MjData and abort if any frame triggers the check. If validation fails, we
+# resample a new perturbation (up to `cfg.max_perturb_retries` times). Episodes
+# that pass validation are then executed live with sim+real mirror + recording.
+# ─────────────────────────────────────────────────────────────────────────────
+def _check_tip_occluded(model, data, h: SimHandles, tolerance_m: float = 0.001) -> bool:
+    """`tool_camera → needle_tip` ray-cast. True if anything between the camera
+    and the tip (within `tolerance_m`) — i.e., the tip is hidden behind a phantom
+    geom (proxy for collision). Mirrors Save_dataset_align_only.py:310-322."""
+    tool_cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "tool_camera")
+    if tool_cam_id < 0:
+        return False
+    cam_pos = data.cam_xpos[tool_cam_id].copy()
+    tip_pos = data.site_xpos[h.tip_id].copy()
+    direction = tip_pos - cam_pos
+    d_to_tip = np.linalg.norm(direction)
+    if d_to_tip < 1e-6:
+        return False
+    dn = direction / d_to_tip
+    geomid_out = np.zeros(1, dtype=np.int32)
+    hit_dist = mujoco.mj_ray(model, data, cam_pos, dn, None, 1, -1, geomid_out)
+    return bool(0 < hit_dist < d_to_tip - tolerance_m)
+
+
+def _clone_state(model, src_data):
+    """Fresh MjData with qpos/qvel/time copied from src. Phantom config lives
+    on `model.body_pos` (shared) so it carries over automatically."""
+    new_data = mujoco.MjData(model)
+    new_data.qpos[:] = src_data.qpos.copy()
+    new_data.qvel[:] = src_data.qvel.copy()
+    new_data.time = float(src_data.time)
+    mujoco.mj_forward(model, new_data)
+    return new_data
+
+
+def _check_qpos_path_safe(model, data, h: SimHandles, qpos_start, qpos_end,
+                           n_steps: int = 20, tolerance_m: float = 0.001):
+    """Validate Mecademic-style joint-linear interp `qpos_start → qpos_end`.
+
+    `MoveJoints` interpolates linearly in joint space (not the smooth IK
+    trajectory the sim took to *find* `qpos_end`). So we sample N intermediate
+    qpos, set them via `mj_forward`, and run the occlusion check at each.
+    Mutates `data.qpos`; caller is responsible for restoring state if needed.
+
+    Returns (ok: bool, reason: str).
+    """
+    qpos_start = np.asarray(qpos_start, dtype=np.float64)
+    qpos_end = np.asarray(qpos_end, dtype=np.float64)
+    for i in range(n_steps + 1):
+        alpha = i / n_steps
+        data.qpos[: h.n_motors] = (1 - alpha) * qpos_start + alpha * qpos_end
+        mujoco.mj_forward(model, data)
+        if _check_tip_occluded(model, data, h, tolerance_m):
+            return False, f"qpos_path_step_{i}/{n_steps}"
+    return True, "ok"
+
+
+def _dryrun_fine_align(model, data, h: SimHandles, goal_tip, goal_back,
+                       max_ctrl_steps: int, tolerance_m: float = 0.001):
+    """Sim-only replica of the live fine-align loop. Same IK + mj_step cadence
+    (one occlusion check per 67 sim steps == one recorded frame). No real, no
+    recording. Returns (ok, reason)."""
+    start_tip_pos = data.site_xpos[h.tip_id].copy()
+    start_back_pos = data.site_xpos[h.back_id].copy()
+    fine_align_distance = np.linalg.norm(goal_tip - start_tip_pos)
+    fine_duration = max(fine_align_distance / FINE_ALIGN_SPEED, 1e-3)
+    fine_traj_start = data.time
+    record_start_time = data.time
+    align_timer = 0
+    step_count = 0
+    ctrl_step = 0
+
+    while True:
+        progress = smooth_step((data.time - fine_traj_start) / fine_duration)
+        target_tip = (1 - progress) * start_tip_pos + progress * goal_tip
+        target_back = (1 - progress) * start_back_pos + progress * goal_back
+        _solve_ik_step(model, data, h, target_tip, target_back, 0.5)
+        mujoco.mj_step(model, data)
+        step_count += 1
+
+        if step_count % 67 == 0:
+            ctrl_step += 1
+            if _check_tip_occluded(model, data, h, tolerance_m):
+                return False, f"finealign_ctrl{ctrl_step}"
+            if ctrl_step >= max_ctrl_steps:
+                return False, f"finealign_max_steps_{max_ctrl_steps}"
+
+        if progress >= 1.0:
+            curr_tip = data.site_xpos[h.tip_id].copy()
+            if np.linalg.norm(curr_tip - goal_tip) < ALIGN_THRESHOLD_M:
+                align_timer += 1
+            else:
+                align_timer = 0
+            if align_timer > ALIGN_HOLD_STEPS:
+                return True, "ok"
+
+        if data.time - record_start_time > TIMEOUT_SEC:
+            return False, "finealign_timeout"
+
+
+def _dryrun_hold(model, data, h: SimHandles, goal_tip, goal_back,
+                 tolerance_m: float = 0.001):
+    """Sim-only replica of the hold loop (HOLD_RECORD_STEPS × 67 sim steps).
+    Returns (ok, reason)."""
+    for hold_step in range(HOLD_RECORD_STEPS):
+        for _ in range(67):
+            _solve_ik_step(model, data, h, goal_tip, goal_back, 0.5)
+            mujoco.mj_step(model, data)
+        if _check_tip_occluded(model, data, h, tolerance_m):
+            return False, f"hold_step_{hold_step}"
+    return True, "ok"
+
+
+def _dryrun_validate_episode(model, live_data, h: SimHandles,
+                              goal_tip, goal_back,
+                              perturb_xyz, perturb_angle_rad, perturb_axis,
+                              max_ctrl_steps: int,
+                              tolerance_m: float = 0.001,
+                              qpos_path_steps: int = 20):
+    """Full sim-only dry-run of one candidate episode. `live_data` is NOT
+    mutated — all work happens on a clone. Returns (ok, reason, perturbed_qpos).
+
+    Sequence (mirrors what the real robot will actually do):
+      (a) `_move_to_perturbed_sim` on a clone — gives us `perturbed_qpos` and
+          validates the smooth IK trajectory implicitly via per-step ncon
+          (we only check occlusion at the endpoint here for speed).
+      (b) `_check_qpos_path_safe(aligned → perturbed)` — checks the
+          *joint-linear* path the real robot will take via `MoveJoints`.
+          This is the safety-critical step: smooth IK and joint-linear are
+          different trajectories in cartesian space.
+      (c) `_dryrun_fine_align` from perturbed → aligned (slow streaming).
+      (d) `_dryrun_hold` at aligned.
+    """
+    aligned_qpos = live_data.qpos[: h.n_motors].copy()
+
+    # (a) Run perturb move on clone-A to derive perturbed_qpos
+    sim_a = _clone_state(model, live_data)
+    reached = _move_to_perturbed_sim(
+        model, sim_a, h, goal_tip, goal_back,
+        perturb_xyz, perturb_angle_rad, perturb_axis,
+    )
+    if not reached:
+        return False, "perturb_ik_fail", None
+    perturbed_qpos = sim_a.qpos[: h.n_motors].copy()
+    if _check_tip_occluded(model, sim_a, h, tolerance_m):
+        return False, "occluded_at_perturbed", None
+
+    # (b) Joint-linear path check on clone-B (real's actual trajectory)
+    sim_b = _clone_state(model, live_data)
+    ok, reason = _check_qpos_path_safe(
+        model, sim_b, h, aligned_qpos, perturbed_qpos,
+        n_steps=qpos_path_steps, tolerance_m=tolerance_m,
+    )
+    if not ok:
+        return False, f"path_aligned→perturbed_{reason}", None
+
+    # (c) Fine-align dry-run continues from sim_a (already at perturbed)
+    ok, reason = _dryrun_fine_align(
+        model, sim_a, h, goal_tip, goal_back,
+        max_ctrl_steps=max_ctrl_steps, tolerance_m=tolerance_m,
+    )
+    if not ok:
+        return False, reason, None
+
+    # (d) Hold dry-run
+    ok, reason = _dryrun_hold(model, sim_a, h, goal_tip, goal_back, tolerance_m)
+    if not ok:
+        return False, reason, None
+
+    return True, "ok", perturbed_qpos
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,24 +420,75 @@ def run_collection_episode(model, data, env: RealCollectEnv, recorder: SimRecord
     goal_tip = p_entry - (axis_dir * retreat_m)
     goal_back = p_entry - (axis_dir * (retreat_m + needle_len))
 
-    # ③ Perturbation: sim moves to perturbed; real receives final perturbed_qpos
-    perturb_xyz, perturb_angle_rad, perturb_axis = _sample_perturbation(rng)
-    perturb_pos_mm = perturb_xyz * 1000.0
-    logger.info(f"  Episode {ep_idx}: perturb_xyz_mm={perturb_pos_mm.round(1).tolist()}  "
-                f"angle_deg={np.rad2deg(perturb_angle_rad):.1f}")
+    # ③ Perturbation: sim-only validation loop, then mirror final pose to real.
+    #
+    # Each candidate perturbation is dry-run in a sim copy (perturb-move +
+    # joint-linear path + fine-align + hold). Only validated perturbations are
+    # ever sent to the real robot. If all `cfg.max_perturb_retries` candidates
+    # fail validation, this episode is skipped (the next call samples fresh).
+    perturb_xyz = perturb_angle_rad = perturb_axis = None
+    perturbed_qpos_validated = None  # rad, only set when validation enabled
 
+    if cfg.skip_safety_validation:
+        # Legacy behavior: single sample, no pre-flight check.
+        perturb_xyz, perturb_angle_rad, perturb_axis = _sample_perturbation(rng)
+        perturb_pos_mm = perturb_xyz * 1000.0
+        logger.info(f"  Episode {ep_idx}: perturb_xyz_mm={perturb_pos_mm.round(1).tolist()}  "
+                    f"angle_deg={np.rad2deg(perturb_angle_rad):.1f}  [SAFETY OFF]")
+    else:
+        n_attempts = max(1, int(cfg.max_perturb_retries))
+        last_reason = "no_attempt"
+        for attempt in range(1, n_attempts + 1):
+            xyz, ang, ax = _sample_perturbation(rng)
+            ok, reason, perturbed_qpos_validated = _dryrun_validate_episode(
+                model, data, h, goal_tip, goal_back, xyz, ang, ax,
+                max_ctrl_steps=cfg.max_steps,
+                tolerance_m=cfg.occlusion_tol_m,
+                qpos_path_steps=cfg.qpos_path_steps,
+            )
+            if ok:
+                perturb_xyz, perturb_angle_rad, perturb_axis = xyz, ang, ax
+                logger.info(
+                    f"  ✓ Episode {ep_idx} validation pass on attempt {attempt}/{n_attempts}: "
+                    f"perturb_xyz_mm={(xyz * 1000).round(1).tolist()} "
+                    f"angle_deg={np.rad2deg(ang):.1f}"
+                )
+                break
+            last_reason = reason
+            logger.info(
+                f"  ✗ Episode {ep_idx} attempt {attempt}/{n_attempts} rejected ({reason}): "
+                f"perturb_xyz_mm={(xyz * 1000).round(1).tolist()} "
+                f"angle_deg={np.rad2deg(ang):.1f}"
+            )
+        if perturb_xyz is None:
+            logger.warning(
+                f"  ⏭️  Episode {ep_idx} skipped: {n_attempts} validation attempts "
+                f"all failed (last={last_reason}). Trying next episode with new randoms."
+            )
+            return False
+        perturb_pos_mm = perturb_xyz * 1000.0
+
+    # Re-run perturb on live data (deterministic; produces same perturbed_qpos
+    # as the validation clone). This is what the sim trajectory recorder needs.
     reached = _move_to_perturbed_sim(
         model, data, h, goal_tip, goal_back,
         perturb_xyz, perturb_angle_rad, perturb_axis,
     )
     if not reached:
-        logger.warning(f"  Episode {ep_idx} discarded: sim IK failed to reach perturbed pose")
+        logger.warning(f"  Episode {ep_idx} discarded: sim IK failed to reach perturbed pose (live)")
         return False
 
-    # Mirror the perturbed pose to real (single blocking MoveJoints).
-    # Mecademic interpolates linearly in joint-space, which is the same trajectory
-    # the sim's IK produces for a small perturbation, just faster.
     perturbed_qpos_deg = np.rad2deg(data.qpos[:6].copy())
+    # Sanity: live-derived pose should match the validated one
+    if perturbed_qpos_validated is not None:
+        delta_deg = float(np.max(np.abs(perturbed_qpos_deg - np.rad2deg(perturbed_qpos_validated))))
+        if delta_deg > 0.5:
+            logger.warning(
+                f"  ⚠️  Episode {ep_idx}: live perturbed_qpos differs from validated by {delta_deg:.2f}° "
+                f"(non-determinism?). Aborting episode for safety."
+            )
+            return False
+
     env.reset_to_joints(perturbed_qpos_deg)
 
     # Episode metadata (matches sim's episode_meta keys)
@@ -545,12 +778,12 @@ def _parse_args():
     ap.add_argument("--control-dt", type=float, default=0.134,
                     help="Wall-time per recorded frame (~67 mj_steps × 0.002s). "
                          "Used by cartesian mode only; joint mode paces via --stream-rate-hz.")
-    ap.add_argument("--stream-rate-hz", type=float, default=50.0,
-                    help="Joint-mode streaming rate to the robot (Hz). Higher → smoother "
-                         "Mecademic blending. Recording rate stays 7.46 Hz regardless.")
-    ap.add_argument("--joint-vel-limit", type=float, default=20.0,
-                    help="Mecademic SetJointVelLimit (deg/s). Pair higher value with lower "
-                         "--stream-rate-hz so internal blending fills between waypoints.")
+    ap.add_argument("--stream-rate-hz", type=float, default=15.0,
+                    help="Joint-mode streaming rate to the robot (Hz). 15 Hz empirically "
+                         "minimizes wrist-camera jitter (motion duration ≈ command interval). "
+                         "Recording rate stays 7.46 Hz regardless.")
+    ap.add_argument("--joint-vel-limit", type=float, default=50.0,
+                    help="Mecademic SetJointVelLimit (deg/s).")
     ap.add_argument("--cart-lin-vel", type=float, default=50.0,
                     help="Mecademic SetCartLinVel (mm/s). Cartesian-mode only.")
     ap.add_argument("--dry-run", action="store_true",
@@ -560,6 +793,20 @@ def _parse_args():
     ap.add_argument("--no-display", action="store_true",
                     help="Disable cv2.imshow live preview (auto-on if $DISPLAY unset)")
     ap.add_argument("--seed", type=int, default=None)
+    # Safety: pre-flight sim dry-run validation
+    ap.add_argument("--max-perturb-retries", type=int, default=5,
+                    help="Per episode, resample the perturbation up to N times if "
+                         "sim dry-run flags occlusion/collision risk. After N failures "
+                         "the episode is skipped (next episode samples fresh).")
+    ap.add_argument("--no-safety-validation", action="store_true",
+                    help="Disable pre-flight sim dry-run check. NOT recommended on real "
+                         "robot — needle may collide with phantom.")
+    ap.add_argument("--occlusion-tolerance-mm", type=float, default=1.0,
+                    help="Ray-cast tolerance: a hit closer than (tip_dist - tol) counts "
+                         "as the tip being occluded by phantom. Smaller = stricter.")
+    ap.add_argument("--qpos-path-steps", type=int, default=20,
+                    help="Number of intermediate samples along the joint-linear path "
+                         "real takes from aligned→perturbed (Mecademic MoveJoints).")
     return ap.parse_args()
 
 
@@ -613,6 +860,19 @@ def main():
     cfg.max_steps = int(args.max_steps)
     cfg.skip_side_camera = bool(args.skip_side_camera)
     cfg.show_preview = not (args.no_display or not os.environ.get("DISPLAY"))
+    # Safety knobs (sim dry-run validation)
+    cfg.skip_safety_validation = bool(args.no_safety_validation)
+    cfg.max_perturb_retries = int(args.max_perturb_retries)
+    cfg.occlusion_tol_m = float(args.occlusion_tolerance_mm) / 1000.0
+    cfg.qpos_path_steps = int(args.qpos_path_steps)
+    if cfg.skip_safety_validation:
+        logger.warning("⚠️  Safety validation DISABLED — needle may collide with phantom on real robot.")
+    else:
+        logger.info(
+            f"🛡  Safety: dry-run validation ON (retries≤{cfg.max_perturb_retries}, "
+            f"occl_tol={cfg.occlusion_tol_m*1000:.1f}mm, "
+            f"qpos_path_samples={cfg.qpos_path_steps})"
+        )
 
     n_ok = 0
     try:
@@ -624,9 +884,32 @@ def main():
         aligned_qpos, aligned_qvel, p_entry, p_depth, needle_len = _pre_align_sim(model, data, h)
         logger.info(f"   sim aligned_qpos (deg) = {np.rad2deg(aligned_qpos).round(1).tolist()}")
 
+        # Pre-flight safety: aligned endpoint + HOME_JOINTS→aligned joint-linear path
+        # (the real robot's actual trajectory). Fail-fast on misplaced phantom before
+        # the real robot ever moves.
+        if not cfg.skip_safety_validation:
+            if _check_tip_occluded(model, data, h, cfg.occlusion_tol_m):
+                raise RuntimeError(
+                    f"Pre-align tip is occluded at aligned pose — phantom_pos={cfg.phantom_pos} "
+                    f"likely misplaced (trocar entry not visible from tool_camera). "
+                    f"Verify --phantom-pos against the real phantom position before retrying."
+                )
+            home_rad = np.deg2rad(np.asarray(HOME_JOINTS, dtype=np.float64))
+            sim_check = _clone_state(model, data)  # currently at aligned
+            ok, reason = _check_qpos_path_safe(
+                model, sim_check, h, home_rad, aligned_qpos,
+                n_steps=cfg.qpos_path_steps, tolerance_m=cfg.occlusion_tol_m,
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"Pre-align HOME→aligned joint-linear path occluded ({reason}). "
+                    f"Real robot would collide on its first move. "
+                    f"Adjust HOME_JOINTS or phantom placement."
+                )
+            logger.info("   ✓ Pre-align safety check passed (aligned endpoint + HOME→aligned path)")
+
         # Send the aligned pose to real robot (single big move).
         # CAUTION: real robot will travel from HOME_JOINTS to aligned_qpos.
-        # Verify path is collision-free for your phantom placement first.
         logger.info("🤖 Mirroring aligned_qpos to real robot (blocking MoveJoints)…")
         env.reset_to_joints(np.rad2deg(aligned_qpos))
 

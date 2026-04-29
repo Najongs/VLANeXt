@@ -102,7 +102,7 @@ class RealCollectEnv:
     """
 
     def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False,
-                 dry_run=False, joint_vel_limit_deg_s=20.0, cart_lin_vel_mm_s=50.0):
+                 dry_run=False, joint_vel_limit_deg_s=50.0, cart_lin_vel_mm_s=50.0):
         self.swap_cameras = swap_cameras
         self.dry_run = dry_run
         self.robot = None
@@ -717,12 +717,12 @@ def _parse_args():
     ap.add_argument("--control-dt", type=float, default=0.134,
                     help="Wall-time per recorded frame (~67 mj_steps × 0.002s). "
                          "Used by cartesian mode only; joint mode paces via --stream-rate-hz.")
-    ap.add_argument("--stream-rate-hz", type=float, default=50.0,
-                    help="Joint-mode streaming rate to the robot (Hz). Higher → smoother "
-                         "Mecademic blending. Recording rate stays 7.46 Hz regardless.")
-    ap.add_argument("--joint-vel-limit", type=float, default=20.0,
-                    help="Mecademic SetJointVelLimit (deg/s). Pair higher value with lower "
-                         "--stream-rate-hz so internal blending fills between waypoints.")
+    ap.add_argument("--stream-rate-hz", type=float, default=15.0,
+                    help="Joint-mode streaming rate to the robot (Hz). 15 Hz empirically "
+                         "minimizes wrist-camera jitter (motion duration ≈ command interval). "
+                         "Recording rate stays 7.46 Hz regardless.")
+    ap.add_argument("--joint-vel-limit", type=float, default=50.0,
+                    help="Mecademic SetJointVelLimit (deg/s).")
     ap.add_argument("--cart-lin-vel", type=float, default=50.0,
                     help="Mecademic SetCartLinVel (mm/s). Cartesian-mode only.")
     ap.add_argument("--dry-run", action="store_true",
