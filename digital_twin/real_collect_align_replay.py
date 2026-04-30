@@ -301,6 +301,27 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     }
     recorder.start(episode_meta)
 
+    # ── ④.5 Batch queue: push entire smoothed waypoint plan to robot upfront ──
+    # In batch mode, recording loop only observes — Mecademic's internal trajectory
+    # generator handles inter-waypoint blending without per-tick command churn.
+    queue_mode = getattr(cfg, "queue_mode", "stream")
+    if cfg.mode == "traj" and queue_mode == "batch" and traj_qpos_deg is not None:
+        if env.robot is not None and not env.dry_run:
+            try:
+                if getattr(cfg, "batch_queue_vel", None) is not None:
+                    env.robot.SetJointVelLimit(float(cfg.batch_queue_vel))
+                # Pre-queue every waypoint. Mecademic blends consecutive MoveJoints.
+                for q_deg in traj_qpos_deg:
+                    env.robot.MoveJoints(*[float(j) for j in q_deg])
+                logger.info(
+                    f"  Episode {ep_idx}: 📦 batch-queued {len(traj_qpos_deg)} "
+                    f"waypoints (vel_limit={cfg.batch_queue_vel or 'unchanged'} deg/s)"
+                )
+            except Exception as e:
+                logger.warning(f"batch queue push failed: {e}; falling back to stream")
+                env._recover()
+                queue_mode = "stream"
+
     # ── ⑤ Recording loop (wall-clock paced) ──
     record_dt = float(cfg.record_dt)  # seconds, default 1/7.46 ≈ 0.134
     user_quit = False
@@ -317,8 +338,10 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     next_t = record_start
 
     while True:
-        # Send next sim-paced waypoint (traj mode only) BEFORE pacing sleep
-        if cfg.mode == "traj" and traj_qpos_deg is not None:
+        # Stream mode: send next sim-paced waypoint BEFORE pacing sleep.
+        # Batch mode: skip — entire plan was already queued upfront.
+        if (cfg.mode == "traj" and queue_mode == "stream"
+                and traj_qpos_deg is not None):
             wp_idx = min(ctrl_step, len(traj_qpos_deg) - 1)
             wp = traj_qpos_deg[wp_idx]
             if env.robot is not None and not env.dry_run:
@@ -572,6 +595,14 @@ def _parse_args():
                          "savgol preserves curvature; moving = simple mean. Default savgol.")
     ap.add_argument("--smooth-polyorder", type=int, default=3,
                     help="Polynomial order for Savitzky-Golay (must be < window). Default 3.")
+    ap.add_argument("--queue-mode", choices=["stream", "batch"], default="batch",
+                    help="stream = one MoveJoints per record tick (sim-paced sleep). "
+                         "batch = pre-queue ALL waypoints upfront, recording loop only "
+                         "observes (zero command-arrival jitter). Default batch.")
+    ap.add_argument("--batch-queue-vel", type=float, default=None,
+                    help="(batch mode only) override SetJointVelLimit during queue "
+                         "execution, deg/s. None = keep --joint-vel-limit. "
+                         "Lower = slower queue, better sim-pace match.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--cameras", nargs="+", default=["tool_camera"],
                     choices=["top_camera", "tool_camera", "side_camera"])
@@ -626,7 +657,10 @@ def main():
     cfg.smooth_window = int(args.smooth_window)
     cfg.smooth_method = str(args.smooth_method)
     cfg.smooth_polyorder = int(args.smooth_polyorder)
-    logger.info(f"🛤  Replay mode: {cfg.mode}  "
+    cfg.queue_mode = str(args.queue_mode)
+    cfg.batch_queue_vel = (float(args.batch_queue_vel)
+                           if args.batch_queue_vel is not None else None)
+    logger.info(f"🛤  Replay mode: {cfg.mode}  queue={cfg.queue_mode}  "
                 f"smooth={cfg.smooth_method}(window={cfg.smooth_window}"
                 f"{f',poly={cfg.smooth_polyorder}' if cfg.smooth_method=='savgol' else ''})")
     cfg.record_cameras = list(args.cameras)

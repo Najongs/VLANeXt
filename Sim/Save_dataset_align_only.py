@@ -74,11 +74,11 @@ IMG_HEIGHT = 480
 CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
-ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
+ALIGN_SPEED = 0.05          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
 FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
-PERTURB_POS_XY_MM = 40.0    # XY 평면 perturbation 범위 (±mm)
+PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
 PERTURB_POS_Z_MIN_MM = 0.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
 PERTURB_POS_Z_MAX_MM = 20.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
@@ -91,7 +91,7 @@ ALIGN_HOLD_STEPS = 20       # threshold 이내 연속 유지 횟수
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # --- Holding (정렬 완료 후 자세 유지 녹화) ---
-HOLD_RECORD_STEPS = 10           # 정렬 완료 후 녹화 control steps
+HOLD_RECORD_STEPS = 25           # 정렬 완료 후 녹화 control steps
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
@@ -99,7 +99,7 @@ TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
 MAX_CTRL_STEPS = 200        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 
 # --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
-RETREAT_MM = 0           # insertion axis 반대 방향 retreat (mm)
+RETREAT_MM = 2.0           # insertion axis 반대 방향 retreat (mm)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
