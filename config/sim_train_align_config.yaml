@@ -2,7 +2,7 @@ project:
   name: "VLANeXt_Qwen3.5_fine_align"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 5000
+  save_interval: 1000
   use_wandb: true
 
 data:
@@ -21,7 +21,7 @@ data:
   future_len: 8
   buffer_size: 3000
 
-  batch_size: 128
+  batch_size: 126
   max_steps: 10000
   num_workers: 4
 
@@ -114,7 +114,7 @@ model:
 train:
   seed: 2026
   resume_path: ""
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_droid.pt"
+  pretrained_checkpoint: ""
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
