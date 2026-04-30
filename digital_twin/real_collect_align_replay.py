@@ -220,18 +220,45 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
             max_ctrl_steps=cfg.max_steps,
         )
         traj_qpos_deg = np.rad2deg(traj_rad)
-        # Optional smoothing — moving average per joint to kill IK tick noise.
-        # Endpoints preserved (mode='nearest').
+        # Optional smoothing — kill IK tick noise to reduce real-robot jitter.
+        method = getattr(cfg, "smooth_method", "moving")
         w = int(cfg.smooth_window)
-        if w >= 3 and len(traj_qpos_deg) >= w:
-            half = w // 2
-            pad = np.pad(traj_qpos_deg, ((half, half), (0, 0)), mode='edge')
-            kernel = np.ones(w) / w
-            traj_qpos_deg = np.stack([
-                np.convolve(pad[:, j], kernel, mode='valid')
-                for j in range(traj_qpos_deg.shape[1])
-            ], axis=1)
-            logger.info(f"  Episode {ep_idx}: traj smoothed (window={w})")
+        applied = None
+        if method != "none" and w >= 3 and len(traj_qpos_deg) >= w:
+            if method == "savgol":
+                try:
+                    from scipy.signal import savgol_filter
+                    poly = max(1, min(int(cfg.smooth_polyorder), w - 1))
+                    traj_qpos_deg = savgol_filter(
+                        traj_qpos_deg, window_length=w, polyorder=poly,
+                        axis=0, mode="nearest",
+                    )
+                    applied = f"savgol(w={w}, poly={poly})"
+                except ImportError:
+                    logger.warning("scipy not available; falling back to moving-average")
+                    method = "moving"
+            if method == "moving":
+                half = w // 2
+                pad = np.pad(traj_qpos_deg, ((half, half), (0, 0)), mode='edge')
+                kernel = np.ones(w) / w
+                traj_qpos_deg = np.stack([
+                    np.convolve(pad[:, j], kernel, mode='valid')
+                    for j in range(traj_qpos_deg.shape[1])
+                ], axis=1)
+                applied = f"moving(w={w})"
+
+        if applied is not None:
+            # Recompute EE waypoints by FK on smoothed qpos so action_sim stays
+            # consistent with the joints actually streamed to the real robot.
+            sim_fk = _clone_state(model, data)
+            recomputed = []
+            for q_deg in traj_qpos_deg:
+                sim_fk.qpos[: h.n_motors] = np.deg2rad(q_deg)
+                sim_fk.qvel[: h.n_motors] = 0.0
+                mujoco.mj_forward(model, sim_fk)
+                recomputed.append(h.ee_pose_mm_rad(sim_fk).copy())
+            traj_ee_mm = np.asarray(recomputed, dtype=np.float64)
+            logger.info(f"  Episode {ep_idx}: traj smoothed [{applied}] + ee FK refreshed")
         logger.info(
             f"  Episode {ep_idx}: planned sim traj → {len(traj_qpos_deg)} waypoints "
             f"(~{len(traj_qpos_deg) * cfg.record_dt:.2f}s)"
@@ -536,9 +563,15 @@ def _parse_args():
     ap.add_argument("--mode", choices=["single", "traj"], default="traj",
                     help="single = one MoveJoints to aligned (Mecademic native speed). "
                          "traj = stream sim waypoints at sim's pace (default).")
-    ap.add_argument("--smooth-window", type=int, default=5,
-                    help="Moving-average window over traj waypoints (per joint) to "
-                         "reduce IK tick noise. 0 or 1 = disable. Default 5.")
+    ap.add_argument("--smooth-window", type=int, default=9,
+                    help="Window size (waypoints) for joint-space smoothing. "
+                         "0 or 1 = disable. Default 9.")
+    ap.add_argument("--smooth-method", choices=["none", "moving", "savgol"],
+                    default="savgol",
+                    help="Smoothing method for traj waypoints. "
+                         "savgol preserves curvature; moving = simple mean. Default savgol.")
+    ap.add_argument("--smooth-polyorder", type=int, default=3,
+                    help="Polynomial order for Savitzky-Golay (must be < window). Default 3.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--cameras", nargs="+", default=["tool_camera"],
                     choices=["top_camera", "tool_camera", "side_camera"])
@@ -591,7 +624,11 @@ def main():
     cfg.max_steps = int(args.max_steps)
     cfg.mode = str(args.mode)
     cfg.smooth_window = int(args.smooth_window)
-    logger.info(f"🛤  Replay mode: {cfg.mode}  smooth_window={cfg.smooth_window}")
+    cfg.smooth_method = str(args.smooth_method)
+    cfg.smooth_polyorder = int(args.smooth_polyorder)
+    logger.info(f"🛤  Replay mode: {cfg.mode}  "
+                f"smooth={cfg.smooth_method}(window={cfg.smooth_window}"
+                f"{f',poly={cfg.smooth_polyorder}' if cfg.smooth_method=='savgol' else ''})")
     cfg.record_cameras = list(args.cameras)
     logger.info(f"📸 Recording cameras: {cfg.record_cameras}  rate={1.0/cfg.record_dt:.2f}Hz")
     cfg.show_preview = not (args.no_display or not os.environ.get("DISPLAY"))
