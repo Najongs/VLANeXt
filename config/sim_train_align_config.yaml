@@ -1,14 +1,14 @@
 project:
   name: "VLANeXt_Qwen3.5_fine_align"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 1000
+  save_interval: 5000
   use_wandb: true
 
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/fine_align_00"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
@@ -19,10 +19,10 @@ data:
 
   history_len: 8
   future_len: 8
-  buffer_size: 3000
+  buffer_size: 4000
 
-  batch_size: 126
-  max_steps: 10000
+  batch_size: 200
+  max_steps: 20000
   num_workers: 4
 
   input_modality: "image"
@@ -52,7 +52,7 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3-VL-2B-Instruct" # "Qwen/Qwen3.5-2B"
+  lmm_path: "Qwen/Qwen3.5-2B" # "Qwen/Qwen3.5-2B"
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:
@@ -118,7 +118,7 @@ train:
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true

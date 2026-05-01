@@ -629,7 +629,7 @@ def run_eval(cfg):
 
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
-    max_steps = getattr(cfg.eval, "max_steps_per_episode", 200)
+    max_steps = getattr(cfg.eval, "max_steps_per_episode", 500)
     num_steps_execute = getattr(cfg.eval, "num_steps_execute", 1)
     sim_steps_per_ctrl = getattr(cfg.eval, "sim_steps_per_control", 67)
     save_video = getattr(cfg.eval, "save_video", True)
