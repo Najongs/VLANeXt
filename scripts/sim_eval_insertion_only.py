@@ -595,7 +595,7 @@ def run_eval(cfg):
     use_sensor = getattr(cfg.model, "use_sensor", False)
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
-    max_steps = getattr(cfg.eval, "max_steps_per_episode", 200)
+    max_steps = getattr(cfg, "max_steps", None) or getattr(cfg.eval, "max_steps_per_episode", 200)
     num_steps_execute = getattr(cfg.eval, "num_steps_execute", 1)
     sim_steps_per_ctrl = getattr(cfg.eval, "sim_steps_per_control", 67)
     save_video = getattr(cfg.eval, "save_video", True)
@@ -796,6 +796,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
     parser.add_argument("--randomize-phantom", action="store_true",
                         help="Randomize phantom position/rotation each episode")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override eval.max_steps_per_episode (default: use config value)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -809,4 +811,5 @@ if __name__ == "__main__":
     cfg.shard_id = args.shard_id
     cfg.num_shards = args.num_shards
     cfg.randomize_phantom = args.randomize_phantom
+    cfg.max_steps = args.max_steps
     run_eval(cfg)

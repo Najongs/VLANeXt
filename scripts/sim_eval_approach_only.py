@@ -423,7 +423,7 @@ def run_eval(cfg):
     use_sensor = getattr(cfg.model, "use_sensor", False)
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
-    max_steps = getattr(cfg.eval, "max_steps_per_episode", 500)
+    max_steps = getattr(cfg, "max_steps", None) or getattr(cfg.eval, "max_steps_per_episode", 500)
     num_steps_execute = getattr(cfg.eval, "num_steps_execute", 1)
     sim_steps_per_ctrl = getattr(cfg.eval, "sim_steps_per_control", 67)
     save_video = getattr(cfg.eval, "save_video", True)
@@ -625,6 +625,8 @@ if __name__ == "__main__":
     parser.add_argument("--phantom-pos", type=float, nargs=2, default=None,
                         metavar=("X", "Y"),
                         help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.4")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override eval.max_steps_per_episode (default: use config value)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -639,4 +641,5 @@ if __name__ == "__main__":
     cfg.num_shards = args.num_shards
     cfg.randomize_phantom = args.randomize_phantom
     cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
+    cfg.max_steps = args.max_steps
     run_eval(cfg)

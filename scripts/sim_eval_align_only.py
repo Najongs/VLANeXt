@@ -629,7 +629,7 @@ def run_eval(cfg):
 
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
-    max_steps = getattr(cfg.eval, "max_steps_per_episode", 200)
+    max_steps = getattr(cfg, "max_steps", None) or getattr(cfg.eval, "max_steps_per_episode", 200)
     num_steps_execute = getattr(cfg.eval, "num_steps_execute", 1)
     sim_steps_per_ctrl = getattr(cfg.eval, "sim_steps_per_control", 67)
     save_video = getattr(cfg.eval, "save_video", True)
@@ -839,6 +839,8 @@ if __name__ == "__main__":
                         help="Fixed phantom position (x, y). e.g. --phantom-pos 0.0 -0.4")
     parser.add_argument("--retreat-mm", type=float, default=10.0,
                         help="Retreat goal_tip from trocar entry along -axis_dir (mm, default: 10)")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override eval.max_steps_per_episode (default: use config value)")
     parser.add_argument("--sensor-success", action="store_true",
                         help="Require sensor to see through trocar hole for success")
     args = parser.parse_args()
@@ -857,5 +859,6 @@ if __name__ == "__main__":
     cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
     cfg.use_sensor_success = args.sensor_success
     cfg.retreat_mm = args.retreat_mm
+    cfg.max_steps = args.max_steps
 
     run_eval(cfg)
