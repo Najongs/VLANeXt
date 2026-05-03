@@ -111,6 +111,7 @@ def run_real_eval(cfg):
         robot_address=getattr(cfg, "robot_address", ROBOT_ADDRESS_DEFAULT),
         swap_cameras=getattr(cfg, "swap_cameras", False),
         skip_home=getattr(cfg, "skip_home", False),
+        joint_vel_limit=getattr(cfg, "joint_vel_limit", None),
     )
     dry_run = getattr(cfg, "dry_run", False)
     if dry_run:
@@ -267,6 +268,9 @@ if __name__ == "__main__":
     parser.add_argument("--skip-home", action="store_true",
                         help="Don't MoveJoints to HOME — use whatever pose the robot is in. "
                              "Recommended for align: manually pre-position needle near trocar first.")
+    parser.add_argument("--joint-vel-limit", type=float, default=None,
+                        help="Mecademic SetJointVelLimit (deg/s). Lower = slower + smoother. "
+                             "Combine with larger --max-steps for slower trajectory. e.g. 5")
     parser.add_argument("--use-sensor", action="store_true",
                         help="Add 8th proprio dim with constant 20.0 (real sensor_dist proxy). "
                              "Required if checkpoint was trained with use_sensor=True.")
@@ -289,6 +293,7 @@ if __name__ == "__main__":
     cfg.swap_cameras = args.swap_cameras
     cfg.skip_home = args.skip_home
     cfg.use_sensor = args.use_sensor
+    cfg.joint_vel_limit = args.joint_vel_limit
     cfg.dry_run = args.dry_run
 
     run_real_eval(cfg)

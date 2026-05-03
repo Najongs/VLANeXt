@@ -80,6 +80,33 @@ from digital_twin.real_eval_approach import ROBOT_ADDRESS_DEFAULT, HOME_JOINTS  
 logger = logging.getLogger(__name__)
 
 
+def _plan_smoothstep_joint_traj(perturbed_qpos, aligned_qpos, n_waypoints,
+                                hold_pad=ALIGN_HOLD_STEPS + 1):
+    """Joint-space S-curve from perturbed → aligned using smooth_step.
+
+    No sim IK is run. Each joint is interpolated independently with
+    progress = smooth_step(t/T) so velocity profile is the same S-curve sim's
+    fine-align uses (slow start, peak in the middle, slow end). Output is a
+    clean, monotonic, IK-noise-free trajectory.
+
+    `hold_pad` extra waypoints at aligned are appended at the end so the total
+    motion-loop frame count matches sim's `_plan_fine_align_traj` (which adds
+    ALIGN_HOLD_STEPS+1 frames after threshold is reached).
+    """
+    perturbed = np.asarray(perturbed_qpos, dtype=np.float64).reshape(-1)
+    aligned = np.asarray(aligned_qpos, dtype=np.float64).reshape(-1)
+    n = max(2, int(n_waypoints))
+    pad = max(0, int(hold_pad))
+    out = np.empty((n + pad, len(aligned)), dtype=np.float64)
+    for i in range(n):
+        t = (i + 1) / n  # progress at end of step i
+        alpha = float(smooth_step(t))
+        out[i] = (1.0 - alpha) * perturbed + alpha * aligned
+    for i in range(pad):
+        out[n + i] = aligned
+    return out
+
+
 def _plan_fine_align_traj(model, data, h: SimHandles, perturbed_qpos,
                           goal_tip, goal_back, max_ctrl_steps: int):
     """Sim-only: replicate the fine-align loop from `perturbed_qpos` to aligned
@@ -210,15 +237,58 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     perturbed_deg = np.rad2deg(perturbed_qpos)
     aligned_deg = np.rad2deg(aligned_qpos)
 
-    # ── ②.5 Plan sim trajectory (traj mode only) ──
+    # ── ②.5 Plan trajectory (traj mode only) ──
+    # Two sources:
+    #   sim_ik     — replay sim's per-tick IK output (precise but inherits IK noise)
+    #   smoothstep — clean joint-space S-curve from perturbed → aligned, no IK,
+    #                no noise. Mecademic gets a perfectly smooth path geometry.
     traj_qpos_deg = None
     traj_ee_mm = None
+    traj_source = getattr(cfg, "traj_source", "smoothstep")
     if cfg.mode == "traj":
-        sim_clone = _clone_state(model, data)
-        traj_rad, traj_ee_mm = _plan_fine_align_traj(
-            model, sim_clone, h, perturbed_qpos, goal_tip, goal_back,
-            max_ctrl_steps=cfg.max_steps,
-        )
+        if traj_source == "smoothstep":
+            # Auto duration = same formula sim uses: ee_dist / FINE_ALIGN_SPEED.
+            # → step count + total time match sim exactly for any perturbation size.
+            if getattr(cfg, "auto_duration", True):
+                sim_fk = _clone_state(model, data)
+                sim_fk.qpos[: h.n_motors] = perturbed_qpos
+                sim_fk.qvel[: h.n_motors] = 0.0
+                mujoco.mj_forward(model, sim_fk)
+                perturbed_tip = sim_fk.site_xpos[h.tip_id].copy()
+                ee_dist_m = float(np.linalg.norm(perturbed_tip - goal_tip))
+                duration_sec = max(ee_dist_m / FINE_ALIGN_SPEED, 1e-3)
+                logger.info(
+                    f"  Episode {ep_idx}: auto duration "
+                    f"ee_dist={ee_dist_m*1000:.1f}mm / {FINE_ALIGN_SPEED*1000:.1f}mm/s "
+                    f"= {duration_sec:.2f}s"
+                )
+            else:
+                duration_sec = float(cfg.traj_duration_sec)
+            n_waypoints = max(2, int(round(
+                duration_sec / max(1e-3, cfg.record_dt)
+            )))
+            traj_rad = _plan_smoothstep_joint_traj(
+                perturbed_qpos, aligned_qpos, n_waypoints
+            )
+            # FK to populate ee waypoints
+            sim_fk = _clone_state(model, data)
+            ee_list = []
+            for q in traj_rad:
+                sim_fk.qpos[: h.n_motors] = q
+                sim_fk.qvel[: h.n_motors] = 0.0
+                mujoco.mj_forward(model, sim_fk)
+                ee_list.append(h.ee_pose_mm_rad(sim_fk).copy())
+            traj_ee_mm = np.asarray(ee_list, dtype=np.float64)
+            logger.info(
+                f"  Episode {ep_idx}: 🎯 smoothstep joint traj → "
+                f"{n_waypoints} waypoints over {duration_sec:.2f}s"
+            )
+        else:
+            sim_clone = _clone_state(model, data)
+            traj_rad, traj_ee_mm = _plan_fine_align_traj(
+                model, sim_clone, h, perturbed_qpos, goal_tip, goal_back,
+                max_ctrl_steps=cfg.max_steps,
+            )
         traj_qpos_deg = np.rad2deg(traj_rad)
         # Optional smoothing — kill IK tick noise to reduce real-robot jitter.
         method = getattr(cfg, "smooth_method", "moving")
@@ -301,6 +371,31 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     }
     recorder.start(episode_meta)
 
+    # ── ④.4 Sub-tick interpolation (stream mode only) ──
+    # Densify waypoints by N× via cubic spline; in the recording loop we issue
+    # `substeps` MoveJoints per record tick paced at record_dt/N. Total time
+    # unchanged → sim pace preserved. Δq per command shrinks by N → robot is
+    # still mid-flight when next command arrives → continuous Mecademic blending.
+    substeps = max(1, int(getattr(cfg, "substeps", 1)))
+    dense_qpos_deg = traj_qpos_deg
+    if (cfg.mode == "traj" and getattr(cfg, "queue_mode", "stream") == "stream"
+            and substeps > 1 and traj_qpos_deg is not None
+            and len(traj_qpos_deg) >= 2):
+        try:
+            from scipy.interpolate import CubicSpline
+            n_wp = len(traj_qpos_deg)
+            cs = CubicSpline(np.arange(n_wp), traj_qpos_deg, axis=0,
+                             bc_type="clamped")
+            dense_t = np.linspace(0, n_wp - 1, (n_wp - 1) * substeps + 1)
+            dense_qpos_deg = cs(dense_t)
+            logger.info(
+                f"  Episode {ep_idx}: 🔀 stream densified {n_wp} → "
+                f"{len(dense_qpos_deg)} waypoints (substeps={substeps})"
+            )
+        except ImportError:
+            logger.warning("scipy unavailable; substeps disabled")
+            substeps = 1
+
     # ── ④.5 Batch queue: push entire smoothed waypoint plan to robot upfront ──
     # In batch mode, recording loop only observes — Mecademic's internal trajectory
     # generator handles inter-waypoint blending without per-tick command churn.
@@ -338,24 +433,31 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
     next_t = record_start
 
     while True:
-        # Stream mode: send next sim-paced waypoint BEFORE pacing sleep.
+        # Stream mode: send `substeps` MoveJoints per record tick at record_dt/N.
         # Batch mode: skip — entire plan was already queued upfront.
         if (cfg.mode == "traj" and queue_mode == "stream"
-                and traj_qpos_deg is not None):
-            wp_idx = min(ctrl_step, len(traj_qpos_deg) - 1)
-            wp = traj_qpos_deg[wp_idx]
-            if env.robot is not None and not env.dry_run:
-                try:
-                    env.robot.MoveJoints(*[float(j) for j in wp])
-                except Exception as e:
-                    logger.warning(f"stream MoveJoints failed @ wp{wp_idx}: {e}; recover")
-                    env._recover()
+                and dense_qpos_deg is not None):
+            sub_dt = record_dt / max(1, substeps)
+            for s in range(substeps):
+                # dense waypoint index — at substeps=1 this matches ctrl_step.
+                d_idx = min(ctrl_step * substeps + s, len(dense_qpos_deg) - 1)
+                wp = dense_qpos_deg[d_idx]
+                if env.robot is not None and not env.dry_run:
                     try:
                         env.robot.MoveJoints(*[float(j) for j in wp])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"stream MoveJoints failed @ d{d_idx}: {e}; recover")
+                        env._recover()
+                        try:
+                            env.robot.MoveJoints(*[float(j) for j in wp])
+                        except Exception:
+                            pass
+                # Pace each sub-step. Last sub-step uses the original next_t fence
+                # to keep wall-clock alignment intact; intermediate ones just sleep.
+                if s < substeps - 1:
+                    time.sleep(max(0.0, sub_dt))
 
-        # Wall-clock pacing
+        # Wall-clock pacing (final sub-step / batch mode)
         now = time.time()
         if now < next_t:
             time.sleep(max(0.0, next_t - now))
@@ -459,14 +561,30 @@ def run_collection_episode_replay(model, data, env: RealCollectEnv,
                 f"tip→goal_mm={np.linalg.norm(curr_tip - goal_tip)*1000:.2f}"
             )
 
-        # Success check (real ee close to aligned target via sim mirror)
-        if np.linalg.norm(curr_tip - goal_tip) < ALIGN_THRESHOLD_M:
-            align_timer += 1
+        # Success / termination
+        if cfg.mode == "traj" and traj_qpos_deg is not None:
+            # Plan-based termination: stop when sim's waypoint plan is exhausted.
+            # Plan already includes ALIGN_HOLD_STEPS padding, so this guarantees
+            # real step count == sim step count (identical episode length).
+            tip_close = np.linalg.norm(curr_tip - goal_tip) < ALIGN_THRESHOLD_M
+            if ctrl_step >= len(traj_qpos_deg):
+                success = bool(tip_close)
+                logger.info(
+                    f"  Episode {ep_idx}: plan exhausted at ctrl={ctrl_step}  "
+                    f"final_tip→goal_mm={np.linalg.norm(curr_tip - goal_tip)*1000:.2f}  "
+                    f"success={success}"
+                )
+                break
         else:
-            align_timer = 0
-        if align_timer > ALIGN_HOLD_STEPS:
-            success = True
-            break
+            # Single mode (no plan): real-state based success check, kept for
+            # backwards compatibility.
+            if np.linalg.norm(curr_tip - goal_tip) < ALIGN_THRESHOLD_M:
+                align_timer += 1
+            else:
+                align_timer = 0
+            if align_timer > ALIGN_HOLD_STEPS:
+                success = True
+                break
 
         if ctrl_step >= cfg.max_steps:
             logger.warning(f"  Episode {ep_idx}: hit max_steps={cfg.max_steps}")
@@ -586,6 +704,20 @@ def _parse_args():
     ap.add_argument("--mode", choices=["single", "traj"], default="traj",
                     help="single = one MoveJoints to aligned (Mecademic native speed). "
                          "traj = stream sim waypoints at sim's pace (default).")
+    ap.add_argument("--traj-source", choices=["sim_ik", "smoothstep"],
+                    default="smoothstep",
+                    help="traj waypoint source. smoothstep = clean joint-space "
+                         "S-curve from perturbed→aligned (no IK noise, recommended). "
+                         "sim_ik = replay sim's per-tick IK output. Default smoothstep.")
+    ap.add_argument("--traj-duration-sec", type=float, default=8.0,
+                    help="(smoothstep only, when --no-auto-duration) fixed trajectory "
+                         "duration in seconds. n_waypoints = duration / record_dt. "
+                         "Default 8.0s.")
+    ap.add_argument("--no-auto-duration", dest="auto_duration",
+                    action="store_false", default=True,
+                    help="Disable auto duration. By default smoothstep computes "
+                         "duration = ee_dist / FINE_ALIGN_SPEED (same as sim) → "
+                         "step count matches sim exactly.")
     ap.add_argument("--smooth-window", type=int, default=9,
                     help="Window size (waypoints) for joint-space smoothing. "
                          "0 or 1 = disable. Default 9.")
@@ -595,7 +727,12 @@ def _parse_args():
                          "savgol preserves curvature; moving = simple mean. Default savgol.")
     ap.add_argument("--smooth-polyorder", type=int, default=3,
                     help="Polynomial order for Savitzky-Golay (must be < window). Default 3.")
-    ap.add_argument("--queue-mode", choices=["stream", "batch"], default="batch",
+    ap.add_argument("--substeps", type=int, default=1,
+                    help="(stream mode) Cubic-spline interpolate N sub-waypoints "
+                         "per record tick. Robot receives MoveJoints at "
+                         "record_dt/N intervals → smaller Δq, continuous blending, "
+                         "less jitter. Recording cadence unchanged. Default 1.")
+    ap.add_argument("--queue-mode", choices=["stream", "batch"], default="stream",
                     help="stream = one MoveJoints per record tick (sim-paced sleep). "
                          "batch = pre-queue ALL waypoints upfront, recording loop only "
                          "observes (zero command-arrival jitter). Default batch.")
@@ -660,7 +797,15 @@ def main():
     cfg.queue_mode = str(args.queue_mode)
     cfg.batch_queue_vel = (float(args.batch_queue_vel)
                            if args.batch_queue_vel is not None else None)
+    cfg.substeps = max(1, int(args.substeps))
+    cfg.traj_source = str(args.traj_source)
+    cfg.traj_duration_sec = float(args.traj_duration_sec)
+    cfg.auto_duration = bool(args.auto_duration)
     logger.info(f"🛤  Replay mode: {cfg.mode}  queue={cfg.queue_mode}  "
+                f"traj_source={cfg.traj_source}  "
+                f"auto_duration={cfg.auto_duration}"
+                f"{f'(fixed={cfg.traj_duration_sec}s)' if not cfg.auto_duration else ''}  "
+                f"substeps={cfg.substeps}  "
                 f"smooth={cfg.smooth_method}(window={cfg.smooth_window}"
                 f"{f',poly={cfg.smooth_polyorder}' if cfg.smooth_method=='savgol' else ''})")
     cfg.record_cameras = list(args.cameras)

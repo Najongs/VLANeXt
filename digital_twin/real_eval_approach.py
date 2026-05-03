@@ -79,6 +79,7 @@ class OAKCameraManager:
             c = p.create(dai.node.ColorCamera)
             c.setBoardSocket(dai.CameraBoardSocket.CAM_A)
             c.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+            c.setFps(30)
             c.setPreviewSize(self.width, self.height)
             c.setInterleaved(False)
 
@@ -122,7 +123,8 @@ class OAKCameraManager:
 class ApproachRealEnv:
     """Real Meca500 + OAK cameras. Drop-in replacement for ApproachSimEnv during eval."""
 
-    def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False, skip_home=False):
+    def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False, skip_home=False,
+                 joint_vel_limit=None):
         self.swap_cameras = swap_cameras
         self.skip_home = skip_home
 
@@ -135,6 +137,12 @@ class ApproachRealEnv:
         logger.info("✅ Robot connected. Activating + homing...")
         self.robot.ActivateAndHome()
         self.robot.SetRealTimeMonitoring(1)
+        if joint_vel_limit is not None and joint_vel_limit > 0:
+            try:
+                self.robot.SetJointVelLimit(float(joint_vel_limit))
+                logger.info(f"⚙️  SetJointVelLimit = {joint_vel_limit} deg/s (slower = smoother)")
+            except Exception as e:
+                logger.warning(f"SetJointVelLimit failed (non-fatal): {e}")
         if not skip_home:
             self.robot.MoveJoints(*HOME_JOINTS)
             self.robot.WaitIdle()
@@ -304,6 +312,7 @@ def run_real_eval(cfg):
     env = ApproachRealEnv(
         robot_address=getattr(cfg, "robot_address", ROBOT_ADDRESS_DEFAULT),
         swap_cameras=getattr(cfg, "swap_cameras", False),
+        joint_vel_limit=getattr(cfg, "joint_vel_limit", None),
     )
     dry_run = getattr(cfg, "dry_run", False)
     if dry_run:
@@ -454,6 +463,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-episodes", type=int, default=1)
     parser.add_argument("--swap-cameras", action="store_true",
                         help="Swap camera1↔camera2 mapping")
+    parser.add_argument("--joint-vel-limit", type=float, default=None,
+                        help="Mecademic SetJointVelLimit (deg/s). Lower = slower + smoother. "
+                             "Combine with larger --max-steps for slower trajectory. e.g. 5")
     parser.add_argument("--dry-run", action="store_true",
                         help="Skip MovePose; just print targets (safe smoke test)")
     args = parser.parse_args()
@@ -471,6 +483,7 @@ if __name__ == "__main__":
     cfg.max_steps = args.max_steps
     cfg.num_episodes = args.num_episodes
     cfg.swap_cameras = args.swap_cameras
+    cfg.joint_vel_limit = args.joint_vel_limit
     cfg.dry_run = args.dry_run
 
     run_real_eval(cfg)

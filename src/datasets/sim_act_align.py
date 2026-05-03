@@ -8,6 +8,12 @@ import h5py
 import torch
 from torch.utils.data import IterableDataset
 
+from src.datasets.euler_convention import (
+    convert_ee_pose_to_mecademic,
+    recompute_delta_orientation,
+    infer_convention,
+)
+
 # Action normalization stats for align-only dataset (99th percentile, symmetric)
 # delta_pose(6) + gripper(1)
 # Each dimension uses max(abs(p1), abs(p99)) so that normalized 0 = no movement.
@@ -18,12 +24,11 @@ from torch.utils.data import IterableDataset
 # action_min_sim_align = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
 # action_max_sim_align = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, -1.0]
 
-action_min_sim_align = [-0.3, -0.3, -0.3, -0.002, -0.002, -0.002, -1.0]
-action_max_sim_align = [0.3, 0.3, 0.3, 0.002, 0.002, 0.002, 1.0]
+# action_min_sim_align = [-0.3, -0.3, -0.3, -0.002, -0.002, -0.002, -1.0]
+# action_max_sim_align = [0.3, 0.3, 0.3, 0.002, 0.002, 0.002, 1.0]
 
-
-# action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
-# action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
+action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
+action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
 
 # action_min_sim_align = [-0.38991427421569824, -0.05123097822070122, -0.37570905685424805, -0.0019127572886645794, -0.0008466076687909663, 7.329344953177497e-05, -1.0]
 # action_max_sim_align = [0.2393515408039093, 0.5194841623306274, 0.27770981192588806, 0.003510331502184272, 0.0007455003215000033, 0.006129839923232794, -1.0]
@@ -85,19 +90,28 @@ class SimActAlign(IterableDataset):
         #   - list of str: multiple paths, all episodes used
         #   - list of dict: multiple paths with optional max_episodes per path
         #     e.g. [{"path": "/data/...", "max_episodes": 10000}, ...]
+        # Track per-episode Euler convention ("mujoco" or "mecademic").
+        # Dict entries can override via "convention" key; otherwise inferred from path.
+        self._path_to_conv = {}
+
         if isinstance(data_dir, (list, tuple)):
             self.episode_paths = []
             for d in data_dir:
                 if isinstance(d, dict):
                     p = d["path"]
                     max_ep = d.get("max_episodes", None)
+                    conv = d.get("convention", None)
                 else:
                     p = d
                     max_ep = None
+                    conv = None
                 eps = sorted(glob.glob(os.path.join(p, "**", "*.h5"), recursive=True))
                 if max_ep is not None and len(eps) > max_ep:
                     rng = np.random.RandomState(42)
                     eps = sorted(rng.choice(eps, size=max_ep, replace=False).tolist())
+                use_conv = conv if conv is not None else infer_convention(p)
+                for ep in eps:
+                    self._path_to_conv[ep] = use_conv
                 self.episode_paths.extend(eps)
             self.episode_paths = sorted(self.episode_paths)
             if not self.episode_paths:
@@ -106,6 +120,9 @@ class SimActAlign(IterableDataset):
             self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
             if not self.episode_paths:
                 raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
+            conv = infer_convention(data_dir)
+            for ep in self.episode_paths:
+                self._path_to_conv[ep] = conv
 
     @staticmethod
     def _decode_jpeg(jpeg_data):
@@ -127,15 +144,25 @@ class SimActAlign(IterableDataset):
         with h5py.File(h5_path, "r") as f:
             traj_len = f["action"].shape[0]
 
+            # --- Raw actions + ee_pose; orientation convention may differ
+            #     between sim (MuJoCo extrinsic XYZ) and real (Mecademic
+            #     intrinsic XYZ). Unify to Mecademic before normalization. ---
+            actions_raw = f["action"][:].astype(np.float32)                       # (N, 7)
+            ee_pose_raw = f["observations"]["ee_pose"][:].astype(np.float32)      # (N, 7)
+            conv = self._path_to_conv.get(h5_path, "mujoco")
+            if conv == "mujoco":
+                ee_pose_raw = convert_ee_pose_to_mecademic(ee_pose_raw, src="mujoco")
+                actions_raw = recompute_delta_orientation(actions_raw, ee_pose_raw)
+
             # --- Actions (N, 7): normalize delta_pose + gripper to [-1, 1] ---
-            actions_np = f["action"][:].astype(np.float32)
+            actions_np = actions_raw
             denominator = self.action_max - self.action_min
             denominator = np.where(denominator == 0, 1.0, denominator)
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
             # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
-            proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
+            proprio_np = ee_pose_raw  # already in Mecademic convention
             if self.use_sensor and "sensor_dist" in f["observations"]:
                 sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
                 if sensor_dist.ndim == 1:

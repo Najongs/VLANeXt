@@ -75,7 +75,7 @@ CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.05          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
-FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
+FINE_ALIGN_SPEED = 0.005    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 30.0    # XY 평면 perturbation 범위 (±mm)
