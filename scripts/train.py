@@ -537,7 +537,6 @@ def train(config):
             connector_depth=config['model']['connector_depth'],
             connector_num_heads=config['model']['connector_num_heads'],
             backbone_mode=config['model'].get('backbone_mode', 'finetune'),
-            lora_config=config['model'].get('lora', None),
             gradient_checkpointing=config['model'].get('gradient_checkpointing', False),
             num_bins=config['model'].get('num_bins', 256),
             generator_hidden_size=config['model'].get('generator_hidden_size', 768),
@@ -550,8 +549,6 @@ def train(config):
             dct_high_freq_weight=config['model'].get('dct_high_freq_weight', 1.0),
             dct_freq_split=config['model'].get('dct_freq_split', 0.125),
             dct_similarity_type=config['model'].get('dct_similarity_type', 'mae'),
-            spatial_loss_weight=config['model'].get('spatial_loss_weight', 0.0),
-            proprio_dim=config['model'].get('proprio_dim', None),
         ).to(device, dtype=torch.bfloat16)
     # Load pretrained checkpoint BEFORE DeepSpeed init (so state_dict shapes
     # are visible), but load to CPU first to avoid GPU memory duplication.
@@ -1035,15 +1032,14 @@ def train(config):
         do_update = (batch_idx + 1) % gradient_accumulation_steps == 0
         per_module_gn = {}
         if use_deepspeed:
-            loss, loss_dict = model(
+            out = model(
                 actions=gt_actions,
                 proprioception=proprio,
                 history_actions=hist_actions,
                 future_images=future_images,
-                spatial_targets=spatial_targets,
-                action_weights=action_weights,
                 **forward_args
             )
+            loss, loss_dict = (out if isinstance(out, tuple) else (out, {}))
             loss = loss / gradient_accumulation_steps
             did_update = model.is_gradient_accumulation_boundary()
             model.backward(loss)
@@ -1053,15 +1049,14 @@ def train(config):
         else:
             sync_context = model.no_sync if (is_distributed and not do_update) else nullcontext
             with sync_context():
-                loss, loss_dict = model(
+                out = model(
                     actions=gt_actions,
                     proprioception=proprio,
                     history_actions=hist_actions,
                     future_images=future_images,
-                    spatial_targets=spatial_targets,
-                    action_weights=action_weights,
                     **forward_args
                 )
+                loss, loss_dict = (out if isinstance(out, tuple) else (out, {}))
                 loss = loss / gradient_accumulation_steps
                 loss.backward()
             did_update = do_update

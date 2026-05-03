@@ -8,7 +8,7 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00_slow/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
@@ -21,8 +21,8 @@ data:
   future_len: 8
   buffer_size: 3000
 
-  batch_size: 198
-  max_steps: 20000
+  batch_size: 102
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
@@ -118,7 +118,7 @@ train:
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true

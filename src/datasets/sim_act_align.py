@@ -27,8 +27,10 @@ from src.datasets.euler_convention import (
 # action_min_sim_align = [-1, -1, -1, -0.01, -0.01, -0.01, -1]
 # action_max_sim_align = [1, 1, 1, 0.01, 0.01, 0.01, 1]
 
-action_min_sim_align = [-0.3, -0.3, -0.3, -0.002, -0.002, -0.002, -1.0]
-action_max_sim_align = [0.3, 0.3, 0.3, 0.002, 0.002, 0.002, 1.0]
+# Re-tuned to fine_align_00_slow p99 (2026-05-02). Previous ±0.002 rot range
+# left dim4 using only ±0.22 of [-1,1] — diffusion signal compressed near 0.
+action_min_sim_align = [-0.30, -0.30, -0.25, -0.0013, -0.0005, -0.0016, -1.0]
+action_max_sim_align = [0.30, 0.30, 0.25, 0.0013, 0.0005, 0.0016, 1.0]
 
 # action_min_sim_align = [-0.38991427421569824, -0.05123097822070122, -0.37570905685424805, -0.0019127572886645794, -0.0008466076687909663, 7.329344953177497e-05, -1.0]
 # action_max_sim_align = [0.2393515408039093, 0.5194841623306274, 0.27770981192588806, 0.003510331502184272, 0.0007455003215000033, 0.006129839923232794, -1.0]
