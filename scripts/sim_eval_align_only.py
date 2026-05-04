@@ -37,6 +37,10 @@ from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
 from src.datasets.sim_act_align import action_min_sim_align as action_min_sim, action_max_sim_align as action_max_sim
+from src.datasets.euler_convention import (
+    mujoco_to_mecademic_euler,
+    mecademic_to_mujoco_euler,
+)
 
 # Reuse model loading / inference from sim_eval
 from scripts.sim_eval import (
@@ -709,14 +713,17 @@ def run_eval(cfg):
 
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)
 
-            ee_pose = env.get_ee_pose()
+            ee_pose = env.get_ee_pose()  # mujoco extrinsic XYZ
+            # Match training convention: proprio orientation in Mecademic intrinsic XYZ
+            ee_pose_mec = ee_pose.copy()
+            ee_pose_mec[3:6] = mujoco_to_mecademic_euler(ee_pose[3:6])
             use_sensor = getattr(cfg.model, "use_sensor", False)
             if use_sensor:
                 sensor_dist = env.get_sensor_dist()
                 sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
-                proprio = np.concatenate([ee_pose, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist(raw mm)
+                proprio = np.concatenate([ee_pose_mec, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist(raw mm)
             else:
-                proprio = np.concatenate([ee_pose, [0.0]])  # (8,): ee_pose + gripper
+                proprio = np.concatenate([ee_pose_mec, [0.0]])  # (8,): ee_pose + gripper
             state_history.append(proprio)
 
             observation = {
@@ -749,7 +756,14 @@ def run_eval(cfg):
             a_min = np.array(action_min_sim, dtype=np.float32)
             a_max = np.array(action_max_sim, dtype=np.float32)
             denorm_action = (raw_action + 1.0) / 2.0 * (a_max - a_min) + a_min
-            delta_ee = denorm_action[:6]
+
+            # denorm_action[3:6] is delta in Mecademic intrinsic XYZ (training convention).
+            # Convert to delta in MuJoCo extrinsic XYZ for apply_delta_ee.
+            target_mec_rpy = ee_pose_mec[3:6] + denorm_action[3:6]
+            target_mujoco_rpy = mecademic_to_mujoco_euler(target_mec_rpy)
+            delta_rpy_mujoco = target_mujoco_rpy - ee_pose[3:6]
+            delta_rpy_mujoco = np.arctan2(np.sin(delta_rpy_mujoco), np.cos(delta_rpy_mujoco))
+            delta_ee = np.concatenate([denorm_action[:3], delta_rpy_mujoco]).astype(np.float32)
 
             env.apply_delta_ee(delta_ee, n_sim_steps=sim_steps_per_ctrl)
 

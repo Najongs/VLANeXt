@@ -37,7 +37,23 @@ python Sim/filter_outliers.py \
     --max-steps 250 \
     --min-steps 30 \
     --execute
-    
+
+python Sim/filter_outliers.py \
+    --data-dir /home/najo/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged \
+    --spike-ratio 2.0 \
+    --pos-sigma 2.5 \
+    --max-range 50 \
+    --max-detour 3.0 \
+    --max-path-length 50 \
+    --max-rot 0.02 \
+    --max-steps 250 \
+    --min-steps 30 \
+    --high-action-thr 0.5 \
+    --high-action-frames 5 \
+    --high-rot-thr 0.005 \
+    --high-rot-frames 5 \
+    --execute
+
 """
 
 import os
@@ -118,6 +134,10 @@ def analyze_episode(h5_path):
     max_abs_rot = float(np.max(np.abs(rot_deltas)))
     n_rot_outlier_frames = 0  # will be set by caller if threshold given
 
+    # Per-frame max abs trans/rot for plateau-style outlier detection
+    per_frame_max_trans = np.max(np.abs(act[:, :3]), axis=1)  # (N,)
+    per_frame_max_rot = np.max(np.abs(act[:, 3:6]), axis=1)   # (N,)
+
     return {
         'path': h5_path,
         'n_steps': n_steps,
@@ -132,6 +152,8 @@ def analyze_episode(h5_path):
         'direct_dist': direct_dist,
         'detour_ratio': detour_ratio,
         'max_abs_rot': max_abs_rot,
+        'per_frame_max_trans': per_frame_max_trans,
+        'per_frame_max_rot': per_frame_max_rot,
     }
 
 
@@ -156,6 +178,14 @@ def main():
                         help="Flag episodes with fewer than this many steps. 0=disable (default: 0)")
     parser.add_argument('--max-steps', type=int, default=0,
                         help="Flag episodes with more than this many steps. 0=disable (default: 0)")
+    parser.add_argument('--high-action-thr', type=float, default=0.0,
+                        help="Per-frame |trans action| threshold for plateau-outlier detection (mm). 0=disable")
+    parser.add_argument('--high-action-frames', type=int, default=0,
+                        help="Flag episodes with > this many frames exceeding --high-action-thr. 0=disable")
+    parser.add_argument('--high-rot-thr', type=float, default=0.0,
+                        help="Per-frame |rot action| threshold (rad). 0=disable")
+    parser.add_argument('--high-rot-frames', type=int, default=0,
+                        help="Flag episodes with > this many frames exceeding --high-rot-thr. 0=disable")
     parser.add_argument('--execute', action='store_true',
                         help="Actually move files. Without this flag, only reports.")
     args = parser.parse_args()
@@ -182,6 +212,10 @@ def main():
         print(f"  7. Min step count: n_steps < {args.min_steps}")
     if args.max_steps > 0:
         print(f"  8. Max step count: n_steps > {args.max_steps}")
+    if args.high_action_thr > 0 and args.high_action_frames > 0:
+        print(f"  9. Trans plateau: > {args.high_action_frames} frames with |trans| > {args.high_action_thr}")
+    if args.high_rot_thr > 0 and args.high_rot_frames > 0:
+        print(f" 10. Rot plateau:   > {args.high_rot_frames} frames with |rot|   > {args.high_rot_thr}")
     print()
 
     all_stats = []
@@ -282,6 +316,24 @@ def main():
         for s in all_stats:
             if s['n_steps'] > args.max_steps and s['path'] not in outlier_paths:
                 s['reason'] = f'too_many_steps ({s["n_steps"]} > {args.max_steps})'
+                outliers.append(s)
+
+    # --- 9. Trans plateau outlier (many frames with high |trans| action) ---
+    if all_stats and args.high_action_thr > 0 and args.high_action_frames > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            n_high = int(np.sum(s['per_frame_max_trans'] > args.high_action_thr))
+            if n_high > args.high_action_frames and s['path'] not in outlier_paths:
+                s['reason'] = f'trans_plateau (n_high={n_high} > {args.high_action_frames}, thr={args.high_action_thr})'
+                outliers.append(s)
+
+    # --- 10. Rot plateau outlier ---
+    if all_stats and args.high_rot_thr > 0 and args.high_rot_frames > 0:
+        outlier_paths = {o['path'] for o in outliers}
+        for s in all_stats:
+            n_high = int(np.sum(s['per_frame_max_rot'] > args.high_rot_thr))
+            if n_high > args.high_rot_frames and s['path'] not in outlier_paths:
+                s['reason'] = f'rot_plateau (n_high={n_high} > {args.high_rot_frames}, thr={args.high_rot_thr})'
                 outliers.append(s)
 
     print(f"\nResults: {len(outliers)} outliers / {len(files)} total ({len(outliers)/len(files)*100:.2f}%)")
