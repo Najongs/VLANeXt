@@ -1,11 +1,11 @@
 python run_parallel.py --script align --workers 20 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00 --phantom-pos 0.0 0.0 --no-side-camera --cameras tool_camera
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00 --phantom-pos 0.0 0.0 --no-side-camera --cameras tool_camera --allow-occluded
 # python run_parallel.py --script align --workers 20 --episodes 50 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01 --phantom-pos 0.0 -0.1 --no-side-camera --cameras tool_camera
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01 --phantom-pos 0.0 -0.1 --no-side-camera --cameras tool_camera --allow-occluded
 # python run_parallel.py --script align --workers 20 --episodes 50 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03 --phantom-pos 0.0 -0.3 --no-side-camera --cameras tool_camera
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03 --phantom-pos 0.0 -0.3 --no-side-camera --cameras tool_camera --allow-occluded
 # python run_parallel.py --script align --workers 20 --episodes 500 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04 --phantom-pos 0.0 -0.4 --no-side-camera --cameras tool_camera
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04 --phantom-pos 0.0 -0.4 --no-side-camera --cameras tool_camera --allow-occluded
 
 # python Save_dataset_align_only.py --save-dir /data/public/NAS/VLANeXt/Sim/test_xyz --perturb -30 30 -30
 

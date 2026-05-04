@@ -104,6 +104,8 @@ def main():
                         help="(approach only) Hold frames after reaching target")
     parser.add_argument("--cameras", type=str, nargs="+", default=None,
                         help="Camera list to save (e.g. --cameras top_camera tool_camera)")
+    parser.add_argument("--allow-occluded", action="store_true",
+                        help="(align) Keep episodes even when needle tip is occluded by phantom in tool_camera")
     # Basic motion mode
     parser.add_argument("--direction", type=str, default=None,
                         help="(basic only) Direction to collect, or 'all' for 10-direction parallel")
@@ -234,6 +236,9 @@ def main():
     # Explicit camera list (overrides no_side_cam_line if both given)
     cameras_line = f"{module_name}.CAMERA_LIST = {args.cameras}" if args.cameras is not None else ""
 
+    # Allow occluded (align only — other scripts ignore the global)
+    allow_occluded_line = f"{module_name}.ALLOW_OCCLUDED = True" if args.allow_occluded and args.script == "align" else ""
+
     # Basic motion: steps per episode
     basic_steps_line = f"{module_name}.STEPS_PER_EPISODE = {args.steps_per_episode}" if args.script == "basic" else ""
 
@@ -290,6 +295,7 @@ with open(r'{grid_json}', 'r') as _f:
 {no_insertion_line}
 {no_side_cam_line}
 {cameras_line}
+{allow_occluded_line}
 {insertion_lines}
 
 if __name__ == "__main__":
@@ -319,6 +325,7 @@ import {module_name}
 {no_insertion_line}
 {no_side_cam_line}
 {cameras_line}
+{allow_occluded_line}
 {basic_steps_line}
 {basic_dir_line}
 {hold_steps_line}

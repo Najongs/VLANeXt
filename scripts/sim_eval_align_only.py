@@ -120,15 +120,15 @@ def _save_trajectory_plot(eval_dir):
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
 # Perturbation (same as data collection)
-PERTURB_POS_XY_MM = 30.0
-PERTURB_POS_Z_MIN_MM = -20.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
+PERTURB_POS_XY_MM = 20.0
+PERTURB_POS_Z_MIN_MM = 0.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
 PERTURB_POS_Z_MAX_MM = 20.0
 PERTURB_ANGLE_DEG = 10.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.005  # 2.5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.0025  # 2.5mm
 ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
-ALIGN_SUCCESS_HOLD_STEPS = 10        # consecutive steps within threshold
+ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
 
 
