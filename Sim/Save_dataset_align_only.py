@@ -82,6 +82,7 @@ PERTURB_POS_XY_MM = 20.0    # XY 평면 perturbation 범위 (±mm)
 PERTURB_POS_Z_MIN_MM = 5.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
 PERTURB_POS_Z_MAX_MM = 20.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 10.0    # 각도 perturbation 범위 (±deg)
+ALLOW_OCCLUDED = False      # True 시 tool_camera에서 needle tip이 가려져도 폐기하지 않음
 
 # --- 성공 조건 ---
 ALIGN_THRESHOLD_M = 0.002   # needle tip - trocar entry 거리 (m)
@@ -96,7 +97,7 @@ HOLD_RECORD_STEPS = 20           # 정렬 완료 후 녹화 control steps
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
 TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
-MAX_CTRL_STEPS = 250        # 녹화 control step 상한 (초과 시 에피소드 폐기)
+MAX_CTRL_STEPS = 200        # 녹화 control step 상한 (초과 시 에피소드 폐기)
 
 # --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
 RETREAT_MM = 2.0           # insertion axis 반대 방향 retreat (mm)
@@ -653,12 +654,12 @@ def main():
         if perturb_reached:
             tip_occluded = check_tip_occluded()
             if tip_occluded:
-                reach_tag = "OCCLUDED"
+                reach_tag = "OCCLUDED" if not ALLOW_OCCLUDED else "OCCLUDED(kept)"
 
         print(f"  Episode {episode_count}: perturbation applied "
               f"(pos={perturb_dist_mm:.1f}mm, angle={np.rad2deg(perturb_angle_rad):.1f}deg) [{reach_tag}]")
 
-        if tip_occluded:
+        if tip_occluded and not ALLOW_OCCLUDED:
             print(f"  Episode {episode_count} discarded. Reason: needle tip occluded by phantom")
             continue
 
@@ -901,6 +902,8 @@ if __name__ == "__main__":
                         help="Skip side_camera rendering/saving (saves storage)")
     parser.add_argument("--cameras", type=str, nargs="+", default=None,
                         help="Explicit camera list (overrides --no-side-camera)")
+    parser.add_argument("--allow-occluded", action="store_true",
+                        help="Keep episodes even when tool_camera view of needle tip is occluded by phantom")
     args = parser.parse_args()
 
     # Override globals from CLI args
@@ -914,6 +917,11 @@ if __name__ == "__main__":
 
     # Seed
     RANDOM_SEED = args.seed
+
+    # Allow occluded episodes
+    ALLOW_OCCLUDED = args.allow_occluded
+    if ALLOW_OCCLUDED:
+        print("ALLOW_OCCLUDED=True: occluded episodes will be kept")
 
     # Phantom randomization / fixed position
     RANDOMIZE_PHANTOM = args.randomize_phantom_pos
