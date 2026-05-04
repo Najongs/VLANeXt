@@ -178,14 +178,17 @@ class SimActAlign(IterableDataset):
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None
+            needle_tip_np = None
+            trocar_entry_np = None
+            if "needle_tip_pos" in f["observations"]:
+                needle_tip_np = f["observations"]["needle_tip_pos"][:].astype(np.float32)
+                trocar_entry_np = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
             if "keypoints_wrist" in f["observations"]:
-                needle_tip = f["observations"]["needle_tip_pos"][:].astype(np.float32)
-                trocar_entry = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
                 kp_wrist = f["observations"]["keypoints_wrist"][:].astype(np.float32)
                 kp_vis = f["observations"]["keypoints_visibility"][:].astype(np.float32)
                 phase_raw = f["phase"][:].astype(np.float32)
 
-                dist = np.linalg.norm(trocar_entry - needle_tip, axis=-1, keepdims=True)
+                dist = np.linalg.norm(trocar_entry_np - needle_tip_np, axis=-1, keepdims=True)
                 dist_normalized = dist / 100.0
                 phase_binary = np.clip(phase_raw - 1, 0, 1).reshape(-1, 1)
 
@@ -218,7 +221,8 @@ class SimActAlign(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
+        return (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
+                spatial_targets_np, action_weight_np, needle_tip_np, trocar_entry_np)
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -252,7 +256,9 @@ class SimActAlign(IterableDataset):
 
             for ep_path in episode_paths:
                 try:
-                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                    (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
+                     spatial_targets_np, action_weight_np,
+                     needle_tip_np, trocar_entry_np) = self._load_episode(ep_path)
                 except Exception as e:
                     print(f"[Warn] Skipping {ep_path}: {e}")
                     continue
@@ -320,6 +326,11 @@ class SimActAlign(IterableDataset):
                     else:
                         sample["spatial_target"] = None
 
+                    # Raw 3D positions (mm) for aux distance loss; None for real datasets.
+                    if needle_tip_np is not None:
+                        sample["needle_tip_pos"] = torch.from_numpy(needle_tip_np[t].copy())
+                        sample["trocar_entry_pos"] = torch.from_numpy(trocar_entry_np[t].copy())
+
                     # Action loss weight
                     sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)
 
@@ -364,6 +375,8 @@ class SimActAlign(IterableDataset):
                     del top_np
                 if spatial_targets_np is not None:
                     del spatial_targets_np
+                if needle_tip_np is not None:
+                    del needle_tip_np, trocar_entry_np
                 gc.collect()
 
         # No flush — loop back and keep filling the buffer

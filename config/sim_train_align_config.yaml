@@ -111,6 +111,15 @@ model:
   use_action_input_policy: false
   gradient_checkpointing: true
 
+  # Auxiliary distance loss (sim-only — uses HDF5 needle_tip_pos / trocar_entry_pos).
+  # Encourages predicted actions not to increase needle-tip → trocar distance.
+  # Set enabled=false (or omit) when GT not available (e.g., real fine-tune).
+  aux_distance_loss:
+    enabled: true
+    weight: 0.05                       # λ — start small (try 0.02~0.2)
+    margin_mm: 0.1                     # tolerated distance increase (mm)
+    pos_denorm_mm: [0.30, 0.30, 0.25]  # MUST match action_max_sim_align[:3] (symmetric)
+
 train:
   seed: 2026
   resume_path: ""

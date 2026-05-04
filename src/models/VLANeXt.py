@@ -250,8 +250,20 @@ class VLANeXt(nn.Module):
         dct_similarity_type="mse",  # Options: "mse", "mae", "cosine"
         spatial_loss_weight=0.0,
         proprio_dim=None,
+        aux_distance_loss=None,
     ):
         super().__init__()
+        # Aux distance loss config (sim-only). Disabled if config missing/false.
+        adl = aux_distance_loss or {}
+        self.aux_dist_enabled = bool(adl.get("enabled", False))
+        self.aux_dist_weight = float(adl.get("weight", 0.0))
+        self.aux_dist_margin_mm = float(adl.get("margin_mm", 0.1))
+        pos_max = adl.get("pos_denorm_mm", [0.30, 0.30, 0.25])
+        self.register_buffer(
+            "aux_pos_denorm_mm",
+            torch.tensor(pos_max, dtype=torch.float32),
+            persistent=False,
+        )
 
         print(f"Initializing VLM {lmm_path} with attn_implementation: {attn_implementation}")
         if "paligemma" in lmm_path.lower():
@@ -895,7 +907,7 @@ class VLANeXt(nn.Module):
             raise ValueError(f"Unknown dct_similarity_type: {sim_type!r}. "
                              f"Options are: 'mse', 'mae', 'cosine'.")
 
-    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, task=None):
+    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None, task=None):
         if task == "action_vqvae_pretrain":
             return self.forward_action_vqvae_pretrain(actions), {}
 
@@ -913,7 +925,9 @@ class VLANeXt(nn.Module):
             return self._forward_diffusion(
                 input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask,
                 pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets,
-                action_weights=action_weights
+                action_weights=action_weights,
+                needle_tip_pos=needle_tip_pos,
+                trocar_entry_pos=trocar_entry_pos,
             )
 
     def _forward_classification(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
@@ -1046,7 +1060,7 @@ class VLANeXt(nn.Module):
             loss = loss + self.spatial_loss_weight * spatial_loss
         return loss, loss_dict
 
-    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None):
+    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -1095,23 +1109,47 @@ class VLANeXt(nn.Module):
             loss = F.mse_loss(pred, target)
         loss_dict = {"loss/main": loss.item()}
 
-        if self.dct_loss_weight > 0:
-            pred_x_start = None
+        # Reconstruct predicted x_start (clean action) — needed by DCT and aux distance losses.
+        pred_x_start = None
+        need_x_start = self.dct_loss_weight > 0 or (
+            self.aux_dist_enabled and self.aux_dist_weight > 0
+            and needle_tip_pos is not None and trocar_entry_pos is not None
+        )
+        if need_x_start:
             if self.scheduler_type == "flow_match":
-                 pred_x_start = noisy_actions - sigmas_expanded * pred
+                pred_x_start = noisy_actions - sigmas_expanded * pred
             elif self.scheduler_type == "ddim":
-                 def view_right(t):
+                def view_right(t):
                     while t.ndim < pred.ndim:
                         t = t.unsqueeze(-1)
                     return t
-                 alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device=pred.device, dtype=pred.dtype)
-                 alpha_prod_t = alphas_cumprod[timesteps]
-                 pred_x_start = (noisy_actions - view_right((1 - alpha_prod_t).sqrt()) * pred) / view_right(alpha_prod_t.sqrt())
+                alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device=pred.device, dtype=pred.dtype)
+                alpha_prod_t = alphas_cumprod[timesteps]
+                pred_x_start = (noisy_actions - view_right((1 - alpha_prod_t).sqrt()) * pred) / view_right(alpha_prod_t.sqrt())
 
-            if pred_x_start is not None:
-                 loss_dct = self._compute_dct_loss(pred_x_start.float(), actions.float())
-                 loss_dict["loss/dct"] = loss_dct.item()
-                 loss = loss + self.dct_loss_weight * loss_dct
+        if self.dct_loss_weight > 0 and pred_x_start is not None:
+            loss_dct = self._compute_dct_loss(pred_x_start.float(), actions.float())
+            loss_dict["loss/dct"] = loss_dct.item()
+            loss = loss + self.dct_loss_weight * loss_dct
+
+        # --- Auxiliary distance loss (sim-only) ---
+        # Penalize predicted action chunks that increase needle-tip → trocar distance.
+        # Uses small-angle approx: tip displacement ≈ ee_pos delta.
+        if (self.aux_dist_enabled and self.aux_dist_weight > 0
+                and needle_tip_pos is not None and trocar_entry_pos is not None
+                and pred_x_start is not None):
+            pred_pos_norm = pred_x_start[..., :3].float()                         # (B, T, 3) in [-1, 1]
+            denorm = self.aux_pos_denorm_mm.to(pred_pos_norm.device).view(1, 1, 3)
+            pred_pos_mm = pred_pos_norm * denorm                                  # (B, T, 3) mm
+            tip = needle_tip_pos.float().unsqueeze(1)                             # (B, 1, 3)
+            trocar = trocar_entry_pos.float().unsqueeze(1)                        # (B, 1, 3)
+            cum_disp = torch.cumsum(pred_pos_mm, dim=1)                           # (B, T, 3)
+            pred_tip_chunk = tip + cum_disp                                       # (B, T, 3)
+            cur_dist = torch.norm(tip - trocar, dim=-1)                           # (B, 1)
+            pred_dist = torch.norm(pred_tip_chunk - trocar, dim=-1)               # (B, T)
+            loss_aux = F.relu(pred_dist - cur_dist + self.aux_dist_margin_mm).mean()
+            loss_dict["loss/aux_dist"] = loss_aux.item()
+            loss = loss + self.aux_dist_weight * loss_aux
 
         if self.future_image_loss_weight > 0:
             loss_dict["loss/future_image"] = loss_img.item() if isinstance(loss_img, torch.Tensor) else loss_img
