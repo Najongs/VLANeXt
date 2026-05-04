@@ -43,15 +43,17 @@ def convert_ee_pose_to_mecademic(ee_pose, src="mujoco"):
 
 
 def recompute_delta_orientation(action, ee_pose_converted):
-    """Recompute action[:, 3:6] = wrap(ee[t+1, 3:6] - ee[t, 3:6]) in target convention.
+    """Recompute action[:, 3:6] in the converted convention.
 
-    Last-frame delta kept as 0 (sim recorder pads same way).
+    Convention must match the position channels recorded in
+    Sim/Save_dataset_align_only.py: ``action[t] = ee[t] - ee[t-1]``
+    ("arrives-at-t"), with action[0] padded to 0.
     """
     out = action.copy().astype(np.float32)
     eul = ee_pose_converted[:, 3:6].astype(np.float32)
     delta = np.zeros_like(eul)
     if len(eul) >= 2:
-        delta[:-1] = eul[1:] - eul[:-1]
+        delta[1:] = eul[1:] - eul[:-1]
         delta = np.arctan2(np.sin(delta), np.cos(delta))  # wrap to [-pi, pi]
     out[:, 3:6] = delta
     return out

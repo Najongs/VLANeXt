@@ -39,7 +39,7 @@ python Sim/filter_outliers.py \
     --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00_slow/collected_data_merged \
+    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
     --max-range 50 \
