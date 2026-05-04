@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 
-python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/real_approach/collected_data_real"
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
 python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/home/najo/NAS/VLANeXt/dataset/fine_align/fine_align_00"
 
 # Multiple folders:

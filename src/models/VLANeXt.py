@@ -264,6 +264,12 @@ class VLANeXt(nn.Module):
             torch.tensor(pos_max, dtype=torch.float32),
             persistent=False,
         )
+        # Near-goal weighting: boost loss for samples where needle tip is close to trocar.
+        # weight_per_sample = 1 + clamp(near_goal_scale_mm / (cur_dist_mm + 1), max=near_goal_max_boost)
+        # Disabled when near_goal_scale_mm <= 0 (default).
+        self.aux_dist_near_goal_scale_mm = float(adl.get("near_goal_scale_mm", 0.0))
+        self.aux_dist_near_goal_max_boost = float(adl.get("near_goal_max_boost", 4.0))
+        self.aux_dist_apply_to_main = bool(adl.get("apply_to_main_loss", True))
 
         print(f"Initializing VLM {lmm_path} with attn_implementation: {attn_implementation}")
         if "paligemma" in lmm_path.lower():
@@ -1101,9 +1107,25 @@ class VLANeXt(nn.Module):
         else:
              raise ValueError(f"Unknown condition type: {self.condition_type}")
         
-        if action_weights is not None:
-            # Weighted MSE: action_weights is (B,), expand to match pred shape
-            w = action_weights.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
+        # Near-goal sample weighting: boost loss when needle tip is close to trocar.
+        # Reuses GT positions already passed for aux_dist_loss. (B,) per-sample weight.
+        near_goal_w = None
+        cur_dist_mm = None
+        if (self.aux_dist_near_goal_scale_mm > 0
+                and needle_tip_pos is not None and trocar_entry_pos is not None):
+            tip_b = needle_tip_pos.float()      # (B, 3) in mm
+            trocar_b = trocar_entry_pos.float() # (B, 3) in mm
+            cur_dist_mm = torch.norm(tip_b - trocar_b, dim=-1)  # (B,) mm
+            boost = self.aux_dist_near_goal_scale_mm / (cur_dist_mm + 1.0)
+            near_goal_w = (1.0 + boost).clamp(max=1.0 + self.aux_dist_near_goal_max_boost)
+
+        # Combine action_weights × near_goal_w for main MSE (only if apply_to_main_loss).
+        effective_w = action_weights
+        if near_goal_w is not None and self.aux_dist_apply_to_main:
+            effective_w = near_goal_w if action_weights is None else (action_weights * near_goal_w)
+
+        if effective_w is not None:
+            w = effective_w.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
             loss = (w * (pred - target) ** 2).mean()
         else:
             loss = F.mse_loss(pred, target)
@@ -1147,7 +1169,11 @@ class VLANeXt(nn.Module):
             pred_tip_chunk = tip + cum_disp                                       # (B, T, 3)
             cur_dist = torch.norm(tip - trocar, dim=-1)                           # (B, 1)
             pred_dist = torch.norm(pred_tip_chunk - trocar, dim=-1)               # (B, T)
-            loss_aux = F.relu(pred_dist - cur_dist + self.aux_dist_margin_mm).mean()
+            aux_per_sample = F.relu(pred_dist - cur_dist + self.aux_dist_margin_mm).mean(dim=-1)  # (B,)
+            if near_goal_w is not None:
+                loss_aux = (near_goal_w * aux_per_sample).mean()
+            else:
+                loss_aux = aux_per_sample.mean()
             loss_dict["loss/aux_dist"] = loss_aux.item()
             loss = loss + self.aux_dist_weight * loss_aux
 

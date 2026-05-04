@@ -121,15 +121,56 @@ TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port 
 
 # Perturbation (same as data collection)
 PERTURB_POS_XY_MM = 20.0
-PERTURB_POS_Z_MIN_MM = 0.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
+PERTURB_POS_Z_MIN_MM = 5.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
 PERTURB_POS_Z_MAX_MM = 20.0
 PERTURB_ANGLE_DEG = 10.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.0025  # 2.5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.005  # 2.5mm
 ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
 ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
+
+
+def build_perturb_grid(xy_steps, z_steps, angle_steps, repeats,
+                       xy_range=PERTURB_POS_XY_MM,
+                       z_range=(PERTURB_POS_Z_MIN_MM if PERTURB_POS_Z_MIN_MM > 0 else 5.0,
+                                PERTURB_POS_Z_MAX_MM),
+                       angle_range=PERTURB_ANGLE_DEG):
+    """Deterministic perturbation grid — enumerate (x, y, z, angle) cells × repeats."""
+    if xy_steps >= 2:
+        xs = np.linspace(-xy_range, xy_range, xy_steps)
+        ys = np.linspace(-xy_range, xy_range, xy_steps)
+    else:
+        xs = np.array([0.0]); ys = np.array([0.0])
+    if z_steps >= 2:
+        zs = np.linspace(z_range[0], z_range[1], z_steps)
+    elif z_steps == 1:
+        zs = np.array([(z_range[0] + z_range[1]) / 2.0])
+    else:
+        zs = np.array([z_range[0]])
+    if angle_steps >= 2:
+        angles = np.linspace(-angle_range, angle_range, angle_steps)
+    else:
+        angles = np.array([0.0])
+
+    cells = []
+    cell_idx = 0
+    for x in xs:
+        for y in ys:
+            for z in zs:
+                for ang in angles:
+                    for r in range(max(1, repeats)):
+                        cells.append({
+                            "cell_idx": cell_idx,
+                            "repeat_id": r,
+                            "x_mm": float(x),
+                            "y_mm": float(y),
+                            "z_mm": float(z),
+                            "angle_deg": float(ang),
+                        })
+                    cell_idx += 1
+    return cells
 
 
 class AlignSimEnv:
@@ -344,13 +385,15 @@ class AlignSimEnv:
         self._p_depth = p_depth
         print("Pre-alignment cached.")
 
-    def reset(self, max_retries=10):
-        """Reset to aligned state + random perturbation.
-        Retries if IK fails to converge to the perturbed position."""
+    def reset(self, max_retries=10, grid_cell=None):
+        """Reset to aligned state + perturbation (random or grid)."""
         if self.randomize_phantom:
             # Invalidate cache so _ensure_aligned_state re-runs
             self._aligned_qpos = None
         self._ensure_aligned_state()
+
+        if grid_cell is not None:
+            max_retries = 1  # deterministic — retrying same target won't help
 
         for attempt in range(max_retries):
             mujoco.mj_resetData(self.model, self.data)
@@ -358,20 +401,30 @@ class AlignSimEnv:
             self.data.qvel[:self.n_motors] = self._aligned_qvel
             mujoco.mj_forward(self.model, self.data)
 
-            # Random perturbation — Z 방향 균등 배분
-            pick_z_neg = self._z_dir_counts["neg"] <= self._z_dir_counts["pos"]
-            if pick_z_neg and PERTURB_POS_Z_MIN_MM < 0:
-                z_val = np.random.uniform(PERTURB_POS_Z_MIN_MM, 0) / 1000.0
+            if grid_cell is not None:
+                # Deterministic perturbation from grid cell
+                perturb_xyz = np.array([
+                    grid_cell["x_mm"] / 1000.0,
+                    grid_cell["y_mm"] / 1000.0,
+                    grid_cell["z_mm"] / 1000.0,
+                ])
+                perturb_angle_rad = np.deg2rad(grid_cell["angle_deg"])
+                random_axis = np.array([1.0, 0.0, 0.0])  # fixed axis for reproducibility
             else:
-                z_val = np.random.uniform(0, PERTURB_POS_Z_MAX_MM) / 1000.0
-            perturb_xyz = np.array([
-                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                z_val,
-            ])
-            perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
-            random_axis = np.random.randn(3)
-            random_axis = random_axis / (np.linalg.norm(random_axis) + 1e-10)
+                # Random perturbation — Z 방향 균등 배분
+                pick_z_neg = self._z_dir_counts["neg"] <= self._z_dir_counts["pos"]
+                if pick_z_neg and PERTURB_POS_Z_MIN_MM < 0:
+                    z_val = np.random.uniform(PERTURB_POS_Z_MIN_MM, 0) / 1000.0
+                else:
+                    z_val = np.random.uniform(0, PERTURB_POS_Z_MAX_MM) / 1000.0
+                perturb_xyz = np.array([
+                    np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                    np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                    z_val,
+                ])
+                perturb_angle_rad = np.deg2rad(np.random.uniform(-PERTURB_ANGLE_DEG, PERTURB_ANGLE_DEG))
+                random_axis = np.random.randn(3)
+                random_axis = random_axis / (np.linalg.norm(random_axis) + 1e-10)
 
             perturbed_tip = self._goal_tip + perturb_xyz
             rot_mat_perturb = np.eye(3)
@@ -620,10 +673,15 @@ def run_eval(cfg):
     shard_id = getattr(cfg, "shard_id", None)
     num_shards = getattr(cfg, "num_shards", None)
 
-    seed = cfg.eval.seed
+    # Seed: CLI override > config (reproducibility for random mode)
+    eval_seed_override = getattr(cfg, "eval_seed", None)
+    seed = eval_seed_override if eval_seed_override is not None else cfg.eval.seed
     if shard_id is not None:
         seed = seed + shard_id * 1000
     set_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    print(f"[seed] eval seed = {seed} (shard_id={shard_id})")
 
     diff_steps = getattr(cfg.model, "diffusion_steps", 10)
     sched_type = getattr(cfg.model, "scheduler_type", "flow_match")
@@ -639,13 +697,34 @@ def run_eval(cfg):
     save_video = getattr(cfg.eval, "save_video", True)
     video_fps = getattr(cfg.eval, "video_fps", 15)
 
-    # Build episode list
+    # Perturbation mode: random (legacy) or grid (deterministic)
+    perturb_mode = getattr(cfg, "perturb_mode", "random")
+    grid_cells_all = None
+    if perturb_mode == "grid":
+        grid_cells_all = build_perturb_grid(
+            xy_steps=getattr(cfg, "xy_steps", 5),
+            z_steps=getattr(cfg, "z_steps", 2),
+            angle_steps=getattr(cfg, "angle_steps", 1),
+            repeats=getattr(cfg, "repeats", 1),
+        )
+        num_episodes = len(grid_cells_all)
+        print(f"[grid] perturb_mode=grid → {num_episodes} cells "
+              f"(xy={getattr(cfg, 'xy_steps', 5)}, z={getattr(cfg, 'z_steps', 2)}, "
+              f"angle={getattr(cfg, 'angle_steps', 1)}, repeats={getattr(cfg, 'repeats', 1)})")
+
+    # Build episode list (1-based) and assign grid cell per episode
     all_episodes = list(range(1, num_episodes + 1))
     if shard_id is not None and num_shards is not None:
         all_episodes = [ep for ep in all_episodes if (ep - 1) % num_shards == shard_id]
         shard_suffix = f"_shard{shard_id}"
     else:
         shard_suffix = ""
+
+    # Map episode index → grid cell (None for random mode)
+    if grid_cells_all is not None:
+        ep_to_cell = {ep: grid_cells_all[ep - 1] for ep in all_episodes}
+    else:
+        ep_to_cell = {ep: None for ep in all_episodes}
 
     # Output directory
     ckpt_path = pathlib.Path(checkpoint_path)
@@ -677,12 +756,14 @@ def run_eval(cfg):
                    "final_sensor_dist_mm",
                    "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
                    "perturb_angle_deg", "perturb_dist_mm", "initial_dist_mm"]
+    if grid_cells_all is not None:
+        csv_header.extend(["cell_idx", "repeat_id"])
     if randomize_phantom or phantom_pos is not None:
         csv_header.extend(["phantom_x", "phantom_y", "phantom_angle_deg"])
     csv_writer.writerow(csv_header)
 
     for ep in all_episodes:
-        env.reset()
+        env.reset(grid_cell=ep_to_cell[ep])
 
         image_history = []
         image_history_wrist = []
@@ -798,6 +879,9 @@ def run_eval(cfg):
             f"{pi['perturb_x_mm']:.2f}", f"{pi['perturb_y_mm']:.2f}", f"{pi['perturb_z_mm']:.2f}",
             f"{pi['perturb_angle_deg']:.2f}", f"{pi['perturb_dist_mm']:.2f}", f"{pi['initial_dist_mm']:.2f}",
         ]
+        if grid_cells_all is not None:
+            cell = ep_to_cell[ep]
+            row.extend([cell["cell_idx"], cell["repeat_id"]])
         if (randomize_phantom or phantom_pos is not None) and env.last_phantom_info:
             ph = env.last_phantom_info
             row.extend([f"{ph['phantom_x']:.4f}", f"{ph['phantom_y']:.4f}", f"{ph['phantom_angle_deg']:.1f}"])
@@ -857,6 +941,19 @@ if __name__ == "__main__":
                         help="Override eval.max_steps_per_episode (default: use config value)")
     parser.add_argument("--sensor-success", action="store_true",
                         help="Require sensor to see through trocar hole for success")
+    parser.add_argument("--eval-seed", type=int, default=None,
+                        help="Override eval.seed for reproducibility (random mode)")
+    parser.add_argument("--perturb-mode", type=str, default="random",
+                        choices=["random", "grid"],
+                        help="random: legacy uniform sampling; grid: deterministic 4D grid")
+    parser.add_argument("--xy-steps", type=int, default=5,
+                        help="(grid) XY axis steps per side. Default 5 → 5x5=25 cells")
+    parser.add_argument("--z-steps", type=int, default=2,
+                        help="(grid) Z axis steps. Default 2 (near/far)")
+    parser.add_argument("--angle-steps", type=int, default=1,
+                        help="(grid) Angle steps. Default 1 → angle=0 fixed")
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="(grid) Repeats per cell (for stochastic policy variance)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -874,5 +971,11 @@ if __name__ == "__main__":
     cfg.use_sensor_success = args.sensor_success
     cfg.retreat_mm = args.retreat_mm
     cfg.max_steps = args.max_steps
+    cfg.eval_seed = args.eval_seed
+    cfg.perturb_mode = args.perturb_mode
+    cfg.xy_steps = args.xy_steps
+    cfg.z_steps = args.z_steps
+    cfg.angle_steps = args.angle_steps
+    cfg.repeats = args.repeats
 
     run_eval(cfg)
