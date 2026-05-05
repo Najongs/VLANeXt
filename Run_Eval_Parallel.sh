@@ -17,7 +17,7 @@
 #   관련 파일: Save_dataset_align_only.py, sim_eval_align_only.py, run_parallel.py
 #
 # Examples:
-# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0504 --phantom-pos 0.0 0.0 --retreat-mm 2 --max-steps 300 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1
+# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0505 --phantom-pos 0.0 0.0 --retreat-mm 2 --max-steps 300 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1
 #   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
 #   bash Run_Eval_Parallel.sh approach /data/public/NAS/VLANeXt/output_dir_approach_2mix_0426 --phantom-pos 0.0 -0.4

@@ -251,6 +251,7 @@ class VLANeXt(nn.Module):
         spatial_loss_weight=0.0,
         proprio_dim=None,
         aux_distance_loss=None,
+        direction_decoupled_loss=None,
     ):
         super().__init__()
         # Aux distance loss config (sim-only). Disabled if config missing/false.
@@ -270,6 +271,17 @@ class VLANeXt(nn.Module):
         self.aux_dist_near_goal_scale_mm = float(adl.get("near_goal_scale_mm", 0.0))
         self.aux_dist_near_goal_max_boost = float(adl.get("near_goal_max_boost", 4.0))
         self.aux_dist_apply_to_main = bool(adl.get("apply_to_main_loss", True))
+
+        # Direction-decoupled action loss (replaces plain MSE on main loss).
+        # Splits position-channel target into magnitude and unit-direction supervisions:
+        #   loss = α * (|a_pred| - |a_gt|)² + β * (1 - cos(a_pred, a_gt))
+        # Other channels (rotation, gripper) keep plain MSE.
+        ddl = direction_decoupled_loss or {}
+        self.ddl_enabled = bool(ddl.get("enabled", False))
+        self.ddl_pos_mag_weight = float(ddl.get("pos_mag_weight", 1.0))
+        self.ddl_pos_dir_weight = float(ddl.get("pos_dir_weight", 0.5))
+        self.ddl_other_weight = float(ddl.get("other_weight", 1.0))
+        self.ddl_min_mag = float(ddl.get("min_mag_threshold", 0.01))
 
         print(f"Initializing VLM {lmm_path} with attn_implementation: {attn_implementation}")
         if "paligemma" in lmm_path.lower():
@@ -1124,12 +1136,54 @@ class VLANeXt(nn.Module):
         if near_goal_w is not None and self.aux_dist_apply_to_main:
             effective_w = near_goal_w if action_weights is None else (action_weights * near_goal_w)
 
-        if effective_w is not None:
-            w = effective_w.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
-            loss = (w * (pred - target) ** 2).mean()
+        if self.ddl_enabled:
+            # Direction-decoupled loss for position channels (first 3 dims).
+            # Other channels (rotation + gripper) use plain squared error.
+            pos_pred = pred[..., :3]
+            pos_target = target[..., :3]
+            mag_pred = torch.norm(pos_pred, dim=-1)                      # (B, T)
+            mag_target = torch.norm(pos_target, dim=-1)                  # (B, T)
+            mag_diff_sq = (mag_pred - mag_target) ** 2                   # (B, T)
+
+            # F.cosine_similarity handles small-norm cases safely (NaN-free with eps).
+            # Mask out frames where either pred or target magnitude is too small —
+            # direction is undefined and gradient explodes through the division.
+            cos_sim = F.cosine_similarity(pos_pred, pos_target, dim=-1, eps=1e-3)  # (B, T)
+            dir_loss_raw = 1.0 - cos_sim                                 # (B, T) ∈ [0, 2]
+            valid = (
+                (mag_target > self.ddl_min_mag)
+                & (mag_pred.detach() > self.ddl_min_mag)                 # detach: mask doesn't backprop
+            ).float()
+            dir_loss = dir_loss_raw * valid                              # (B, T)
+
+            other_pred = pred[..., 3:]
+            other_target = target[..., 3:]
+            other_diff_sq = ((other_pred - other_target) ** 2).mean(dim=-1)  # (B, T)
+
+            per_frame = (
+                self.ddl_pos_mag_weight * mag_diff_sq
+                + self.ddl_pos_dir_weight * dir_loss
+                + self.ddl_other_weight * other_diff_sq
+            )                                                              # (B, T)
+
+            if effective_w is not None:
+                w_b = effective_w.view(B, *([1] * (per_frame.ndim - 1)))
+                loss = (w_b * per_frame).mean()
+            else:
+                loss = per_frame.mean()
+            loss_dict = {
+                "loss/main": loss.item(),
+                "loss/main_pos_mag": mag_diff_sq.mean().item(),
+                "loss/main_pos_dir": dir_loss.mean().item(),
+                "loss/main_other": other_diff_sq.mean().item(),
+            }
         else:
-            loss = F.mse_loss(pred, target)
-        loss_dict = {"loss/main": loss.item()}
+            if effective_w is not None:
+                w = effective_w.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
+                loss = (w * (pred - target) ** 2).mean()
+            else:
+                loss = F.mse_loss(pred, target)
+            loss_dict = {"loss/main": loss.item()}
 
         # Reconstruct predicted x_start (clean action) — needed by DCT and aux distance losses.
         pred_x_start = None

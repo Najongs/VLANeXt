@@ -52,7 +52,7 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3-VL-2B-Instruct" # "Qwen/Qwen3.5-2B"
+  lmm_path: "Qwen/Qwen3.5-2B"  # "Qwen/Qwen3-VL-2B-Instruct" # 
   vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:
@@ -126,6 +126,18 @@ model:
     near_goal_scale_mm: 10.0            # 0 to disable
     near_goal_max_boost: 3.0           # max sample weight = 1 + 4 = 5x
     apply_to_main_loss: true           # also reweight main action MSE
+
+  # Direction-decoupled action loss (replaces MSE on main loss when enabled).
+  # Splits position channels (first 3 dims) into magnitude and unit-direction terms:
+  #   loss = α * (|a_pred| - |a_gt|)² + β * (1 - cos_sim) + γ * MSE(rot, gripper)
+  # Targets BC near-goal direction blindness: when |a_gt|→0 plain MSE gives near-zero
+  # signal regardless of predicted direction. Direction term keeps signal alive.
+  direction_decoupled_loss:
+    enabled: false                # baseline first — gnorm unstable with cosine grad
+    pos_mag_weight: 0.5           # α
+    pos_dir_weight: 0.1           # β
+    other_weight: 1.0             # γ
+    min_mag_threshold: 0.05
 
 train:
   seed: 2026
