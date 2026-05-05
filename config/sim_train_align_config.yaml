@@ -8,7 +8,7 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
@@ -118,12 +118,12 @@ model:
     enabled: true
     weight: 0.1                       # λ — bumped with tighter margin
     margin_mm: 0.05                    # tolerated distance increase (mm) — tightened from 0.1
-    pos_denorm_mm: [0.32, 0.32, 0.26]  # MUST match action_max_sim_align[:3] (symmetric) — sim_act_align.py:28
+    pos_denorm_mm: [0.32, 0.32, 0.32]  # MUST match action_max_sim_align[:3] (symmetric) — sim_act_align.py:28
     # Near-goal weighting: boost per-sample loss when needle tip close to trocar.
     # Targets BC underweight-near-goal: small actions → small absolute MSE → undertrained tail.
     # weight = 1 + clamp(near_goal_scale_mm / (cur_dist_mm + 1), max=near_goal_max_boost)
     # cur_dist=20mm → 1.24x;  10mm → 1.45x;  5mm → 1.83x;  2mm → 2.67x;  1mm → 3.50x
-    near_goal_scale_mm: 10.0            # 0 to disable
+    near_goal_scale_mm: 5.0            # 0 to disable
     near_goal_max_boost: 3.0           # max sample weight = 1 + 4 = 5x
     apply_to_main_loss: true           # also reweight main action MSE
 

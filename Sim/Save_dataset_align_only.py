@@ -74,12 +74,12 @@ IMG_HEIGHT = 480
 CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 
 # --- 정렬 속도 ---
-ALIGN_SPEED = 0.1          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
+ALIGN_SPEED = 0.15          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
 FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
 PERTURB_POS_XY_MM = 10.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MIN_MM = 5.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
+PERTURB_POS_Z_MIN_MM = -10.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
 PERTURB_POS_Z_MAX_MM = 10.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 5.0    # 각도 perturbation 범위 (±deg)
 ALLOW_OCCLUDED = False      # True 시 tool_camera에서 needle tip이 가려져도 폐기하지 않음
