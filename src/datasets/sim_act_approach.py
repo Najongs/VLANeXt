@@ -8,6 +8,8 @@ import h5py
 import torch
 from torch.utils.data import IterableDataset
 
+from src.utils.sensor_proc import process_sensor_dist
+
 # Action normalization stats for approach dataset
 # Approach has larger movements than align — uses full pipeline stats.
 # delta_pose(6) + gripper(1)
@@ -139,11 +141,11 @@ class SimActApproach(IterableDataset):
             # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
             proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
             if self.use_sensor and "sensor_dist" in f["observations"]:
-                sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)
-                if sensor_dist.ndim == 1:
-                    sensor_dist = sensor_dist[:, None]
-                sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
-                proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
+                # Two-channel sensor: [dist_clipped, valid_mask]; see src/utils/sensor_proc.py
+                raw = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,)
+                dist, valid = process_sensor_dist(raw)
+                sensor_feat = np.stack([dist, valid], axis=-1)  # (N, 2)
+                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 7+2=9)
 
             # --- Spatial auxiliary targets ---
             spatial_targets_np = None

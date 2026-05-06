@@ -60,8 +60,13 @@ TASK_INSTRUCTION = (
     "next to the larger lens opening"
 )
 
-# sensor_dist substitute when use_sensor=True but real sensor not wired (saturated/no-contact)
-SENSOR_DIST_FALLBACK_MM = 20.0
+# sensor_dist substitute when use_sensor=True but real sensor not wired.
+# Two-channel format matches dataset/sim eval (src/utils/sensor_proc.py):
+#   [dist_clipped (mm, ≤5), valid (1.0 if informative else 0.0)]
+# No real sensor → valid=0, dist=SENSOR_MAX_MM (5.0) so the model sees a clean "no info" signal.
+from src.utils.sensor_proc import SENSOR_MAX_MM, process_sensor_dist_scalar
+SENSOR_FALLBACK_DIST_MM = SENSOR_MAX_MM
+SENSOR_FALLBACK_VALID = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,8 +93,8 @@ def run_real_eval(cfg):
     # use_sensor can come from eval-config model section OR CLI override
     use_sensor = bool(getattr(cfg.model, "use_sensor", False) or getattr(cfg, "use_sensor", False))
     if use_sensor:
-        logger.warning(f"⚠️ use_sensor=True: substituting sensor_dist={SENSOR_DIST_FALLBACK_MM}mm "
-                       f"(real OCT/FPI not wired — model proprio dim must be 8)")
+        logger.warning(f"⚠️ use_sensor=True: substituting [dist={SENSOR_FALLBACK_DIST_MM}mm, valid={SENSOR_FALLBACK_VALID}] "
+                       f"(real sensor not wired — model proprio dim must be 9)")
 
     num_episodes = int(getattr(cfg, "num_episodes", 1))
     max_steps = int(getattr(cfg, "max_steps", 200))
@@ -152,11 +157,13 @@ def run_real_eval(cfg):
                 image_history.append(img_primary)
                 image_history_wrist.append(img_secondary)
 
-                # 3. Proprio (7D or 8D depending on use_sensor)
+                # 3. Proprio (7D or 9D depending on use_sensor — sensor adds [dist, valid])
                 ee_pose = env.get_ee_pose()
                 ee_traj.append(ee_pose[:3].copy())
                 if use_sensor:
-                    proprio = np.concatenate([ee_pose, [0.0], [SENSOR_DIST_FALLBACK_MM]])  # (8,)
+                    proprio = np.concatenate(
+                        [ee_pose, [0.0], [SENSOR_FALLBACK_DIST_MM, SENSOR_FALLBACK_VALID]]
+                    )  # (9,)
                 else:
                     proprio = np.concatenate([ee_pose, [0.0]])  # (7,)
                 state_history.append(proprio)
@@ -272,8 +279,8 @@ if __name__ == "__main__":
                         help="Mecademic SetJointVelLimit (deg/s). Lower = slower + smoother. "
                              "Combine with larger --max-steps for slower trajectory. e.g. 5")
     parser.add_argument("--use-sensor", action="store_true",
-                        help="Add 8th proprio dim with constant 20.0 (real sensor_dist proxy). "
-                             "Required if checkpoint was trained with use_sensor=True.")
+                        help="Append 2-channel sensor proprio [dist=5.0mm, valid=0.0] (saturated/no-info). "
+                             "Required if checkpoint was trained with use_sensor=True (proprio_dim=9).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Skip MovePose; just print targets (safe smoke test)")
     args = parser.parse_args()

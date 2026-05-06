@@ -13,6 +13,11 @@ from src.datasets.euler_convention import (
     recompute_delta_orientation,
     infer_convention,
 )
+from src.utils.sensor_proc import (
+    process_sensor_dist,
+    SENSOR_MAX_MM,
+    SENSOR_PROPRIO_CHANNELS,
+)
 
 # Action normalization stats for align-only dataset (99th percentile, symmetric)
 # delta_pose(6) + gripper(1)
@@ -24,8 +29,15 @@ from src.datasets.euler_convention import (
 # action_min_sim_align = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
 # action_max_sim_align = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, -1.0]
 
-action_min_sim_align = [-0.32, -0.32, -0.32, -0.0016, -0.0006, -0.0021, -1.0]
-action_max_sim_align = [0.32, 0.32, 0.32, 0.0016, 0.0006, 0.0021, 1.0]
+# Tip-frame + trapezoidal velocity stats (10mm_fine_align_00_tip2, 4902 ep, 331605 steps):
+#   pos max ≈ 0.20mm; p99 ≈ 0.18mm  (trap cruise ~0.18mm peak, then HOLD zero)
+#   rot_x max 0.0037, p99 0.0015
+#   rot_y max 0.0062 (asymmetric -0.0062..+0.0054), p99 0.0005
+#   rot_z max 0.0069, p99 0.0019
+# pos bound = max (0.20 covers all, no saturation, full dynamic range).
+# rot bound = p99 + small margin (max-tail saturates rarely; better dynamic range than max-based).
+action_min_sim_align = [-0.20, -0.20, -0.20, -0.0020, -0.0008, -0.0025, -1.0]
+action_max_sim_align = [0.20, 0.20, 0.20, 0.0020, 0.0008, 0.0025, 1.0]
 
 # action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
 # action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
@@ -167,12 +179,12 @@ class SimActAlign(IterableDataset):
             # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
             proprio_np = ee_pose_raw  # already in Mecademic convention
             if self.use_sensor and "sensor_dist" in f["observations"]:
-                sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
-                if sensor_dist.ndim == 1:
-                    sensor_dist = sensor_dist[:, None]  # (N, 1)
-                # 클리핑만: 음수/무한대 → 20mm (미감지), 범위 [0, 20]
-                sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
-                proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
+                # Two-channel sensor: [dist_clipped, valid_mask]; see src/utils/sensor_proc.py
+                # Inverts/saturates above 5mm (hole-through) → valid=0 there so model can gate.
+                raw = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,)
+                dist, valid = process_sensor_dist(raw)
+                sensor_feat = np.stack([dist, valid], axis=-1)  # (N, 2)
+                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 7+2=9)
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None

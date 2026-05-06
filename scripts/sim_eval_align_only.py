@@ -37,6 +37,7 @@ from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
 from src.datasets.sim_act_align import action_min_sim_align as action_min_sim, action_max_sim_align as action_max_sim
+from src.utils.sensor_proc import process_sensor_dist_scalar
 from src.datasets.euler_convention import (
     mujoco_to_mecademic_euler,
     mecademic_to_mujoco_euler,
@@ -121,7 +122,7 @@ TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port 
 
 # Perturbation (same as data collection)
 PERTURB_POS_XY_MM = 10.0
-PERTURB_POS_Z_MIN_MM = 0.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
+PERTURB_POS_Z_MIN_MM = -10.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
 PERTURB_POS_Z_MAX_MM = 10.0
 PERTURB_ANGLE_DEG = 5.0
 
@@ -502,8 +503,10 @@ class AlignSimEnv:
         }
 
     def get_ee_pose(self):
-        pos = self.data.xpos[self.link6_id].copy() * 1000.0
-        mat = self.data.xmat[self.link6_id].reshape(3, 3)
+        # TCP shifted to needle_tip site (matches Save_dataset_align_only.py).
+        # Tip is +177.5mm along flange Z; rotation identical to flange.
+        pos = self.data.site_xpos[self.tip_id].copy() * 1000.0
+        mat = self.data.site_xmat[self.tip_id].reshape(3, 3)
         sy = np.sqrt(mat[0, 0] ** 2 + mat[1, 0] ** 2)
         if sy > 1e-6:
             r = np.arctan2(mat[2, 1], mat[2, 2])
@@ -523,17 +526,25 @@ class AlignSimEnv:
         return frames
 
     def apply_delta_ee(self, delta_ee_6d, n_sim_steps=67, gain=0.5):
-        current_ee = self.get_ee_pose()
-        target_ee = current_ee + delta_ee_6d
-        target_pos_m = target_ee[:3] / 1000.0
-        target_rpy = target_ee[3:]
+        # Model output is delta in TIP frame (matches dataset). Apply: build tip_target,
+        # then invert to flange_target for the link6 Jacobian IK below.
+        # Tip → flange: p_flange = p_tip - R_target @ TIP_OFFSET, R unchanged.
+        from src.utils.tip_frame import TIP_OFFSET_M  # local import to avoid top-level coupling
+
+        current_tip_ee = self.get_ee_pose()
+        target_tip_ee = current_tip_ee + delta_ee_6d
+        target_rpy = target_tip_ee[3:]
+        target_R = self._rpy_to_rotmat(target_rpy)
+        # tip target pos (m) → flange target pos (m)
+        target_tip_pos_m = target_tip_ee[:3] / 1000.0
+        target_pos_m = target_tip_pos_m - target_R @ TIP_OFFSET_M
 
         for _ in range(n_sim_steps):
             cur_pos = self.data.xpos[self.link6_id].copy()
             cur_mat = self.data.xmat[self.link6_id].reshape(3, 3)
 
             err_pos = target_pos_m - cur_pos
-            target_mat = self._rpy_to_rotmat(target_rpy)
+            target_mat = target_R
             err_rot_mat = target_mat @ cur_mat.T
             err_rot = self._rotmat_to_axisangle(err_rot_mat)
             err = np.concatenate([err_pos * 50.0, err_rot * 10.0])
@@ -800,11 +811,12 @@ def run_eval(cfg):
             ee_pose_mec[3:6] = mujoco_to_mecademic_euler(ee_pose[3:6])
             use_sensor = getattr(cfg.model, "use_sensor", False)
             if use_sensor:
-                sensor_dist = env.get_sensor_dist()
-                sensor_dist_clipped = min(sensor_dist, 20.0) if sensor_dist >= 0 else 20.0
-                proprio = np.concatenate([ee_pose_mec, [0.0], [sensor_dist_clipped]])  # (8,): ee_pose + gripper + sensor_dist(raw mm)
+                # Two-channel: [dist_clipped (mm, ≤5), valid] — matches dataset (sim_act_align.py)
+                sensor_dist_raw = env.get_sensor_dist()
+                dist_c, valid_c = process_sensor_dist_scalar(sensor_dist_raw)
+                proprio = np.concatenate([ee_pose_mec, [0.0], [dist_c, valid_c]])  # (9,)
             else:
-                proprio = np.concatenate([ee_pose_mec, [0.0]])  # (8,): ee_pose + gripper
+                proprio = np.concatenate([ee_pose_mec, [0.0]])  # (7,): ee_pose + gripper
             state_history.append(proprio)
 
             observation = {

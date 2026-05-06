@@ -565,6 +565,7 @@ def train(config):
             dct_similarity_type=config['model'].get('dct_similarity_type', 'mae'),
             aux_distance_loss=config['model'].get('aux_distance_loss', None),
             direction_decoupled_loss=config['model'].get('direction_decoupled_loss', None),
+            proprio_dim=config['model'].get('proprio_dim', None),
         ).to(device, dtype=torch.bfloat16)
     # Load pretrained checkpoint BEFORE DeepSpeed init (so state_dict shapes
     # are visible), but load to CPU first to avoid GPU memory duplication.

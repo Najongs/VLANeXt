@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 
-python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00"
-python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00"
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2"
+python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2"
 
 # Multiple folders:
 python dataset/visualize_all_trajectories_3d.py --dataset_path "/path/to/folder1" "/path/to/folder2"

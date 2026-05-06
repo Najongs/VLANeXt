@@ -76,11 +76,15 @@ CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 # --- 정렬 속도 ---
 ALIGN_SPEED = 0.15          # 초기 정렬 속도 (m/s) — 녹화 전 이동용
 FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
+# Velocity profile shape during recording (fine_align loop).
+# 0.5 = pure cubic smoothstep (slow tails dominate), 0.2 = 20% accel + 60% cruise + 20% decel,
+# 0.1 = sharper trapezoid. Lower = more time at constant velocity, less "stop-near-goal" bias.
+FINE_ALIGN_ACCEL_FRAC = 0.15
 
 # --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
-PERTURB_POS_XY_MM = 10.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MIN_MM = -10.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
-PERTURB_POS_Z_MAX_MM = 10.0  # Z축 상한 (mm)
+PERTURB_POS_XY_MM = 5.0    # XY 평면 perturbation 범위 (±mm)
+PERTURB_POS_Z_MIN_MM = -5.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
+PERTURB_POS_Z_MAX_MM = 5.0  # Z축 상한 (mm)
 PERTURB_ANGLE_DEG = 5.0    # 각도 perturbation 범위 (±deg)
 ALLOW_OCCLUDED = False      # True 시 tool_camera에서 needle tip이 가려져도 폐기하지 않음
 
@@ -260,6 +264,35 @@ def smooth_step(t):
     return t * t * (3 - 2 * t)
 
 
+def trapezoid_step(t, accel_frac=0.2):
+    """Trapezoidal velocity profile with cubic-smoothed accel/decel.
+
+    accel_frac in (0, 0.5): fraction of total duration spent on accel (= decel).
+    Cruise (constant velocity) covers the remaining 1 - 2*accel_frac fraction.
+    Total area normalized to 1, so position(0)=0, position(1)=1.
+
+    accel_frac=0.5 falls back to cubic smoothstep (no cruise).
+    accel_frac=0.2: peak velocity = 1.25 * avg, 60% of duration at constant speed.
+
+    Compared to cubic smoothstep (peak velocity 1.5×, 0 at both ends, slow tails):
+    less time spent at low frame-Δ near goal → less "stop-near-goal" bias in
+    learned policy. Recommended for recording the fine-alignment phase.
+    """
+    t = np.clip(t, 0.0, 1.0)
+    ta = float(accel_frac)
+    if ta <= 0 or ta >= 0.5:
+        return smooth_step(t)
+    v_max = 1.0 / (1.0 - ta)
+    if t < ta:
+        u = t / ta
+        # ∫₀ᵘ smoothstep(s) ds = u³ - u⁴/2, scaled by v_max·ta
+        return v_max * ta * (u**3 - 0.5 * u**4)
+    if t < 1 - ta:
+        return v_max * ta * 0.5 + v_max * (t - ta)
+    u = (1 - t) / ta
+    return 1.0 - v_max * ta * (u**3 - 0.5 * u**4)
+
+
 def randomize_phantom_pos(model, data, phantom_id, rot_id, combo_counts=None):
     """팬텀 위치/회전 랜덤화.
     combo_counts: {(angle, z_dir): count} — 4-way 균등 배분용 카운터.
@@ -345,9 +378,11 @@ def main():
     ik_speed = 0.5
 
     def get_ee_pose_6d_scaled():
-        if link6_id >= 0:
-            pos = data.xpos[link6_id].copy() * 1000
-            mat = data.xmat[link6_id].reshape(3, 3)
+        # TCP shifted to needle_tip site (177.5mm along flange +Z; rotation identical).
+        # See src/utils/tip_frame.py and Sim/meca_add.xml:87.
+        if tip_id >= 0:
+            pos = data.site_xpos[tip_id].copy() * 1000
+            mat = data.site_xmat[tip_id].reshape(3, 3)
             sy = np.sqrt(mat[0, 0] ** 2 + mat[1, 0] ** 2)
             if sy > 1e-6:
                 r = np.arctan2(mat[2, 1], mat[2, 2])
@@ -694,7 +729,12 @@ def main():
         fine_traj_start = data.time
 
         while True:
-            progress = smooth_step((data.time - fine_traj_start) / fine_duration) if fine_duration > 0 else 1.0
+            # Trapezoidal velocity profile (less slow tail near goal — see FINE_ALIGN_ACCEL_FRAC).
+            progress = (
+                trapezoid_step((data.time - fine_traj_start) / fine_duration, FINE_ALIGN_ACCEL_FRAC)
+                if fine_duration > 0
+                else 1.0
+            )
 
             target_tip_pos = (1 - progress) * start_tip_pos + progress * goal_tip
             target_back_pos = (1 - progress) * start_back_pos + progress * goal_back

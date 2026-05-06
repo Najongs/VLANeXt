@@ -179,13 +179,20 @@ class ApproachRealEnv:
 
     # ── matches ApproachSimEnv.get_ee_pose ────────────────────────────────────
     def get_ee_pose(self) -> np.ndarray:
-        """Return [x_mm, y_mm, z_mm, rx_rad, ry_rad, rz_rad] — same format as sim env."""
+        """Return [x_mm, y_mm, z_mm, rx_rad, ry_rad, rz_rad] in NEEDLE-TIP frame.
+
+        Mecademic GetPose() returns flange pose; we shift it by R_flange @ TIP_OFFSET
+        so the model sees the same TCP as the sim/training data.
+        """
+        from src.utils.tip_frame import flange_to_tip_euler6
         for _ in range(5):
             try:
                 pose = list(self.robot.GetPose())
                 if pose and len(pose) >= 6:
-                    arr = np.array(pose[:6], dtype=np.float32)
-                    return np.concatenate([arr[:3], np.deg2rad(arr[3:])])
+                    arr = np.array(pose[:6], dtype=np.float64)
+                    flange_pose = np.concatenate([arr[:3], np.deg2rad(arr[3:])])
+                    tip_pose = flange_to_tip_euler6(flange_pose, mm=True)
+                    return tip_pose.astype(np.float32)
             except Exception:
                 time.sleep(0.01)
         logger.warning("GetPose failed; returning zeros")
@@ -221,6 +228,13 @@ class ApproachRealEnv:
         This mirrors sim's `target = current + delta` in base frame, since training
         data was collected with delta = next_ee - current_ee in base/world frame.
         """
+        # delta_ee_6d is in TIP frame (matches training data). Steps:
+        #   1) read flange GetPose (mm + deg) → convert to tip (mm + rad)
+        #   2) tip_target = tip + delta
+        #   3) invert tip_target → flange_target (mm + rad)
+        #   4) MovePose(flange_target with rot in deg)
+        from src.utils.tip_frame import flange_to_tip_euler6, tip_to_flange_euler6
+
         delta_clamped = delta_ee_6d.copy().astype(np.float32)
         delta_clamped[:3] = np.clip(delta_clamped[:3], -SAFETY_CLAMP_POS_MM, SAFETY_CLAMP_POS_MM)
         delta_clamped[3:6] = np.clip(delta_clamped[3:6], -SAFETY_CLAMP_ROT_RAD, SAFETY_CLAMP_ROT_RAD)
@@ -232,13 +246,24 @@ class ApproachRealEnv:
             time.sleep(control_dt)
             return None
 
+        # current is flange (mm + deg). Convert to tip (mm + rad), apply delta, invert.
+        flange_pose = np.array(
+            [current[0], current[1], current[2],
+             np.deg2rad(current[3]), np.deg2rad(current[4]), np.deg2rad(current[5])],
+            dtype=np.float64,
+        )
+        tip_pose = flange_to_tip_euler6(flange_pose, mm=True)
+        tip_target = tip_pose.copy()
+        tip_target[:3] += delta_clamped[:3]
+        tip_target[3:6] += delta_clamped[3:6].astype(np.float64)
+        flange_target = tip_to_flange_euler6(tip_target, mm=True)
         target = [
-            float(current[0] + delta_clamped[0]),
-            float(current[1] + delta_clamped[1]),
-            float(current[2] + delta_clamped[2]),
-            float(current[3] + np.rad2deg(delta_clamped[3])),
-            float(current[4] + np.rad2deg(delta_clamped[4])),
-            float(current[5] + np.rad2deg(delta_clamped[5])),
+            float(flange_target[0]),
+            float(flange_target[1]),
+            float(flange_target[2]),
+            float(np.rad2deg(flange_target[3])),
+            float(np.rad2deg(flange_target[4])),
+            float(np.rad2deg(flange_target[5])),
         ]
 
         if dry_run:

@@ -39,7 +39,7 @@ python Sim/filter_outliers.py \
     --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00 \
+    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2 \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
     --max-range 50 \
@@ -48,7 +48,7 @@ python Sim/filter_outliers.py \
     --max-rot 0.02 \
     --max-steps 250 \
     --min-steps 30 \
-    --high-action-thr 0.4 \
+    --high-action-thr 0.3 \
     --high-action-frames 5 \
     --high-rot-thr 0.005 \
     --high-rot-frames 5 \

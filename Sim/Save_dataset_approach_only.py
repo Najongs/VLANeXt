@@ -339,10 +339,11 @@ def main():
     current_speed = 0.5 # np.random.uniform(0.3, 0.6)
 
     def get_ee_pose_6d_scaled():
-        """Get 6_link world pose (x, y, z, rx, ry, rz)."""
-        if link6_id >= 0:
-            pos = data.xpos[link6_id].copy() * 1000
-            mat = data.xmat[link6_id].reshape(3, 3)
+        """Get needle-tip world pose (x, y, z, rx, ry, rz). Tip = flange + 177.5mm Z."""
+        # TCP shifted to needle_tip site. See src/utils/tip_frame.py.
+        if tip_id >= 0:
+            pos = data.site_xpos[tip_id].copy() * 1000
+            mat = data.site_xmat[tip_id].reshape(3, 3)
             sy = np.sqrt(mat[0, 0] ** 2 + mat[1, 0] ** 2)
             if sy > 1e-6:
                 r = np.arctan2(mat[2, 1], mat[2, 2])
