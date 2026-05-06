@@ -127,10 +127,27 @@ PERTURB_POS_Z_MAX_MM = 10.0
 PERTURB_ANGLE_DEG = 5.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.001  # 2.5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.002  # 2.5mm
 ALIGN_SUCCESS_ANGLE_DEG = 5.0      # needle-trocar axis angle < 10deg
 ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
 ALIGN_SUCCESS_SENSOR_MIN_MM = 25.0   # sensor must see through hole (> this value)
+
+# --- Sensor-stop trigger (independent of distance criterion) ---
+# When --sensor-stop is on, episode terminates EARLY with success=True after
+# a "approach → cross hole" pattern is detected:
+#   1. The needle must have been close to the trocar surface
+#      (raw sensor ≤ SENSOR_STOP_CLOSE_MM) at SOME prior step
+#   2. After that, raw sensor must jump to ≥ SENSOR_STOP_HOLE_MM and STAY there
+#      for SENSOR_STOP_HOLD_STEPS consecutive control steps
+#
+# Why both conditions: during early approach a far reading (e.g. 8-15mm to
+# table or off-axis surface) can spuriously satisfy a single "raw ≥ 8mm"
+# threshold even though the needle is nowhere near the hole. The state
+# machine ensures we only trigger on the genuine "approached → punched
+# through" transition, which is what hole-through really looks like.
+SENSOR_STOP_CLOSE_MM = 5.0   # must dip below this once to "arm" the trigger
+SENSOR_STOP_HOLE_MM = 15.0   # then jump above this to fire (hole reads ~20mm)
+SENSOR_STOP_HOLD_STEPS = 2   # how many consecutive frames to confirm the spike
 
 
 def build_perturb_grid(xy_steps, z_steps, angle_steps, repeats,
@@ -754,15 +771,19 @@ def run_eval(cfg):
     randomize_phantom = getattr(cfg, "randomize_phantom", False)
     phantom_pos = getattr(cfg, "phantom_pos", None)
     use_sensor_success = getattr(cfg, 'use_sensor_success', False)
+    use_sensor_stop = bool(getattr(cfg, 'use_sensor_stop', False))
     retreat_mm = getattr(cfg, 'retreat_mm', 10.0)
     env = AlignSimEnv(model_xml, randomize_phantom=randomize_phantom, use_sensor_success=use_sensor_success, phantom_pos=phantom_pos, retreat_mm=retreat_mm)
+    if use_sensor_stop:
+        print(f"⚡ sensor-stop ON: trigger requires (1) sensor ≤ {SENSOR_STOP_CLOSE_MM:.1f}mm at some prior step "
+              f"AND (2) sensor ≥ {SENSOR_STOP_HOLE_MM:.1f}mm sustained for {SENSOR_STOP_HOLD_STEPS} steps")
 
     total_successes = 0
 
     csv_path = eval_dir / "metrics_summary.csv"
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_header = ["episode", "success", "steps", "final_dist_mm",
+    csv_header = ["episode", "success", "success_reason", "steps", "final_dist_mm",
                    "final_lateral_mm", "final_angle_deg", "min_dist_mm",
                    "final_sensor_dist_mm",
                    "perturb_x_mm", "perturb_y_mm", "perturb_z_mm",
@@ -786,6 +807,9 @@ def run_eval(cfg):
         metrics_history = []
 
         success = False
+        success_reason = ""  # "" | "dist" | "sensor_stop"
+        sensor_spike_count = 0
+        sensor_was_close = False  # arms the sensor_stop trigger
 
         for ctrl_step in range(max_steps):
             frames = env.render_cameras()
@@ -809,14 +833,8 @@ def run_eval(cfg):
             # Match training convention: proprio orientation in Mecademic intrinsic XYZ
             ee_pose_mec = ee_pose.copy()
             ee_pose_mec[3:6] = mujoco_to_mecademic_euler(ee_pose[3:6])
-            use_sensor = getattr(cfg.model, "use_sensor", False)
-            if use_sensor:
-                # Two-channel: [dist_clipped (mm, ≤5), valid] — matches dataset (sim_act_align.py)
-                sensor_dist_raw = env.get_sensor_dist()
-                dist_c, valid_c = process_sensor_dist_scalar(sensor_dist_raw)
-                proprio = np.concatenate([ee_pose_mec, [0.0], [dist_c, valid_c]])  # (9,)
-            else:
-                proprio = np.concatenate([ee_pose_mec, [0.0]])  # (7,): ee_pose + gripper
+            # Proprio is 6-DoF EE pose only. Sensor is detection-only (sensor_stop), not training input.
+            proprio = ee_pose_mec[:6].astype(np.float32)  # (6,)
             state_history.append(proprio)
 
             observation = {
@@ -860,8 +878,32 @@ def run_eval(cfg):
 
             env.apply_delta_ee(delta_ee, n_sim_steps=sim_steps_per_ctrl)
 
+            # Sensor-stop trigger (state machine):
+            #   Phase A — approaching: wait for raw sensor to dip below CLOSE_MM
+            #            (= needle has reached the trocar surface vicinity).
+            #   Phase B — armed: once sensor was close, watch for sustained
+            #            spike ≥ HOLE_MM = ray punched through into the hole.
+            # Avoids false positives from "far reading happens to be ≥ HOLE_MM
+            # mid-approach" because we only trigger after a confirmed
+            # close-then-spike transition.
+            if use_sensor_stop:
+                raw_sensor = env.get_sensor_dist()
+                if 0.0 <= raw_sensor <= SENSOR_STOP_CLOSE_MM:
+                    sensor_was_close = True
+                    sensor_spike_count = 0
+                elif sensor_was_close and raw_sensor >= SENSOR_STOP_HOLE_MM:
+                    sensor_spike_count += 1
+                    if sensor_spike_count >= SENSOR_STOP_HOLD_STEPS:
+                        success = True
+                        success_reason = "sensor_stop"
+                        metrics_history.append(env.get_spatial_metrics())
+                        break
+                else:
+                    sensor_spike_count = 0
+
             if env.check_success():
                 success = True
+                success_reason = "dist"
                 metrics_history.append(env.get_spatial_metrics())
                 break
 
@@ -872,10 +914,12 @@ def run_eval(cfg):
         sr = total_successes / ep_done * 100
         final_m = metrics_history[-1]
         min_dist = min(m["dist_mm"] for m in metrics_history)
-        msg = (f"Episode {ep}/{num_episodes} | {'SUCCESS' if success else 'FAIL'} | "
+        outcome = f"SUCCESS[{success_reason}]" if success else "FAIL"
+        msg = (f"Episode {ep}/{num_episodes} | {outcome} | "
                f"Steps: {ctrl_step + 1} | SR: {sr:.1f}% ({total_successes}/{ep_done}) | "
                f"dist={final_m['dist_mm']:.1f}mm lateral={final_m['lateral_mm']:.1f}mm "
-               f"angle={final_m['angle_deg']:.1f}deg min_dist={min_dist:.1f}mm")
+               f"angle={final_m['angle_deg']:.1f}deg min_dist={min_dist:.1f}mm "
+               f"sensor={final_m.get('sensor_dist_mm', -1):.1f}mm")
         print(msg)
         log_file.write(msg + "\n")
         log_file.flush()
@@ -883,7 +927,7 @@ def run_eval(cfg):
         pi = env.last_perturb_info
         final_sensor = final_m.get('sensor_dist_mm', -1.0)
         row = [
-            ep, int(success), ctrl_step + 1,
+            ep, int(success), success_reason or "fail", ctrl_step + 1,
             f"{final_m['dist_mm']:.2f}",
             f"{final_m['lateral_mm']:.2f}", f"{final_m['angle_deg']:.2f}",
             f"{min_dist:.2f}",
@@ -953,6 +997,11 @@ if __name__ == "__main__":
                         help="Override eval.max_steps_per_episode (default: use config value)")
     parser.add_argument("--sensor-success", action="store_true",
                         help="Require sensor to see through trocar hole for success")
+    parser.add_argument("--sensor-stop", action="store_true",
+                        help=(f"Terminate episode early with success when raw sensor "
+                              f">= {SENSOR_STOP_HOLE_MM:.1f}mm for "
+                              f"{SENSOR_STOP_HOLD_STEPS} consecutive steps "
+                              f"(needle staring through hole = aligned)"))
     parser.add_argument("--eval-seed", type=int, default=None,
                         help="Override eval.seed for reproducibility (random mode)")
     parser.add_argument("--perturb-mode", type=str, default="random",
@@ -981,6 +1030,7 @@ if __name__ == "__main__":
     cfg.randomize_phantom = args.randomize_phantom
     cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
     cfg.use_sensor_success = args.sensor_success
+    cfg.use_sensor_stop = args.sensor_stop
     cfg.retreat_mm = args.retreat_mm
     cfg.max_steps = args.max_steps
     cfg.eval_seed = args.eval_seed

@@ -165,7 +165,7 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         dct_freq_split=mc.get("dct_freq_split", 0.125),
         dct_similarity_type=mc.get("dct_similarity_type", "mae"),
         # spatial_loss_weight=mc.get("spatial_loss_weight", 0.0),
-        # proprio_dim=mc.get("proprio_dim", None),
+        proprio_dim=mc.get("proprio_dim", None),
     )
 
     if list(state_dict.keys())[0].startswith("module."):

@@ -157,15 +157,10 @@ def run_real_eval(cfg):
                 image_history.append(img_primary)
                 image_history_wrist.append(img_secondary)
 
-                # 3. Proprio (7D or 9D depending on use_sensor — sensor adds [dist, valid])
+                # 3. Proprio: 6-DoF EE pose only (gripper dropped, sensor detection-only)
                 ee_pose = env.get_ee_pose()
                 ee_traj.append(ee_pose[:3].copy())
-                if use_sensor:
-                    proprio = np.concatenate(
-                        [ee_pose, [0.0], [SENSOR_FALLBACK_DIST_MM, SENSOR_FALLBACK_VALID]]
-                    )  # (9,)
-                else:
-                    proprio = np.concatenate([ee_pose, [0.0]])  # (7,)
+                proprio = ee_pose[:6].astype(np.float32)  # (6,)
                 state_history.append(proprio)
 
                 observation = {

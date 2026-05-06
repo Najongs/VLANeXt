@@ -36,8 +36,8 @@ from src.utils.sensor_proc import (
 #   rot_z max 0.0069, p99 0.0019
 # pos bound = max (0.20 covers all, no saturation, full dynamic range).
 # rot bound = p99 + small margin (max-tail saturates rarely; better dynamic range than max-based).
-action_min_sim_align = [-0.20, -0.20, -0.20, -0.0020, -0.0008, -0.0025, -1.0]
-action_max_sim_align = [0.20, 0.20, 0.20, 0.0020, 0.0008, 0.0025, 1.0]
+action_min_sim_align = [-0.20, -0.20, -0.20, -0.0020, -0.0008, -0.0025]
+action_max_sim_align = [0.20, 0.20, 0.20, 0.0020, 0.0008, 0.0025]
 
 # action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
 # action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
@@ -162,29 +162,26 @@ class SimActAlign(IterableDataset):
             # --- Raw actions + ee_pose; orientation convention may differ
             #     between sim (MuJoCo extrinsic XYZ) and real (Mecademic
             #     intrinsic XYZ). Unify to Mecademic before normalization. ---
-            actions_raw = f["action"][:].astype(np.float32)                       # (N, 7)
-            ee_pose_raw = f["observations"]["ee_pose"][:].astype(np.float32)      # (N, 7)
+            actions_raw = f["action"][:].astype(np.float32)                       # (N, 7) raw
+            ee_pose_raw = f["observations"]["ee_pose"][:].astype(np.float32)      # (N, 7) raw
             conv = self._path_to_conv.get(h5_path, "mujoco")
             if conv == "mujoco":
                 ee_pose_raw = convert_ee_pose_to_mecademic(ee_pose_raw, src="mujoco")
                 actions_raw = recompute_delta_orientation(actions_raw, ee_pose_raw)
 
-            # --- Actions (N, 7): normalize delta_pose + gripper to [-1, 1] ---
+            # Drop gripper (last dim) — predict only 6-DoF EE delta. Gripper not needed for align task.
+            actions_raw = actions_raw[:, :6]
+            ee_pose_raw = ee_pose_raw[:, :6]
+
+            # --- Actions (N, 6): normalize delta_pose to [-1, 1] ---
             actions_np = actions_raw
             denominator = self.action_max - self.action_min
             denominator = np.where(denominator == 0, 1.0, denominator)
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
-            proprio_np = ee_pose_raw  # already in Mecademic convention
-            if self.use_sensor and "sensor_dist" in f["observations"]:
-                # Two-channel sensor: [dist_clipped, valid_mask]; see src/utils/sensor_proc.py
-                # Inverts/saturates above 5mm (hole-through) → valid=0 there so model can gate.
-                raw = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,)
-                dist, valid = process_sensor_dist(raw)
-                sensor_feat = np.stack([dist, valid], axis=-1)  # (N, 2)
-                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 7+2=9)
+            # --- Proprioception: ee_pose (N, 6) — sensor excluded from training (detection-only) ---
+            proprio_np = ee_pose_raw  # already in Mecademic convention, gripper dropped above
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None
