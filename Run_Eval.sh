@@ -21,3 +21,5 @@ CUDA_VISIBLE_DEVICES=0 python -m scripts.sim_eval_align_only \
       --train-config config/sim_train_align_config.yaml
 
 python scripts/analyze_eval.py /data/public/NAS/VLANeXt/align_eval_step0.8B_exec1_diff10/metrics_summary.csv
+
+rsync -av --progress -e 'ssh -p 37840' /home/irom/NAS/VLANeXt/dataset/real_align yohan@nayohan.iptime.org:/data/public/NAS/VLANeXt/dataset

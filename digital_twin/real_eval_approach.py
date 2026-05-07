@@ -79,6 +79,7 @@ class OAKCameraManager:
             c = p.create(dai.node.ColorCamera)
             c.setBoardSocket(dai.CameraBoardSocket.CAM_A)
             c.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+            c.setFps(30)
             c.setPreviewSize(self.width, self.height)
             c.setInterleaved(False)
 

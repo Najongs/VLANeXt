@@ -16,7 +16,17 @@
 # HDF5 schema is identical → drop-in compatible with sim_act_align dataset.
 #
 # Usage:
-#   bash Run_Collect_Real_Align_Replay.sh --phantom-pos 0.0 -0.4 [extra_flags...]
+#   bash Run_Collect_Real_Align_Replay.sh --phantom-pos 0.0 0.0 --mode traj --num-episodes 2
+# bash Run_Collect_Real_Align_Replay.sh --phantom-pos 0.0 0.0 \
+#     --traj-source smoothstep --traj-duration-sec 8 \
+#     --queue-mode batch --batch-queue-vel 8 --num-episodes 2
+
+# bash Run_Collect_Real_Align_Replay.sh --phantom-pos 0.0 0.0 \
+#     --queue-mode stream --substeps 3 --joint-vel-limit 30 --num-episodes 2
+
+# bash Run_Collect_Real_Align_Replay.sh --phantom-pos 0.0 0.0 \
+#     --traj-source smoothstep \
+#     --queue-mode stream --substeps 3 --joint-vel-limit 30 --num-episodes 2
 
 EXTRA_ARGS=("$@")
 

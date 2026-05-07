@@ -23,7 +23,7 @@
 #       --dry-run --num-episodes 1
 #
 #   # Live, joint-space mirror, 10 episodes:
-#   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 --num-episodes 10
+#   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 0.0 --num-episodes 1000 --stream-rate-hz 7.5
 #
 #   # Cartesian-delta mirror (alternative; compare against joint mode):
 #   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 \
