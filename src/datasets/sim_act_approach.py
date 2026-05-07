@@ -19,8 +19,9 @@ from src.utils.sensor_proc import process_sensor_dist
 
 # 웬만하면 정규화 값은 대칭값으로 학습하자.
 
-action_min_sim_approach = [-1, -1, -1, -0.01, -0.01, -0.01, -1.0]
-action_max_sim_approach = [1, 1, 1, 0.01, 0.01, 0.01, 1.0]
+# 6-DoF EE delta only (gripper dropped — always open during approach, no info)
+action_min_sim_approach = [-1, -1, -1, -0.01, -0.01, -0.01]
+action_max_sim_approach = [1, 1, 1, 0.01, 0.01, 0.01]
 
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
@@ -131,21 +132,15 @@ class SimActApproach(IterableDataset):
                 if not np.any(phase_mask):
                     return None  # no approach data in this episode
 
-            # --- Actions (N, 7): normalize delta_pose + gripper to [-1, 1] ---
-            actions_np = f["action"][:].astype(np.float32)
+            # --- Actions (N, 6): normalize delta_pose to [-1, 1] (gripper dropped) ---
+            actions_np = f["action"][:].astype(np.float32)[:, :6]
             denominator = self.action_max - self.action_min
             denominator = np.where(denominator == 0, 1.0, denominator)
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
-            proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
-            if self.use_sensor and "sensor_dist" in f["observations"]:
-                # Two-channel sensor: [dist_clipped, valid_mask]; see src/utils/sensor_proc.py
-                raw = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,)
-                dist, valid = process_sensor_dist(raw)
-                sensor_feat = np.stack([dist, valid], axis=-1)  # (N, 2)
-                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 7+2=9)
+            # --- Proprioception: ee_pose (N, 6) — gripper dropped, sensor detection-only (not training) ---
+            proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)[:, :6]  # (N, 6)
 
             # --- Spatial auxiliary targets ---
             spatial_targets_np = None

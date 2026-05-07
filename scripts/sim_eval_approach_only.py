@@ -509,14 +509,9 @@ def run_eval(cfg):
 
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)
 
+            # Proprio is 6-DoF EE pose only. Sensor is detection-only (not training input).
             ee_pose = env.get_ee_pose()
-            proprio_parts = [ee_pose, [0.0]]  # ee_pose(6) + gripper(1) = 7
-            if use_sensor:
-                # Two-channel: [dist_clipped (mm, ≤5), valid] — see src/utils/sensor_proc.py
-                sensor_dist_raw = env.get_sensor_dist()
-                dist_c, valid_c = process_sensor_dist_scalar(sensor_dist_raw)
-                proprio_parts.append([dist_c, valid_c])
-            proprio = np.concatenate(proprio_parts)
+            proprio = ee_pose[:6].astype(np.float32)  # (6,)
             state_history.append(proprio)
 
             observation = {

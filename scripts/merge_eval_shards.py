@@ -102,7 +102,28 @@ def main():
     else:
         print(f"\nRunning analysis...")
         import subprocess
-        subprocess.run(["python", "scripts/analyze_eval.py", str(merged_csv)])
+        result = subprocess.run(
+            ["python", "scripts/analyze_eval.py", str(merged_csv)],
+            capture_output=True, text=True,
+        )
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr)
+
+        # Persist final summary (SR + analysis) to txt for later reference.
+        summary_txt = merged_dir / "eval_summary.txt"
+        with open(summary_txt, "w") as f:
+            f.write(f"Checkpoint: {ckpt_path}\n")
+            f.write(f"Merged episodes: {n_total} from {len(shard_csvs)} shards\n")
+            f.write(f"Success Rate: {sr:.1f}% ({n_success}/{n_total})\n")
+            f.write(f"Merged CSV: {merged_csv}\n")
+            f.write("\n" + "=" * 60 + "\n")
+            f.write("  analyze_eval.py output\n")
+            f.write("=" * 60 + "\n")
+            f.write(result.stdout)
+            if result.stderr:
+                f.write("\n[stderr]\n" + result.stderr)
+        print(f"  Eval summary saved: {summary_txt}")
 
 
 def _generate_merged_trajectory_plot(merged_dir):

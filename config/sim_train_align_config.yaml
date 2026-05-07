@@ -2,7 +2,7 @@ project:
   name: "VLANeXt_Qwen3.5_fine_align"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 5000
+  save_interval: 2500
   use_wandb: true
 
 data:
@@ -54,7 +54,7 @@ model:
   model_type: "vlanext"
   lmm_path: "Qwen/Qwen3.5-2B"  # "Qwen/Qwen3-VL-2B-Instruct" # 
   # vision_encoder_path: "google/siglip2-base-patch16-256"
-  backbone_mode: "lora"
+  backbone_mode: "frozen"
   lora:
     r: 16
     lora_alpha: 32
@@ -143,10 +143,10 @@ model:
     min_mag_threshold: 0.05
 
 train:
-  seed: 2026
+  seed: 2027
   resume_path: ""
-  pretrained_checkpoint: ""
-  learning_rate: 5.0e-5
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/output_dir_align_0507"
+  learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
   gradient_accumulation_steps: 1

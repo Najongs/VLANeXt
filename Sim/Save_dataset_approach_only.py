@@ -62,6 +62,10 @@ IMG_HEIGHT = 480
 CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 TARGET_INSERTION_DEPTH = 0.0275
 ALIGN_SPEED = 0.02      # 정렬 단계 속도: 0.02 m/s (~200 steps)
+# Velocity profile shape during approach trajectory.
+# 0.5 = pure cubic smoothstep (slow tails dominate), 0.2 = 20% accel + 60% cruise + 20% decel,
+# 0.1 = sharper trapezoid. Lower = more time at constant velocity, less "stop-near-goal" bias.
+APPROACH_ACCEL_FRAC = 0.15
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 1.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
@@ -222,6 +226,26 @@ class SimRecorder:
 def smooth_step(t):
     t = np.clip(t, 0.0, 1.0)
     return t * t * (3 - 2 * t)
+
+
+def trapezoid_step(t, accel_frac=0.2):
+    """Trapezoidal velocity profile with cubic-smoothed accel/decel.
+    accel_frac in (0, 0.5): fraction of total duration spent on accel (= decel).
+    Cruise covers 1 - 2*accel_frac. Total area = 1 (position(0)=0, position(1)=1).
+    Less time at slow tails near goal → less "stop-near-goal" bias in learned policy.
+    """
+    t = np.clip(t, 0.0, 1.0)
+    ta = float(accel_frac)
+    if ta <= 0 or ta >= 0.5:
+        return smooth_step(t)
+    v_max = 1.0 / (1.0 - ta)
+    if t < ta:
+        u = t / ta
+        return v_max * ta * (u**3 - 0.5 * u**4)
+    if t < 1 - ta:
+        return v_max * ta * 0.5 + v_max * (t - ta)
+    u = (1 - t) / ta
+    return 1.0 - v_max * ta * (u**3 - 0.5 * u**4)
 
 def randomize_phantom_pos(model, data, phantom_id, rot_id):
     # 1. 위치 이동 (Translation)
@@ -469,7 +493,7 @@ def main():
                     goal_tip_init = p_entry - (axis_dir_init * retreat_m)
                     align_distance = np.linalg.norm(goal_tip_init - start_tip_pos)
                     dynamic_duration = align_distance / ALIGN_SPEED
-                progress = smooth_step((t_curr - traj_start_time) / dynamic_duration) if dynamic_duration > 0 else 1.0
+                progress = trapezoid_step((t_curr - traj_start_time) / dynamic_duration, APPROACH_ACCEL_FRAC) if dynamic_duration > 0 else 1.0
                 axis_dir = (p_depth - p_entry) / (np.linalg.norm(p_depth - p_entry) + 1e-10)
                 retreat_m = RETREAT_MM / 1000.0
                 goal_tip, goal_back = p_entry - (axis_dir * retreat_m), p_entry - (axis_dir * (retreat_m + needle_len))
