@@ -49,7 +49,7 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 RUN_NAME="lerobot_${POLICY}_align_$(date +%Y%m%d_%H%M)"
 
 # lerobot >=0.5: launch via accelerate for multi-GPU (DDP). Single-GPU also works.
-LEROBOT_TRAIN=$(command -v lerobot-train || echo "lerobot-train")
+LEROBOT_TRAIN=$(command -v lerobot-train || echo "/home/yohan/miniconda3/envs/lerobot/bin/lerobot-train")
 if [ "$NUM_GPUS" -gt 1 ]; then
     TRAIN_CMD="accelerate launch --num_processes=${NUM_GPUS} --mixed_precision=no ${LEROBOT_TRAIN}"
 else

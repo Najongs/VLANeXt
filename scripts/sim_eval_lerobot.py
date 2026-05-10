@@ -123,10 +123,23 @@ def run_eval(args):
     sim_steps_per_ctrl = args.sim_steps_per_control
     save_video = not args.no_video
 
+    # Optional overrides for perturbation range + success thresholds.
+    import scripts.sim_eval_align_only as _sea
+    if args.angle_range_deg is not None:
+        _sea.PERTURB_ANGLE_DEG = float(args.angle_range_deg)
+        print(f"[override] PERTURB_ANGLE_DEG = ±{args.angle_range_deg}°")
+    if args.success_dist_mm is not None:
+        _sea.ALIGN_SUCCESS_THRESHOLD_M = float(args.success_dist_mm) / 1000.0
+        print(f"[override] ALIGN_SUCCESS_THRESHOLD = {args.success_dist_mm}mm")
+    if args.success_angle_deg is not None:
+        _sea.ALIGN_SUCCESS_ANGLE_DEG = float(args.success_angle_deg)
+        print(f"[override] ALIGN_SUCCESS_ANGLE_DEG = {args.success_angle_deg}°")
+
     if args.perturb_mode == "grid":
         grid_cells_all = build_perturb_grid(
             xy_steps=args.xy_steps, z_steps=args.z_steps,
             angle_steps=args.angle_steps, repeats=args.repeats,
+            angle_range=_sea.PERTURB_ANGLE_DEG,
         )
         num_episodes = len(grid_cells_all)
         print(f"[grid] {num_episodes} cells")
@@ -229,6 +242,17 @@ def run_eval(args):
             draw_overlay(replay_frame, metrics, ctrl_step)
             replay_images.append(replay_frame)
 
+            # Distance-based early stop: model has no built-in stop signal, so once
+            # the displayed dist_mm drops under threshold, terminate before the policy
+            # walks past the target.
+            post_metrics = env.get_spatial_metrics()
+            if (post_metrics.get("dist_mm", 1e9) <= (args.success_dist_mm if args.success_dist_mm is not None else 5.0)
+                    and post_metrics.get("angle_deg", 1e9) <= (args.success_angle_deg if args.success_angle_deg is not None else 10.0)):
+                success = True
+                success_reason = "dist_early_stop"
+                metrics_history.append(post_metrics)
+                break
+
             if use_sensor_stop:
                 raw_sensor = env.get_sensor_dist()
                 if 0.0 <= raw_sensor <= SENSOR_STOP_CLOSE_MM:
@@ -314,6 +338,12 @@ def main():
     p.add_argument("--z-steps", type=int, default=2)
     p.add_argument("--angle-steps", type=int, default=3)
     p.add_argument("--repeats", type=int, default=1)
+    p.add_argument("--angle-range-deg", type=float, default=None,
+                   help="Override perturbation angle range (deg). Default: scripts.sim_eval_align_only.PERTURB_ANGLE_DEG (25).")
+    p.add_argument("--success-dist-mm", type=float, default=None,
+                   help="Override success distance threshold (mm). Default: 5.")
+    p.add_argument("--success-angle-deg", type=float, default=None,
+                   help="Override success angle threshold (deg). Default: 10.")
     args = p.parse_args()
     run_eval(args)
 
