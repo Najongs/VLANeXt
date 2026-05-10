@@ -32,10 +32,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
-from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
+# Heavy imports — lazy so lerobot bridges can reuse AlignSimEnv/grid utilities
+# without pulling VLANeXt's transformers/peft/qwen-vl-utils dependency tree.
+try:
+    from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
+except ImportError:
+    AutoProcessor = AutoTokenizer = SiglipImageProcessor = None
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
+try:
+    from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
+except ImportError:
+    VLANeXt = LlamaProcessorWrapper = None
 from src.datasets.sim_act_align import action_min_sim_align as action_min_sim, action_max_sim_align as action_max_sim
 from src.utils.sensor_proc import process_sensor_dist_scalar
 from src.datasets.euler_convention import (
@@ -120,17 +128,20 @@ def _save_trajectory_plot(eval_dir):
 # ═══════════════════════════════════════════════════════════════════════════════
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
-# Perturbation (same as data collection)
-PERTURB_POS_XY_MM = 10.0
-PERTURB_POS_Z_MIN_MM = -10.0  # Z 하한 — 음수 시 occlusion check로 가려진 케이스 재시도
-PERTURB_POS_Z_MAX_MM = 10.0
-PERTURB_ANGLE_DEG = 0.0
+# Phantom variation grid (matches training data ranges; mm)
+# X(-25~25), Y(-25~75), Z(0e~50), angle ±25°
+PERTURB_POS_XY_MM = 25.0     # Note: Y range is asymmetric (-25~75), see build_perturb_grid
+PERTURB_POS_Y_MIN_MM = -25.0
+PERTURB_POS_Y_MAX_MM = 75.0
+PERTURB_POS_Z_MIN_MM = 0.0
+PERTURB_POS_Z_MAX_MM = 25.0
+PERTURB_ANGLE_DEG = 25.0
 
 # Success: needle tip within distance + angle threshold
-ALIGN_SUCCESS_THRESHOLD_M = 0.0025  # 2.5mm
+ALIGN_SUCCESS_THRESHOLD_M = 0.005  # 5mm
 ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
 ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
-ALIGN_SUCCESS_SENSOR_MIN_MM = 20.0   # sensor must see through hole (> this value)
+ALIGN_SUCCESS_SENSOR_MIN_MM = 20.0   # snsor must see through hole (> this value)
 
 # --- Sensor-stop trigger (independent of distance criterion) ---
 # When --sensor-stop is on, episode terminates EARLY with success=True after
@@ -151,14 +162,14 @@ SENSOR_STOP_HOLD_STEPS = 2   # how many consecutive frames to confirm the spike
 
 
 def build_perturb_grid(xy_steps, z_steps, angle_steps, repeats,
-                       xy_range=PERTURB_POS_XY_MM,
-                       z_range=(PERTURB_POS_Z_MIN_MM if PERTURB_POS_Z_MIN_MM > 0 else 5.0,
-                                PERTURB_POS_Z_MAX_MM),
+                       x_range=PERTURB_POS_XY_MM,
+                       y_range=(PERTURB_POS_Y_MIN_MM, PERTURB_POS_Y_MAX_MM),
+                       z_range=(PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM),
                        angle_range=PERTURB_ANGLE_DEG):
-    """Deterministic perturbation grid — enumerate (x, y, z, angle) cells × repeats."""
+    """Phantom-grid: enumerate phantom (x, y, z, angle) cells × repeats. Values in mm/deg."""
     if xy_steps >= 2:
-        xs = np.linspace(-xy_range, xy_range, xy_steps)
-        ys = np.linspace(-xy_range, xy_range, xy_steps)
+        xs = np.linspace(-x_range, x_range, xy_steps)
+        ys = np.linspace(y_range[0], y_range[1], xy_steps)
     else:
         xs = np.array([0.0]); ys = np.array([0.0])
     if z_steps >= 2:
@@ -218,8 +229,12 @@ class AlignSimEnv:
         self.phantom_pos = phantom_pos
         self.use_sensor_success = use_sensor_success
         self.retreat_mm = retreat_mm
-        self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
+        # New XML structure: trocar_assembly (X,Y, rotation parent), phantom_assembly (Z lift)
+        self._phantom_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "trocar_assembly")
+        self._phantom_assembly_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
         self._rotating_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
+        self._phantom_base_pos = self.model.body_pos[self._phantom_body_id].copy() if self._phantom_body_id >= 0 else np.zeros(3)
+        self._phantom_assembly_base_pos = self.model.body_pos[self._phantom_assembly_id].copy() if self._phantom_assembly_id >= 0 else np.zeros(3)
 
         # tool_camera ID (occlusion check용)
         self._tool_cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "tool_camera")
@@ -293,55 +308,39 @@ class AlignSimEnv:
             return True
         return False
 
+    def _apply_phantom(self, px, py, pz, angle_deg):
+        """Apply phantom params (matches training-time logic).
+        X,Y → trocar_assembly offset; Z → phantom_assembly offset; angle → rotating_assembly quat.
+        """
+        self.model.body_pos[self._phantom_body_id] = self._phantom_base_pos + np.array([px, py, 0.0])
+        self.model.body_pos[self._phantom_assembly_id] = self._phantom_assembly_base_pos + np.array([0.0, 0.0, pz])
+        new_quat = np.zeros(4)
+        mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(angle_deg)], "xyz")
+        self.model.body_quat[self._rotating_id] = new_quat
+        mujoco.mj_forward(self.model, self.data)
+        self.last_phantom_info = {
+            "phantom_x": float(px),
+            "phantom_y": float(py),
+            "phantom_z": float(pz),
+            "phantom_angle_deg": float(angle_deg),
+        }
+
     def _randomize_phantom(self):
-        """Randomize phantom position and rotation (same logic as Save_dataset.py)."""
-        offset_x = np.random.uniform(-0.03, 0.05)
-        # Y=-0.24~-0.20 제외 (회전 전환 경계 + IK 실패 다발 구간, phantom_grid_test_v3 결과)
-        if np.random.random() < 0.5:
-            offset_y = np.random.uniform(-0.4, -0.24)
-        else:
-            offset_y = np.random.uniform(-0.20, 0.0)
-        offset_z = 0.0
-        self.model.body_pos[self._phantom_body_id] = np.array([offset_x, offset_y, offset_z])
+        """Randomize phantom (matches Save_dataset_approach_only.py)."""
+        offset_x = np.random.uniform(-0.025, 0.025)
+        offset_y = np.random.uniform(-0.025, 0.075)
+        offset_z = np.random.uniform(0.0, 0.05)  # optical_plate + trocar 통째로 상승
+        random_angle_deg = float(np.random.uniform(-25, 25))
+        self._apply_phantom(offset_x, offset_y, offset_z, random_angle_deg)
+        print(f"  Phantom: pos=({offset_x:.3f}, {offset_y:.3f}, Z+{offset_z:.3f}), angle={random_angle_deg:.1f}deg")
 
-        if offset_y >= -0.25:
-            random_angle_deg = 0
-        else:
-            random_angle_deg = -90
-
-        new_quat = np.zeros(4)
-        mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
-        self.model.body_quat[self._rotating_id] = new_quat
-        mujoco.mj_forward(self.model, self.data)
-
-        self.last_phantom_info = {
-            "phantom_x": offset_x,
-            "phantom_y": offset_y,
-            "phantom_angle_deg": random_angle_deg,
-        }
-        print(f"  Phantom: pos=({offset_x:.3f}, {offset_y:.3f}), angle={random_angle_deg:.1f}deg")
-
-    def _set_fixed_phantom(self, pos):
-        """Set phantom to a fixed (x, y) position with fixed rotation."""
-        px, py = pos
-        self.model.body_pos[self._phantom_body_id] = np.array([px, py, 0.0])
-
-        if py >= -0.25:
-            random_angle_deg = 0
-        else:
-            random_angle_deg = -90
-
-        new_quat = np.zeros(4)
-        mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
-        self.model.body_quat[self._rotating_id] = new_quat
-        mujoco.mj_forward(self.model, self.data)
-
-        self.last_phantom_info = {
-            "phantom_x": px,
-            "phantom_y": py,
-            "phantom_angle_deg": random_angle_deg,
-        }
-        print(f"  Phantom (fixed): pos=({px:.3f}, {py:.3f}), angle={random_angle_deg:.1f}deg")
+    def _set_fixed_phantom(self, pos, pz=0.0, angle_deg=None):
+        """Set phantom to fixed (x, y[, z[, angle]]); angle random ±25° if not given."""
+        px, py = pos[0], pos[1]
+        if angle_deg is None:
+            angle_deg = float(np.random.uniform(-25, 25))
+        self._apply_phantom(px, py, pz, angle_deg)
+        print(f"  Phantom (fixed): pos=({px:.3f}, {py:.3f}, Z+{pz:.3f}), angle={angle_deg:.1f}deg")
 
     def _ensure_aligned_state(self):
         """Pre-align and cache. Re-runs if phantom is randomized or fixed with random rotation."""
@@ -351,7 +350,7 @@ class AlignSimEnv:
         label = "Re-aligning for new phantom..." if self._aligned_qpos is not None else "Running initial pre-alignment..."
         print(label)
         mujoco.mj_resetData(self.model, self.data)
-        home_pose = np.array([0.0, -0.5, 0.5, 0.0, 0.5, 1.0])
+        home_pose = np.array([0.75, -0.5, 0.5, 0.0, 0.6, 1.0])
         self.data.qpos[:6] = home_pose
         mujoco.mj_forward(self.model, self.data)
 
@@ -404,14 +403,53 @@ class AlignSimEnv:
         print("Pre-alignment cached.")
 
     def reset(self, max_retries=10, grid_cell=None):
-        """Reset to aligned state + perturbation (random or grid)."""
+        """Reset env. Two modes:
+        - grid_cell: phantom (x,y,z,angle) varies per cell; robot starts at fixed home_pose (NO pre-align, NO robot perturb).
+        - else: legacy random — pre-align then perturb robot pose.
+        """
+        # ============ NEW: phantom-grid mode ============
+        if grid_cell is not None:
+            # Set phantom from cell (mm → m)
+            px = grid_cell["x_mm"] / 1000.0
+            py = grid_cell["y_mm"] / 1000.0
+            pz = grid_cell["z_mm"] / 1000.0
+            ang = grid_cell["angle_deg"]
+            mujoco.mj_resetData(self.model, self.data)
+            self._apply_phantom(px, py, pz, ang)
+            # Robot: fixed home_pose (matches training)
+            home_pose = np.array([0.75, -0.5, 0.5, 0, 0.6, 1.0])
+            self.data.qpos[:6] = home_pose
+            self.data.qvel[:self.n_motors] = 0.0
+            self.data.ctrl[:self.n_motors] = home_pose[:self.n_motors]
+            mujoco.mj_forward(self.model, self.data)
+            # Cache trocar sites + goal_tip (success criterion uses these)
+            self._p_entry = self.data.site_xpos[self.target_entry_id].copy()
+            self._p_depth = self.data.site_xpos[self.target_depth_id].copy()
+            axis_dir = (self._p_depth - self._p_entry) / (np.linalg.norm(self._p_depth - self._p_entry) + 1e-10)
+            retreat_m = self.retreat_mm / 1000.0
+            self._goal_tip = self._p_entry - axis_dir * retreat_m
+            curr_tip = self.data.site_xpos[self.tip_id].copy()
+            curr_back = self.data.site_xpos[self.back_id].copy()
+            needle_len = np.linalg.norm(curr_tip - curr_back)
+            self._goal_back = self._p_entry - axis_dir * (retreat_m + needle_len)
+            actual_dist = np.linalg.norm(self.data.site_xpos[self.tip_id] - self._p_entry) * 1000.0
+            self.align_hold_counter = 0
+            self.last_perturb_info = {
+                "perturb_x_mm": float(grid_cell["x_mm"]),
+                "perturb_y_mm": float(grid_cell["y_mm"]),
+                "perturb_z_mm": float(grid_cell["z_mm"]),
+                "perturb_angle_deg": float(ang),
+                "perturb_dist_mm": float(np.sqrt(grid_cell["x_mm"]**2 + grid_cell["y_mm"]**2 + grid_cell["z_mm"]**2)),
+                "initial_dist_mm": float(actual_dist),
+            }
+            print(f"  PhantomCell: pos=({grid_cell['x_mm']:.1f},{grid_cell['y_mm']:.1f},{grid_cell['z_mm']:.1f})mm "
+                  f"angle={ang:.1f}deg | tip_to_trocar={actual_dist:.1f}mm")
+            return
+        # ============ Legacy: random perturbation around pre-align ============
         if self.randomize_phantom:
             # Invalidate cache so _ensure_aligned_state re-runs
             self._aligned_qpos = None
         self._ensure_aligned_state()
-
-        if grid_cell is not None:
-            max_retries = 1  # deterministic — retrying same target won't help
 
         for attempt in range(max_retries):
             mujoco.mj_resetData(self.model, self.data)
@@ -833,8 +871,12 @@ def run_eval(cfg):
             # Match training convention: proprio orientation in Mecademic intrinsic XYZ
             ee_pose_mec = ee_pose.copy()
             ee_pose_mec[3:6] = mujoco_to_mecademic_euler(ee_pose[3:6])
-            # Proprio is 6-DoF EE pose only. Sensor is detection-only (sensor_stop), not training input.
-            proprio = ee_pose_mec[:6].astype(np.float32)  # (6,)
+            # Proprio: 6-DoF EE pose + 2 sensor binary flags (sensor_close ≤5mm, hole_through ≥15mm).
+            proprio6 = ee_pose_mec[:6].astype(np.float32)
+            sensor_raw_mm = float(env.get_sensor_dist())
+            sensor_close = 1.0 if (0.0 <= sensor_raw_mm <= 5.0) else 0.0
+            hole_through = 1.0 if (sensor_raw_mm >= 15.0) else 0.0
+            proprio = np.concatenate([proprio6, np.array([sensor_close, hole_through], dtype=np.float32)])  # (8,)
             state_history.append(proprio)
 
             observation = {

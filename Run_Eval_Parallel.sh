@@ -5,10 +5,13 @@
 #   bash Run_Eval_Parallel.sh [checkpoint_path] [extra_flags...]    (mode defaults to align)
 #
 # Modes:
-#   align     - Fine-alignment eval (기본)
-#   approach  - Approach eval (먼 거리 → 트로카 접근)
-#   insertion - Insertion eval (정렬 후 삽입)
-#   basic     - Basic motion eval (10방향 이동 정확도)
+#   align         - Fine-alignment eval (기본)
+#   approach      - Approach eval (먼 거리 → 트로카 접근)
+#   insertion     - Insertion eval (정렬 후 삽입)
+#   basic         - Basic motion eval (10방향 이동 정확도)
+#   lerobot_act   - Lerobot ACT policy eval on align task
+#   lerobot_dp    - Lerobot Diffusion Policy eval on align task
+#   lerobot_vqbet - Lerobot VQ-BeT eval on align task
 #
 # NOTE: Perturbation Z 범위
 #   align 데이터 수집/eval에서 Z perturbation은 [0, +Z_MAX]mm만 사용.
@@ -17,7 +20,8 @@
 #   관련 파일: Save_dataset_align_only.py, sim_eval_align_only.py, run_parallel.py
 #
 # Examples:
-# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0507 --phantom-pos 0.0 0.0 --retreat-mm 2 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1 --sensor-stop
+# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0507_10step --phantom-pos 0.0 0.0 --retreat-mm 2 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1 --sensor-stop
+# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0508 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 3 --z-steps 2 --angle-steps 3 --repeats 1
 #   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
 #   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
 #   bash Run_Eval_Parallel.sh approach /data/public/NAS/VLANeXt/output_dir_approach_2mix_0426 --phantom-pos 0.0 -0.4
@@ -29,7 +33,7 @@ if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
     MODE="align"
     CHECKPOINT="$1"
     EXTRA_ARGS=("${@:2}")
-elif [ "$1" = "align" ] || [ "$1" = "approach" ] || [ "$1" = "insertion" ] || [ "$1" = "basic" ]; then
+elif [ "$1" = "align" ] || [ "$1" = "approach" ] || [ "$1" = "insertion" ] || [ "$1" = "basic" ] || [ "$1" = "lerobot_act" ] || [ "$1" = "lerobot_dp" ] || [ "$1" = "lerobot_vqbet" ]; then
     MODE="$1"
     CHECKPOINT="${2:-/data/public/NAS/VLANeXt/output_dir_align_0410}"
     EXTRA_ARGS=("${@:3}")
@@ -40,7 +44,7 @@ else
 fi
 
 # Override with NUM_SHARDS env var (default 5). Each shard pinned to GPU index = shard_id.
-NUM_SHARDS=${NUM_SHARDS:-5}
+NUM_SHARDS=${NUM_SHARDS:-3}
 
 # Mode-specific config
 if [ "$MODE" = "approach" ]; then
@@ -58,6 +62,12 @@ elif [ "$MODE" = "basic" ]; then
     TRAIN_CONFIG=config/sim_train_basic_wrist_config.yaml
     EVAL_SCRIPT=scripts.sim_eval_basic_motion
     MERGE_PREFIX="basic"
+elif [ "$MODE" = "lerobot_act" ] || [ "$MODE" = "lerobot_dp" ] || [ "$MODE" = "lerobot_vqbet" ]; then
+    LEROBOT_POLICY="${MODE#lerobot_}"   # act | dp | vqbet
+    EVAL_SCRIPT=scripts.sim_eval_lerobot
+    MERGE_PREFIX="lerobot_${LEROBOT_POLICY}"
+    CONFIG=""
+    TRAIN_CONFIG=""
 else
     CONFIG=config/sim_eval_align_config.yaml
     TRAIN_CONFIG=config/sim_train_align_config.yaml
@@ -91,12 +101,20 @@ fi
 for SHARD in $(seq 0 $((NUM_SHARDS - 1))); do
     GPU_ID=${SHARD}
     echo "Starting shard ${SHARD} on GPU ${GPU_ID}..."
-    CUDA_VISIBLE_DEVICES=${GPU_ID} python -m ${EVAL_SCRIPT} \
-        --config ${CONFIG} \
-        --checkpoint ${CHECKPOINT} \
-        --train-config ${TRAIN_CONFIG} \
-        --shard-id ${SHARD} \
-        --num-shards ${NUM_SHARDS} ${EXTRA_FLAGS} &
+    if [[ "$MODE" == lerobot_* ]]; then
+        CUDA_VISIBLE_DEVICES=${GPU_ID} python -m ${EVAL_SCRIPT} \
+            --policy ${LEROBOT_POLICY} \
+            --checkpoint ${CHECKPOINT} \
+            --shard-id ${SHARD} \
+            --num-shards ${NUM_SHARDS} ${EXTRA_FLAGS} &
+    else
+        CUDA_VISIBLE_DEVICES=${GPU_ID} python -m ${EVAL_SCRIPT} \
+            --config ${CONFIG} \
+            --checkpoint ${CHECKPOINT} \
+            --train-config ${TRAIN_CONFIG} \
+            --shard-id ${SHARD} \
+            --num-shards ${NUM_SHARDS} ${EXTRA_FLAGS} &
+    fi
 done
 
 echo "All shards launched. Waiting..."

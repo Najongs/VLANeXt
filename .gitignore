@@ -24,3 +24,4 @@ real_approach/
 .cache/
 occlusion_check/
 compare_replay_vs_sim/
+lerobot/

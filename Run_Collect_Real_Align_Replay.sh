@@ -22,3 +22,5 @@ EXTRA_ARGS=("$@")
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python -m digital_twin.real_collect_align_replay \
     "${EXTRA_ARGS[@]}"
+
+rsync -av --progress -e 'ssh -p 37840' /home/irom/NAS/VLANeXt/dataset/real_align/collected_data_real yohan@nayohan.iptime.org:/data/public/NAS/VLANeXt/dataset

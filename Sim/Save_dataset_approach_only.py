@@ -61,17 +61,17 @@ IMG_WIDTH = 640
 IMG_HEIGHT = 480
 CAMERA_LIST = ["side_camera", "tool_camera", "top_camera"]
 TARGET_INSERTION_DEPTH = 0.0275
-ALIGN_SPEED = 0.02      # 정렬 단계 속도: 0.02 m/s (~200 steps)
+ALIGN_SPEED = 0.005      # 정렬 단계 속도: 0.02 m/s (~200 steps)
 # Velocity profile shape during approach trajectory.
 # 0.5 = pure cubic smoothstep (slow tails dominate), 0.2 = 20% accel + 60% cruise + 20% decel,
 # 0.1 = sharper trapezoid. Lower = more time at constant velocity, less "stop-near-goal" bias.
-APPROACH_ACCEL_FRAC = 0.15
+APPROACH_ACCEL_FRAC = 0.1
 INSERTION_SPEED = 0.0025  # 삽입 단계 속도: 0.003 m/s (초당 3mm)
 TASK_INSTRUCTION = "Approach the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 ACTION_CLIP_MM = 1.0  # phase 전환 시 IK spike 방지: delta position 클리핑 (mm)
 MAX_CTRL_STEPS = 500        # 녹화 control step 상한 (초과 시 에피소드 폐기)
-HOLD_STEPS = 25             # 도달 후 hold 프레임 수 (control steps, action≈0 기록)
-RETREAT_MM = 10.0           # goal_tip을 trocar entry에서 뒤로 빼는 거리 (mm) — align과 동일
+HOLD_STEPS = 10             # 도달 후 hold 프레임 수 (control steps, action≈0 기록)
+RETREAT_MM = 1.0           # goal_tip을 trocar entry에서 뒤로 빼는 거리 (mm) — align과 동일
 WARMUP_STEPS = 500          # 녹화 전 J6 settling 대기 (sim steps, 67 control step ≈ 7 control frames)
 
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
@@ -247,27 +247,23 @@ def trapezoid_step(t, accel_frac=0.2):
     u = (1 - t) / ta
     return 1.0 - v_max * ta * (u**3 - 0.5 * u**4)
 
-def randomize_phantom_pos(model, data, phantom_id, rot_id):
-    # 1. 위치 이동 (Translation)
-    offset_x = np.random.uniform(-0.05, 0.05)
-    # Y=-0.26~-0.17 제외 (회전 전환 경계, IK 실패 다발 구간)
-    if np.random.random() < 0.6:
-        offset_y = np.random.uniform(-0.4, -0.26)
-    else:
-        offset_y = np.random.uniform(-0.17, 0.0)
-    offset_z = 0.0
+def randomize_phantom_pos(model, data, phantom_id, rot_id, base_pos=np.zeros(3),
+                           assembly_id=-1, assembly_base_pos=np.zeros(3)):
+    # 1. 위치 이동 (Translation) — plate 영역 내 제약
+    offset_x = np.random.uniform(-0.025, 0.025)
+    offset_y = np.random.uniform(-0.025, 0.075)
+    offset_z = np.random.uniform(0.0, 0.05)  # optical_plate + trocar 통째로 상승
 
-    model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
+    model.body_pos[phantom_id] = base_pos + np.array([offset_x, offset_y, 0.0])
+    if assembly_id >= 0:
+        model.body_pos[assembly_id] = assembly_base_pos + np.array([0.0, 0.0, offset_z])
 
-    if offset_y >= -0.25:
-        random_angle_deg = 0
-    else:
-        random_angle_deg = -90
+    random_angle_deg = float(np.random.uniform(-25, 25))
 
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
     model.body_quat[rot_id] = new_quat
-    print(f">>> Randomize: Pos=({offset_x:.2f}, {offset_y:.2f}), Angle={random_angle_deg:.1f} deg")
+    print(f">>> Randomize: Pos=({offset_x:.3f}, {offset_y:.3f}, Z+{offset_z:.3f}), Angle={random_angle_deg:.1f} deg")
     mujoco.mj_forward(model, data)
     return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32), np.float32(random_angle_deg)
 
@@ -349,8 +345,11 @@ def main():
         back_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "needle_back")
         target_entry_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "trocar_target")
         target_depth_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "trocar_depth")
-        phantom_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
+        phantom_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trocar_assembly")
         rotating_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
+        phantom_assembly_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
+        phantom_base_pos = model.body_pos[phantom_body_id].copy() if phantom_body_id >= 0 else np.zeros(3)
+        phantom_assembly_base_pos = model.body_pos[phantom_assembly_id].copy() if phantom_assembly_id >= 0 else np.zeros(3)
         link6_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "6_Link") 
         n_motors = model.nu
         dof = model.nv
@@ -359,7 +358,6 @@ def main():
         phantom_body_id = -1
 
     recorder = SimRecorder(SAVE_DIR)
-    # home_pose는 에피소드 루프 안에서 매번 랜덤 생성
     current_speed = 0.5 # np.random.uniform(0.3, 0.6)
 
     def get_ee_pose_6d_scaled():
@@ -386,26 +384,16 @@ def main():
     episode_count = 0
     while episode_count < MAX_EPISODES:
         mujoco.mj_resetData(model, data)
-        # 초기 home pose (정렬 시작점)
-        home_pose = np.array([
-            np.random.uniform(-0.5, 0.5),    # J1 (base rotation)
-            np.random.uniform(-0.6, -0.4),    # J2 (shoulder pitch)
-            np.random.uniform(0.75, 0.25),    # J3 (elbow pitch)
-            np.random.uniform(-0.3, 0.3),    # J4 (roll)
-            np.random.uniform(0.4, 0.6),     # J5 (wrist pitch)
-            np.random.uniform(0.9, 1.1),    # J6
-        ])
+        # 초기 home pose (정렬 시작점) — 고정
+        home_pose = np.array([0.75, -0.5, 0.5, 0, 0.6, 1.0])
         data.qpos[:6] = home_pose
         phantom_offset = np.zeros(3, dtype=np.float32)
         phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         phantom_angle_deg = np.float32(0.0)
         if PHANTOM_POS is not None and phantom_body_id >= 0:
             px, py = PHANTOM_POS
-            model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
-            if py >= -0.25:
-                rand_angle = 0
-            else:
-                rand_angle = -90
+            model.body_pos[phantom_body_id] = phantom_base_pos + np.array([px, py, 0.0])
+            rand_angle = float(np.random.uniform(-25, 25))
             new_quat = np.zeros(4)
             mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(rand_angle)], "xyz")
             model.body_quat[rotating_id] = new_quat
@@ -414,7 +402,9 @@ def main():
             phantom_quat = new_quat.astype(np.float32)
             phantom_angle_deg = np.float32(rand_angle)
         elif RANDOMIZE_PHANTOM:
-            phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(model, data, phantom_body_id, rotating_id)
+            phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(
+                model, data, phantom_body_id, rotating_id, phantom_base_pos,
+                phantom_assembly_id, phantom_assembly_base_pos)
         mujoco.mj_forward(model, data)
         
         last_ee_pose = get_ee_pose_6d_scaled()

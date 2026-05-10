@@ -39,18 +39,18 @@ python Sim/filter_outliers.py \
     --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2 \
+    --data-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
-    --max-range 50 \
+    --max-range 150 \
     --max-detour 3.0 \
-    --max-path-length 50 \
+    --max-path-length 150 \
     --max-rot 0.02 \
-    --max-steps 250 \
-    --min-steps 30 \
-    --high-action-thr 0.3 \
+    --max-steps 300 \
+    --min-steps 10 \
+    --high-action-thr 0.5 \
     --high-action-frames 5 \
-    --high-rot-thr 0.005 \
+    --high-rot-thr 0.01 \
     --high-rot-frames 5 \
     --execute
 
@@ -212,7 +212,7 @@ def main():
         print(f"  7. Min step count: n_steps < {args.min_steps}")
     if args.max_steps > 0:
         print(f"  8. Max step count: n_steps > {args.max_steps}")
-    if args.high_action_thr > 0 and args.high_action_frames > 0:
+    if args.high_action_thr > 0 and args.high_action_frames >= 0:
         print(f"  9. Trans plateau: > {args.high_action_frames} frames with |trans| > {args.high_action_thr}")
     if args.high_rot_thr > 0 and args.high_rot_frames > 0:
         print(f" 10. Rot plateau:   > {args.high_rot_frames} frames with |rot|   > {args.high_rot_thr}")
@@ -319,7 +319,7 @@ def main():
                 outliers.append(s)
 
     # --- 9. Trans plateau outlier (many frames with high |trans| action) ---
-    if all_stats and args.high_action_thr > 0 and args.high_action_frames > 0:
+    if all_stats and args.high_action_thr > 0 and args.high_action_frames >= 0:
         outlier_paths = {o['path'] for o in outliers}
         for s in all_stats:
             n_high = int(np.sum(s['per_frame_max_trans'] > args.high_action_thr))

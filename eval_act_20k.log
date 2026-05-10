@@ -1,0 +1,63 @@
+[seed] eval seed = 2026 (shard_id=None)
+Loading weights from local directory
+/home/yohan/miniconda3/envs/lerobot/lib/python3.12/site-packages/torch/cuda/__init__.py:1007: UserWarning: Can't initialize NVML
+  raw_cnt = _raw_device_count_nvml()
+[grid] 54 cells
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+pci id for fd 36: 10de:2204, driver (null)
+pci id for fd 37: 10de:2204, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+pci id for fd 36: 10de:2204, driver (null)
+pci id for fd 37: 10de:2204, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+pci id for fd 36: 10de:2204, driver (null)
+pci id for fd 37: 10de:2204, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+pci id for fd 36: 10de:2204, driver (null)
+pci id for fd 37: 10de:2204, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+pci id for fd 36: 10de:2204, driver (null)
+pci id for fd 37: 10de:2204, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+pci id for fd 36: 10de:2204, driver (null)
+pci id for fd 37: 10de:2204, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+libEGL warning: pci id for fd 35: 10de:2204, driver (null)
+
+  PhantomCell: pos=(-25.0,-25.0,0.0)mm angle=-25.0deg | tip_to_trocar=37.6mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0001_fail.mp4
+[ep 001 F] dist=47.68mm angle=15.56°  SR=0.0%
+  PhantomCell: pos=(-25.0,-25.0,0.0)mm angle=0.0deg | tip_to_trocar=40.4mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0002_fail.mp4
+[ep 002 F] dist=65.20mm angle=18.46°  SR=0.0%
+  PhantomCell: pos=(-25.0,-25.0,0.0)mm angle=25.0deg | tip_to_trocar=43.4mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0003_fail.mp4
+[ep 003 F] dist=52.95mm angle=10.25°  SR=0.0%
+  PhantomCell: pos=(-25.0,-25.0,25.0)mm angle=-25.0deg | tip_to_trocar=32.8mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0004_fail.mp4
+[ep 004 F] dist=52.62mm angle=17.11°  SR=0.0%
+  PhantomCell: pos=(-25.0,-25.0,25.0)mm angle=0.0deg | tip_to_trocar=36.0mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0005_fail.mp4
+[ep 005 F] dist=68.37mm angle=19.24°  SR=0.0%
+  PhantomCell: pos=(-25.0,-25.0,25.0)mm angle=25.0deg | tip_to_trocar=39.4mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0006_fail.mp4
+[ep 006 F] dist=67.29mm angle=1.80°  SR=0.0%
+  PhantomCell: pos=(-25.0,25.0,0.0)mm angle=-25.0deg | tip_to_trocar=27.1mm
+  Saved video: /data/public/NAS/VLANeXt/outputs/train/lerobot_act_align_20260510_2222/checkpoints/020000/lerobot_act_eval_pretrained_model/episode_0007_fail.mp4
+[ep 007 F] dist=193.95mm angle=34.24°  SR=0.0%
+  PhantomCell: pos=(-25.0,25.0,0.0)mm angle=0.0deg | tip_to_trocar=25.6mm

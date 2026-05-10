@@ -36,8 +36,8 @@ from src.utils.sensor_proc import (
 #   rot_z max 0.0069, p99 0.0019
 # pos bound = max (0.20 covers all, no saturation, full dynamic range).
 # rot bound = p99 + small margin (max-tail saturates rarely; better dynamic range than max-based).
-action_min_sim_align = [-0.20, -0.20, -0.20, -0.0020, -0.0008, -0.0025]
-action_max_sim_align = [0.20, 0.20, 0.20, 0.0020, 0.0008, 0.0025]
+action_min_sim_align = [-0.37, -0.37, -0.37, -0.0025, -0.0007, -0.007]
+action_max_sim_align = [0.37, 0.37, 0.37, 0.0025, 0.0007, 0.007]
 
 # action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
 # action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
@@ -180,8 +180,14 @@ class SimActAlign(IterableDataset):
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 6) — sensor excluded from training (detection-only) ---
+            # --- Proprioception: ee_pose (N, 6) [+ 2 sensor binary flags if use_sensor] ---
             proprio_np = ee_pose_raw  # already in Mecademic convention, gripper dropped above
+            if self.use_sensor:
+                sensor_raw = f["observations"]["sensor_dist"][:].astype(np.float32).reshape(-1)
+                sensor_close = ((sensor_raw >= 0.0) & (sensor_raw <= 5.0)).astype(np.float32)
+                hole_through = (sensor_raw >= 15.0).astype(np.float32)
+                sensor_feat = np.stack([sensor_close, hole_through], axis=-1)  # (N, 2)
+                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 8)
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None

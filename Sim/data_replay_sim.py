@@ -10,7 +10,7 @@ import imageio
 # Supports real-time viewing and video export with metadata overlay
 # ==============================================================
 
-#  python Sim/data_replay_sim.py /data/public/NAS/VLANeXt/dataset/fine_align/5mm_fine_align_00_tip3/collected_data_merged/w4_episode_20260506_153210.h5 --output dataset/check2.mp4
+#  python Sim/data_replay_sim.py /data/public/NAS/VLANeXt/dataset/approach/approach_00/collected_data_merged/w0_episode_20260507_174849.h5 --output dataset/check3.mp4
 
 # Phase mapping for display
 PHASE_NAMES = {

@@ -99,8 +99,9 @@
     <site name="viz_target_tip" pos="0 0 0" size="0.001" rgba="1 0 1 0"/>
     <body name="phantom_assembly" pos="0 0 0">
       <geom pos="0.274999 0.34 -0.0015" quat="0.499998 0.5 -0.500002 -0.5" type="mesh" material="mat_dark_metal" mesh="Optical_plate" contype="0" conaffinity="0"/>
-      <body name="rotating_assembly" pos="0.214998 0.165 0.11">
-        <geom pos="0 0 0" quat="0.499998 -0.5 0.500002 -0.5" type="mesh" material="mat_white_plastic" mesh="Trocar_plate" contype="0" conaffinity="0"/>
+      <body name="trocar_assembly" pos="0.214998 0.165 0.11">
+      <geom pos="0 0 0" quat="0.499998 -0.5 0.500002 -0.5" type="mesh" material="mat_white_plastic" mesh="Trocar_plate" contype="0" conaffinity="0"/>
+      <body name="rotating_assembly" pos="0 0 0">
         <body name="Trocar_cover" pos="0.001213 0.010284 -0.006" quat="0.707105 0 0 -0.707108">
           <inertial pos="0 0 0.0031894" mass="0.051623" diaginertia="1.8441e-05 1.8441e-05 1.698e-05"/>
           <geom type="mesh" material="mat_yellow_resin" mesh="Trocar_cover" contype="0" conaffinity="0"/>
@@ -119,6 +120,7 @@
             </body>
           </body>
         </body>
+      </body>
       </body>
     </body>
   </worldbody>

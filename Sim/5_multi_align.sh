@@ -1,5 +1,5 @@
-python run_parallel.py --script align --workers 5 --episodes 10 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/5mm_fine_align_00_tip3 --phantom-pos 0.0 0.0 --no-side-camera --cameras tool_camera --allow-occluded
+# python run_parallel.py --script align --workers 5 --episodes 10 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/5mm_fine_align_00_tip3 --phantom-pos 0.0 0.0 --no-side-camera --cameras tool_camera --allow-occluded
 # python run_parallel.py --script align --workers 20 --episodes 50 \
 #     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01 --phantom-pos 0.0 -0.1 --no-side-camera --cameras tool_camera --allow-occluded
 # python run_parallel.py --script align --workers 20 --episodes 50 \
@@ -12,8 +12,10 @@ python run_parallel.py --script align --workers 5 --episodes 10 \
 # python run_parallel.py --script align --workers 1 --episodes 1 \
 #     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/fine_align_02 --phantom-pos 0.0 -0.2 --no-side-camera
 
-# python run_parallel.py --script approach --workers 10 --episodes 10 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 --phantom-pos 0.0 -0.0 --no-side-camera --no-insertion --hold-steps 25 --cameras top_camera
+python run_parallel.py --script approach --workers 25 --episodes 200 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 --randomize-phantom-pos --no-side-camera --no-insertion --hold-steps 10 --cameras tool_camera
+# python run_parallel.py --script approach --workers 1 --episodes 1 \
+#     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 --phantom-pos -0.05 0.1 --no-side-camera --no-insertion --hold-steps 25 # --cameras tool_camera
 # python run_parallel.py --script approach --workers 1 --episodes 5 \
 #     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_01 --phantom-pos 0.0 -0.1 --no-side-camera --no-insertion --hold-steps 25 --cameras top_camera
 # python run_parallel.py --script approach --workers 20 --episodes 250 \

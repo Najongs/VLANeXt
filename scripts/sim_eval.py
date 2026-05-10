@@ -35,12 +35,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
-from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
+# Heavy VLANeXt-side imports — lazy so this module can be imported by lerobot eval
+# bridges that don't need the VLANeXt model/processor at all.
+try:
+    from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
+except ImportError:
+    AutoProcessor = AutoTokenizer = SiglipImageProcessor = None
 
-# ── project imports ──────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
-from src.datasets.sim_act import action_min_sim, action_max_sim
+try:
+    from src.models.VLANeXt import VLANeXt, LlamaProcessorWrapper
+except ImportError:
+    VLANeXt = LlamaProcessorWrapper = None
+try:
+    from src.datasets.sim_act import action_min_sim, action_max_sim
+except ImportError:
+    action_min_sim = action_max_sim = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
