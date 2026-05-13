@@ -38,9 +38,13 @@ from PIL import Image
 # Heavy VLANeXt-side imports — lazy so this module can be imported by lerobot eval
 # bridges that don't need the VLANeXt model/processor at all.
 try:
-    from transformers import AutoProcessor, AutoTokenizer, SiglipImageProcessor
+    from transformers import (
+        AutoProcessor, AutoTokenizer, SiglipImageProcessor,
+        Siglip2ImageProcessor, AutoImageProcessor,
+    )
 except ImportError:
     AutoProcessor = AutoTokenizer = SiglipImageProcessor = None
+    Siglip2ImageProcessor = AutoImageProcessor = None
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 try:
@@ -214,6 +218,36 @@ def load_processor(checkpoint_path: str, train_config_path: str = None):
         image_processor = SiglipImageProcessor.from_pretrained(ve_path)
         return LlamaProcessorWrapper(tokenizer, image_processor)
 
+    if lmm_path == "vision_only":
+        # Vision-only path: 백본별 ImageProcessor만 로드 (tokenizer 없음).
+        # ve_path는 ckpt config 또는 train_config에서 가져옴.
+        ve_path = None
+        if not os.path.isdir(checkpoint_path):
+            ck = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            if isinstance(ck, dict) and "config" in ck:
+                ve_path = ck["config"]["model"].get("vision_encoder_path")
+            input_size = ck["config"]["model"].get("input_image_size") if (
+                isinstance(ck, dict) and "config" in ck) else None
+        else:
+            input_size = None
+        if ve_path is None:
+            cfg = OmegaConf.to_container(OmegaConf.load(train_config_path), resolve=True)
+            ve_path = cfg["model"]["vision_encoder_path"]
+            input_size = cfg["model"].get("input_image_size")
+        vlow = ve_path.lower()
+        if "naflex" in vlow:
+            image_processor = Siglip2ImageProcessor.from_pretrained(ve_path)
+        elif "siglip" in vlow:
+            image_processor = SiglipImageProcessor.from_pretrained(ve_path)
+        else:
+            image_processor = AutoImageProcessor.from_pretrained(ve_path, trust_remote_code=True)
+        if input_size:
+            try:
+                image_processor.size = {"height": int(input_size), "width": int(input_size)}
+            except Exception:
+                pass
+        return LlamaProcessorWrapper(tokenizer=None, image_processor=image_processor)
+
     return AutoProcessor.from_pretrained(lmm_path, trust_remote_code=True)
 
 
@@ -242,6 +276,8 @@ def predict_action(model, processor, obs, task_label):
     effective_processor = getattr(model, "processor", processor)
     is_qwen = "Qwen" in effective_processor.__class__.__name__
     is_llama = "Llama" in effective_processor.__class__.__name__
+    # vision_only: LlamaProcessorWrapper with tokenizer=None → text 건너뛰고 이미지만.
+    is_vision_only = is_llama and getattr(effective_processor, "tokenizer", None) is None
 
     # ── helper: pad history to length n ───────────────────────────────────────
     def _take_last(history_list, fallback, n):
@@ -302,7 +338,14 @@ def predict_action(model, processor, obs, task_label):
     else:
         images = [pil_images[-1]]
 
-    if is_llama:
+    if is_vision_only:
+        image_inputs = effective_processor.image_processor(images, return_tensors="pt")
+        inputs = {
+            "input_ids": torch.zeros(1, 1, dtype=torch.long),
+            "attention_mask": torch.zeros(1, 1, dtype=torch.long),
+            "pixel_values": image_inputs["pixel_values"],
+        }
+    elif is_llama:
         text = [task_label]
         inputs = effective_processor.tokenizer(text, padding=True, return_tensors="pt")
         image_inputs = effective_processor.image_processor(images, return_tensors="pt")

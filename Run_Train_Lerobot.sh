@@ -19,8 +19,13 @@
 # Usage
 # -----
 #   bash Run_Train_Lerobot.sh act
-#   bash Run_Train_Lerobot.sh dp        # Diffusion Policy
+#   bash Run_Train_Lerobot.sh dp        # Diffusion Policy (DDPM, horizon=8 + n_obs=1 to match ACT)
 #   bash Run_Train_Lerobot.sh vqbet
+#   bash Run_Train_Lerobot.sh act-resume <prior_run_dir>   # resume from latest checkpoint
+#
+# Env overrides:
+#   GPUS=2 STEPS=40000 BATCH=32 bash Run_Train_Lerobot.sh act
+#   DATASET_ROOT=/path/to/lerobot bash Run_Train_Lerobot.sh dp
 #
 # Output
 # ------
@@ -39,7 +44,7 @@ set -e
 
 POLICY=${1:-act}
 DATASET_REPO_ID=${DATASET_REPO_ID:-vlanext/sim_align_baseline}
-DATASET_ROOT=${DATASET_ROOT:-/data/public/NAS/VLANeXt/dataset/lerobot}
+DATASET_ROOT=${DATASET_ROOT:-/data/public/NAS/VLANeXt/dataset/lerobot_sim}
 GPUS=${GPUS:-1}
 NUM_GPUS=$(echo "$GPUS" | awk -F, '{print NF}')
 # Workaround: GPU 0 in error state poisons CUDA enumeration → force PCI bus ordering.
@@ -74,18 +79,34 @@ case "$POLICY" in
             "--policy.type=act"
             "--policy.chunk_size=8"
             "--policy.n_action_steps=8"
-            "--batch_size=48"
-            "--steps=80000"
+            "--batch_size=${BATCH:-48}"
+            "--steps=${STEPS:-80000}"
         )
         ;;
+    act-resume|resume)
+        # Usage: bash Run_Train_Lerobot.sh act-resume outputs/train/<prior_run_dir>
+        PRIOR_DIR="${2:?need prior run output_dir as 2nd arg}"
+        if [ ! -d "${PRIOR_DIR}" ]; then
+            echo "ERROR: prior run dir not found: ${PRIOR_DIR}"; exit 1
+        fi
+        echo "Resuming from: ${PRIOR_DIR}"
+        # When resuming, lerobot reads the prior config from output_dir/checkpoints/last/.
+        CUDA_VISIBLE_DEVICES=${GPUS} ${TRAIN_CMD} \
+            --config_path="${PRIOR_DIR}/checkpoints/last/pretrained_model/train_config.json" \
+            --output_dir="${PRIOR_DIR}" \
+            --dataset.root="${DATASET_ROOT}" \
+            --resume=true "${@:3}"
+        exit $?
+        ;;
     dp|diffusion)
+        # horizon=8 + n_obs_steps=1 → matches ACT chunk/obs structure for fair comparison.
         EXTRA=(
             "--policy.type=diffusion"
-            "--policy.horizon=16"
+            "--policy.horizon=8"
             "--policy.n_action_steps=8"
-            "--policy.n_obs_steps=2"
-            "--batch_size=64"
-            "--steps=200000"
+            "--policy.n_obs_steps=1"
+            "--batch_size=${BATCH:-64}"
+            "--steps=${STEPS:-80000}"
         )
         ;;
     vqbet)

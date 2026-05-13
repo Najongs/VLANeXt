@@ -8,8 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (
-    AutoProcessor, AutoTokenizer, AutoModelForImageTextToText,
-    SiglipVisionModel, SiglipImageProcessor, LlamaForCausalLM,
+    AutoProcessor, AutoTokenizer, AutoModelForImageTextToText, AutoModel, AutoImageProcessor,
+    SiglipVisionModel, SiglipImageProcessor,
+    Siglip2VisionModel, Siglip2ImageProcessor,
+    LlamaForCausalLM,
     PaliGemmaForConditionalGeneration,
     Qwen3VLForConditionalGeneration
 )
@@ -25,6 +27,23 @@ from .policies import (
 from .generator import ImageGeneratorTransformer
 from .encoder import ActionTransformerProjector
 from .connector import ConnectorTransformer
+
+
+def _build_2d_sincos_pos_embed(h, w, dim):
+    """ACT/DETR-style 2D sinusoidal positional encoding. Returns (h*w, dim).
+    dim는 4의 배수여야 함 (h,w 각각 sin/cos 절반씩)."""
+    assert dim % 4 == 0, f"2D sincos pos embed needs dim%4==0, got {dim}"
+    grid_h = torch.arange(h, dtype=torch.float32)
+    grid_w = torch.arange(w, dtype=torch.float32)
+    gh, gw = torch.meshgrid(grid_h, grid_w, indexing="ij")  # (h, w) each
+    gh = gh.reshape(-1)
+    gw = gw.reshape(-1)
+    half = dim // 4
+    omega = torch.arange(half, dtype=torch.float32) / float(half)
+    omega = 1.0 / (10000.0 ** omega)
+    eh = gh[:, None] * omega[None, :]  # (h*w, half)
+    ew = gw[:, None] * omega[None, :]
+    return torch.cat([torch.sin(ew), torch.cos(ew), torch.sin(eh), torch.cos(eh)], dim=-1)  # (h*w, dim)
 
 try:
     from .Emu3_5_VisionTokenizer.modeling_emu3p5visionvq import Emu3p5VisionVQModel
@@ -233,8 +252,9 @@ class VLANeXt(nn.Module):
         use_transformer_connector=True,
         connector_depth=2,
         connector_num_heads=4,
-        backbone_mode="finetune", # Options: "frozen", "finetune", "lora"
+        backbone_mode="finetune", # Options: "frozen", "finetune", "lora", "last_n_unfreeze"
         lora_config=None,
+        n_unfreeze_layers=4,  # used when backbone_mode == "last_n_unfreeze"
         gradient_checkpointing=True,
         num_bins=256,
         action_vqvae=None,
@@ -252,6 +272,7 @@ class VLANeXt(nn.Module):
         proprio_dim=None,
         aux_distance_loss=None,
         direction_decoupled_loss=None,
+        input_image_size=None,   # vision_only 경로에서 image_processor size 강제 (예: DINOv3 512).
     ):
         super().__init__()
         # Aux distance loss config (sim-only). Disabled if config missing/false.
@@ -271,6 +292,11 @@ class VLANeXt(nn.Module):
         self.aux_dist_near_goal_scale_mm = float(adl.get("near_goal_scale_mm", 0.0))
         self.aux_dist_near_goal_max_boost = float(adl.get("near_goal_max_boost", 4.0))
         self.aux_dist_apply_to_main = bool(adl.get("apply_to_main_loss", True))
+        # Hold-aware: when cur_dist <= hold_threshold_mm, drop margin to 0
+        # (= "no further progress required when already inside target band").
+        # Without this, aux_dist penalizes hold-state samples forever with a +margin floor.
+        # 0 = disabled (legacy 동작).
+        self.aux_dist_hold_threshold_mm = float(adl.get("hold_threshold_mm", 0.0))
 
         # Direction-decoupled action loss (replaces plain MSE on main loss).
         # Splits position-channel target into magnitude and unit-direction supervisions:
@@ -284,7 +310,95 @@ class VLANeXt(nn.Module):
         self.ddl_min_mag = float(ddl.get("min_mag_threshold", 0.01))
 
         print(f"Initializing VLM {lmm_path} with attn_implementation: {attn_implementation}")
-        if "paligemma" in lmm_path.lower():
+        if lmm_path == "vision_only":
+            # Vision-only backbone — no LLM, no language conditioning.
+            # Backbone-agnostic: SigLIP/SigLIP2 (NaFlex 또는 fixed-res), DINOv3/v2 모두 지원.
+            self.model_family = "vision_only"
+            self.lmm = None
+            vision_attn = attn_implementation if attn_implementation != "flash_attention_2" else "sdpa"
+            vlow = vision_encoder_path.lower()
+            self.vision_needs_interp_pos = False  # DINOv3/v2 + native_res 외 사용 시 True
+            is_conv_backbone = False  # 기본값. else 분기에서 ResNet/ConvNext 감지 시 True로
+            if "naflex" in vlow:
+                self.vision_encoder = Siglip2VisionModel.from_pretrained(
+                    vision_encoder_path, dtype=torch.bfloat16, attn_implementation=vision_attn
+                )
+                image_processor = Siglip2ImageProcessor.from_pretrained(vision_encoder_path)
+            elif "siglip" in vlow:
+                self.vision_encoder = SiglipVisionModel.from_pretrained(
+                    vision_encoder_path, dtype=torch.bfloat16, attn_implementation=vision_attn
+                )
+                image_processor = SiglipImageProcessor.from_pretrained(vision_encoder_path)
+            else:
+                # DINOv3 / DINOv2 / 그 외 backbone-agnostic 경로 (AutoModel + AutoImageProcessor)
+                # ResNet 등 conv backbone은 sdpa/flash_attention 미지원 → eager 강제
+                is_conv_backbone = ("resnet" in vlow or "convnext" in vlow)
+                _vattn = "eager" if is_conv_backbone else vision_attn
+                self.vision_encoder = AutoModel.from_pretrained(
+                    vision_encoder_path, dtype=torch.bfloat16,
+                    attn_implementation=_vattn, trust_remote_code=True,
+                )
+                # AutoModel이 dual-tower 형태로 로드되면 vision_model attribute 사용
+                if hasattr(self.vision_encoder, "vision_model"):
+                    self.vision_encoder = self.vision_encoder.vision_model
+                image_processor = AutoImageProcessor.from_pretrained(
+                    vision_encoder_path, trust_remote_code=True
+                )
+                # ViT 계열만 interpolate_pos_encoding 필요. conv 계열은 pos embed 없음.
+                self.vision_needs_interp_pos = (not is_conv_backbone)
+            # input_image_size config로 processor size override (DINOv3 224→512, SigLIP2 512→768 등).
+            # native 해상도와 다르면 ViT pos embed interpolation 필요.
+            if input_image_size and not is_conv_backbone:
+                self.vision_needs_interp_pos = True
+            if input_image_size:
+                _sz = int(input_image_size)
+                # ConvNext/ResNet-style processor는 shortest_edge 기반, ViT-style은 height/width.
+                try:
+                    cur_size = image_processor.size
+                    if isinstance(cur_size, dict) and "shortest_edge" in cur_size:
+                        image_processor.size = {"shortest_edge": _sz}
+                    else:
+                        image_processor.size = {"height": _sz, "width": _sz}
+                    if hasattr(image_processor, "crop_size"):
+                        try:
+                            image_processor.crop_size = {"height": _sz, "width": _sz}
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            self.processor = LlamaProcessorWrapper(tokenizer=None, image_processor=image_processor)
+            # Use policy_hidden_size as the common backbone width (no LLM to inherit from).
+            self.hidden_size = policy_hidden_size
+            _venc_cfg = self.vision_encoder.config
+            _venc_out_dim = getattr(_venc_cfg, "hidden_size", None)
+            if _venc_out_dim is None:
+                # Conv backbones (ResNet 등): hidden_sizes는 stage별 list, 마지막 stage 차원 사용
+                _venc_out_dim = _venc_cfg.hidden_sizes[-1]
+            self.vision_projector = nn.Sequential(
+                nn.Linear(_venc_out_dim, self.hidden_size),
+                nn.LayerNorm(self.hidden_size),
+                nn.SiLU(),
+                nn.Linear(self.hidden_size, self.hidden_size),
+                nn.LayerNorm(self.hidden_size),
+                nn.SiLU(),
+                nn.Linear(self.hidden_size, self.hidden_size),
+            )
+            # Conv backbone (ResNet/ConvNext)은 spatial token sequence에 positional 정보가 없음.
+            # ACT/DETR 스타일: 2D sincos pos enc 추가 + 4-layer transformer encoder로
+            # spatial reasoning을 부여 → policy cross-attn이 "어디 token이 어디 좌표인지" 알 수 있음.
+            self.is_conv_backbone = bool(is_conv_backbone)
+            if self.is_conv_backbone:
+                _enc_layer = nn.TransformerEncoderLayer(
+                    d_model=self.hidden_size,
+                    nhead=8,
+                    dim_feedforward=self.hidden_size * 4,
+                    dropout=0.0,
+                    batch_first=True,
+                    norm_first=True,
+                    activation="gelu",
+                )
+                self.conv_feature_encoder = nn.TransformerEncoder(_enc_layer, num_layers=4)
+        elif "paligemma" in lmm_path.lower():
             self.model_family = "paligemma"
             self.lmm = PaliGemmaForConditionalGeneration.from_pretrained(
                 lmm_path, dtype=torch.bfloat16, _attn_implementation=attn_implementation
@@ -334,45 +448,90 @@ class VLANeXt(nn.Module):
         
         self.backbone_mode = backbone_mode
         if backbone_mode == "frozen":
-            self.lmm.requires_grad_(False)
-            if self.model_family == "llama":
+            if self.lmm is not None:
+                self.lmm.requires_grad_(False)
+            if self.model_family in ("llama", "vision_only"):
                 self.vision_encoder.requires_grad_(False)
         elif backbone_mode == "lora":
             lora_config = lora_config or {}
-            peft_config = LoraConfig(
-                r=lora_config.get("r", 16),
-                lora_alpha=lora_config.get("lora_alpha", 32),
-                lora_dropout=lora_config.get("lora_dropout", 0.05),
-                target_modules=lora_config.get("target_modules", ["q_proj", "v_proj"]),
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            self.lmm = get_peft_model(self.lmm, peft_config)
-            if hasattr(self.lmm, "print_trainable_parameters"):
-                self.lmm.print_trainable_parameters()
-            if self.model_family == "llama":
-                self.vision_encoder.requires_grad_(False)
+            if self.model_family == "vision_only":
+                # Vision-only LoRA targets SigLIP attention projections (no LLM).
+                peft_config = LoraConfig(
+                    r=lora_config.get("r", 16),
+                    lora_alpha=lora_config.get("lora_alpha", 32),
+                    lora_dropout=lora_config.get("lora_dropout", 0.05),
+                    target_modules=lora_config.get("target_modules", ["q_proj", "v_proj", "k_proj", "out_proj"]),
+                    bias="none",
+                )
+                self.vision_encoder = get_peft_model(self.vision_encoder, peft_config)
+                if hasattr(self.vision_encoder, "print_trainable_parameters"):
+                    self.vision_encoder.print_trainable_parameters()
+            else:
+                peft_config = LoraConfig(
+                    r=lora_config.get("r", 16),
+                    lora_alpha=lora_config.get("lora_alpha", 32),
+                    lora_dropout=lora_config.get("lora_dropout", 0.05),
+                    target_modules=lora_config.get("target_modules", ["q_proj", "v_proj"]),
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                )
+                self.lmm = get_peft_model(self.lmm, peft_config)
+                if hasattr(self.lmm, "print_trainable_parameters"):
+                    self.lmm.print_trainable_parameters()
+                if self.model_family == "llama":
+                    self.vision_encoder.requires_grad_(False)
         elif backbone_mode == "finetune":
-            self.lmm.requires_grad_(True)
-            if self.model_family == "llama":
+            if self.lmm is not None:
+                self.lmm.requires_grad_(True)
+            if self.model_family in ("llama", "vision_only"):
                 self.vision_encoder.requires_grad_(True)
+        elif backbone_mode == "last_n_unfreeze":
+            if self.model_family != "vision_only":
+                raise ValueError("last_n_unfreeze currently only supported for vision_only")
+            self.vision_encoder.requires_grad_(False)
+            # SigLIP2/DINO ViT: layers at vision_encoder.encoder.layers[i] (after vision_model unwrap above)
+            ve = self.vision_encoder
+            layers = None
+            for path in ("encoder.layers", "layers", "vision_model.encoder.layers"):
+                obj = ve
+                ok = True
+                for part in path.split('.'):
+                    if hasattr(obj, part):
+                        obj = getattr(obj, part)
+                    else:
+                        ok = False; break
+                if ok:
+                    layers = obj; break
+            if layers is None:
+                raise RuntimeError("Could not locate vision encoder layers for last_n_unfreeze")
+            total = len(layers)
+            n = max(1, min(n_unfreeze_layers, total))
+            for li in range(total - n, total):
+                for p in layers[li].parameters():
+                    p.requires_grad_(True)
+            print(f"[backbone] last_n_unfreeze: unfroze last {n}/{total} vision layers")
         else:
             raise ValueError(f"Unknown backbone_mode: {backbone_mode}")
 
         if gradient_checkpointing:
-            model_to_configure = self.lmm
-            if hasattr(model_to_configure, "gradient_checkpointing_enable"):
-                model_to_configure.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
-            if hasattr(self.lmm, "enable_input_require_grads"):
-                self.lmm.enable_input_require_grads()
-            config = self.lmm.config
-            if hasattr(config, "use_cache"):
-                config.use_cache = False
-            if self.model_family == "llama":
+            if self.lmm is not None:
+                model_to_configure = self.lmm
+                if hasattr(model_to_configure, "gradient_checkpointing_enable"):
+                    model_to_configure.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={"use_reentrant": False}
+                    )
+                if hasattr(self.lmm, "enable_input_require_grads"):
+                    self.lmm.enable_input_require_grads()
+                config = self.lmm.config
+                if hasattr(config, "use_cache"):
+                    config.use_cache = False
+            if self.model_family in ("llama", "vision_only"):
                  if hasattr(self.vision_encoder, "gradient_checkpointing_enable"):
-                    self.vision_encoder.gradient_checkpointing_enable()
+                    try:
+                        self.vision_encoder.gradient_checkpointing_enable()
+                    except ValueError:
+                        # ResNet 등 일부 conv backbone은 GC 미지원 — frozen이라 어차피 grad 필요없음
+                        pass
 
         self.num_queries = num_queries
         self.loss_type = loss_type
@@ -437,6 +596,7 @@ class VLANeXt(nn.Module):
 
         if self.use_proprio_input_vlm:
             projector_input_dim = proprio_dim if proprio_dim is not None else action_dim
+            self.proprio_dim = projector_input_dim  # eval/collator에서 6/8 분기 판단용
             if use_transformer_proprio_projector:
                 self.action_projector = ActionTransformerProjector(
                     action_dim=projector_input_dim,
@@ -612,6 +772,8 @@ class VLANeXt(nn.Module):
             connector_out, hidden_states = self._get_vlm_condition_llama(input_ids, attention_mask, pixel_values, proprioception, proprio_attention_mask)
         elif self.model_family == "qwen":
             connector_out, hidden_states = self._get_vlm_condition_qwen(input_ids, attention_mask, proprioception, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw)
+        elif self.model_family == "vision_only":
+            connector_out, hidden_states = self._get_vlm_condition_vision_only(pixel_values, proprioception, proprio_attention_mask)
         return connector_out, hidden_states
 
     @property
@@ -716,6 +878,120 @@ class VLANeXt(nn.Module):
                 image_token_mask = torch.ones(B, hs_len, dtype=torch.bool, device=image_token_mask.device)
         self._image_token_mask = image_token_mask  # cache for spatial head
         self._image_grid_thw = image_grid_thw  # cache for spatial head (wrist masking)
+
+        return connector_out, hidden_states
+
+    def _get_vlm_condition_vision_only(self, pixel_values, proprioception, proprio_attention_mask):
+        """Vision-only conditioning: SigLIP2 patch tokens → action head, no LLM.
+
+        Returns hidden_states as a tuple of per-layer states; each layer state has
+        [projected_vision_tokens, proprio_tokens, meta_queries] concatenated. Vision
+        part varies per layer (SigLIP layer outputs); proprio + queries are static
+        across layers (they bypass SigLIP). Action head's cross-attention attends
+        over the full sequence per block.
+        """
+        pixel_values = pixel_values.to(dtype=self.vision_encoder.dtype)
+        output_hidden_states_flag = (
+            self.condition_type in ["tight", "soft"] or self.spatial_loss_weight > 0
+        )
+        fwd_kwargs = {"output_hidden_states": output_hidden_states_flag}
+        if getattr(self, "vision_needs_interp_pos", False):
+            fwd_kwargs["interpolate_pos_encoding"] = True
+        try:
+            vision_outputs = self.vision_encoder(pixel_values, **fwd_kwargs)
+        except TypeError:
+            fwd_kwargs.pop("interpolate_pos_encoding", None)
+            vision_outputs = self.vision_encoder(pixel_values, **fwd_kwargs)
+        last_hidden = vision_outputs.last_hidden_state  # (B*views, N, D_v) ViT; (B*views, D, H, W) conv
+
+        # Conv backbones (ResNet 등): last_hidden_state는 (B, C, H, W). Flatten spatial→token 차원으로.
+        # 또한 conv는 per-stage hidden_states가 서로 다른 (C, H, W)라 layer-wise 공유 projector 불가 →
+        # output_hidden_states를 사용하지 않고 last_hidden만 사용 (multi-scale 기능 손실 트레이드).
+        is_conv = (last_hidden.dim() == 4)
+        conv_HW = None  # (H, W) for conv path — pos enc 계산용
+        if is_conv:
+            B_v, C, H, W = last_hidden.shape
+            last_hidden = last_hidden.permute(0, 2, 3, 1).reshape(B_v, H * W, C)
+            conv_HW = (H, W)
+
+        # Infer batch size from proprio (collator pads pixel_values to B*views).
+        if proprioception is not None:
+            B = proprioception.shape[0]
+        else:
+            B = last_hidden.shape[0]
+
+        proj_dtype = next(self.vision_projector.parameters()).dtype
+        def _proj_and_reshape(hs):
+            x = self.vision_projector(hs.to(dtype=proj_dtype))
+            if x.shape[0] != B:
+                num_views = x.shape[0] // B
+                x = x.view(B, num_views, -1, x.shape[-1]).flatten(1, 2)
+            return x
+
+        if output_hidden_states_flag and not is_conv:
+            projected_layers = [_proj_and_reshape(hs) for hs in vision_outputs.hidden_states]
+        else:
+            projected_layers = [_proj_and_reshape(last_hidden)]
+
+        # Conv backbone: ACT/DETR 스타일 spatial 보정.
+        # (1) projected feature에 2D sincos positional encoding 합산
+        # (2) 4-layer transformer encoder 통과 → spatial reasoning 부여
+        # 이렇게 안 하면 token sequence가 위치 정보 없이 들어가서 policy가 mean action으로 수렴.
+        if is_conv and conv_HW is not None and getattr(self, "is_conv_backbone", False):
+            H, W = conv_HW
+            buf_name = f"_conv_pos_{H}x{W}"
+            if not hasattr(self, buf_name):
+                pos = _build_2d_sincos_pos_embed(H, W, self.hidden_size)
+                self.register_buffer(buf_name, pos, persistent=False)
+            x = projected_layers[0]
+            # multi-view면 (B, V*H*W, D) 형태로 들어옴 → V 번 타일링한 pos를 더해야 함
+            T_v = (x.shape[1] // (H * W)) if (x.shape[1] % (H * W) == 0) else 1
+            pos = getattr(self, buf_name).to(device=x.device, dtype=x.dtype)
+            if T_v > 1:
+                pos = pos.repeat(T_v, 1)  # (V*H*W, D)
+            x = x + pos.unsqueeze(0)
+            # encoder의 weight dtype에 맞춤 (autocast 안 쓰는 경로에서 dtype mismatch 방지)
+            _enc_dtype = next(self.conv_feature_encoder.parameters()).dtype
+            x = self.conv_feature_encoder(x.to(dtype=_enc_dtype)).to(dtype=projected_layers[0].dtype)
+            projected_layers = [x]
+
+        # Static extra tokens (proprio + meta queries) appended to every layer.
+        extras = []
+        ref_dtype = projected_layers[0].dtype
+        ref_device = projected_layers[0].device
+        if self.use_proprio_input_vlm and proprioception is not None:
+            proprio_embeds = self.action_projector(
+                proprioception.to(device=ref_device, dtype=ref_dtype)
+            )
+            extras.append(proprio_embeds)
+        if self.condition_type != "tight":
+            queries_embeds = self.meta_queries_norm(self.meta_queries).unsqueeze(0).expand(B, -1, -1).to(ref_dtype)
+            extras.append(queries_embeds)
+        extras = torch.cat(extras, dim=1) if extras else None
+
+        if extras is not None:
+            hidden_states = tuple(torch.cat([h, extras], dim=1) for h in projected_layers)
+        else:
+            hidden_states = tuple(projected_layers)
+
+        # Conv backbone: only 1 layer available, replicate so action_head 24 blocks all get a vision input
+        # (policy의 vlm_hidden_states[-len(blocks):] slicing이 1-element list에서 1개만 반환 → 1 block만 동작 방지).
+        if is_conv and len(hidden_states) == 1:
+            hidden_states = hidden_states * 32
+
+        connector_out = None
+        if self.condition_type == "loose" and self.connector is not None:
+            # Pool the meta-query slice at the last layer.
+            connector_out = self.connector(hidden_states[-1][:, -self.num_queries:, :])
+
+        # Spatial head image-token mask: only the vision-patch portion.
+        if self.spatial_loss_weight > 0:
+            hs_len = hidden_states[-1].shape[1]
+            image_token_count = projected_layers[0].shape[1]
+            image_token_mask = torch.zeros(B, hs_len, dtype=torch.bool, device=ref_device)
+            image_token_mask[:, :image_token_count] = True
+            self._image_token_mask = image_token_mask
+            self._image_grid_thw = None
 
         return connector_out, hidden_states
 
@@ -1223,7 +1499,15 @@ class VLANeXt(nn.Module):
             pred_tip_chunk = tip + cum_disp                                       # (B, T, 3)
             cur_dist = torch.norm(tip - trocar, dim=-1)                           # (B, 1)
             pred_dist = torch.norm(pred_tip_chunk - trocar, dim=-1)               # (B, T)
-            aux_per_sample = F.relu(pred_dist - cur_dist + self.aux_dist_margin_mm).mean(dim=-1)  # (B,)
+            # Hold-aware margin (soft ramp): linear interp from 0 (at cur_dist=0)
+            # to margin_mm (at cur_dist >= hold_thr). Removes the discontinuity that
+            # caused gnorm explosion in #27 hard-threshold variant.
+            if self.aux_dist_hold_threshold_mm > 0:
+                ratio = (cur_dist / self.aux_dist_hold_threshold_mm).clamp(0.0, 1.0)
+                margin_eff = self.aux_dist_margin_mm * ratio                       # (B, 1)
+            else:
+                margin_eff = self.aux_dist_margin_mm                               # scalar (legacy)
+            aux_per_sample = F.relu(pred_dist - cur_dist + margin_eff).mean(dim=-1)  # (B,)
             if near_goal_w is not None:
                 loss_aux = (near_goal_w * aux_per_sample).mean()
             else:
@@ -1334,7 +1618,9 @@ class VLANeXt(nn.Module):
                 action = torch.cat([pose_pred, gripper_pred], dim=-1).to(dtype=self.lmm.dtype)
 
         elif self.loss_type == "diffusion":
-            action = torch.randn(B, self.num_actions, self.action_dim, device=input_ids.device).to(self.lmm.dtype)
+            # vision_only: self.lmm is None — fall back to vision_encoder dtype.
+            _ref_dtype = self.lmm.dtype if self.lmm is not None else self.vision_encoder.dtype
+            action = torch.randn(B, self.num_actions, self.action_dim, device=input_ids.device).to(_ref_dtype)
             self.noise_scheduler.set_timesteps(self.num_inference_timesteps)
 
             for t in self.noise_scheduler.timesteps:
@@ -1350,7 +1636,7 @@ class VLANeXt(nn.Module):
                     output = self.action_head(action, timesteps, cond_input, history_actions=policy_history)
 
                 action = self.noise_scheduler.step(output, t, action).prev_sample
-                action = action.to(dtype=self.lmm.dtype)
+                action = action.to(dtype=_ref_dtype)
 
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")

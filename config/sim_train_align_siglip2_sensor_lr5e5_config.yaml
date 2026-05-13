@@ -1,0 +1,144 @@
+project:
+  name: "VLANeXt_SigLIP2_sensor_lr5e5_fine_align"
+  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  log_interval: 1
+  save_interval: 2000
+  use_wandb: true
+
+data:
+  dataset_name: "sim_align"
+  data_root:
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+
+  task_suite_name: ""
+  full_sequence: true
+  skip_history_padding: true
+
+  history_len: 8
+  future_len: 8
+  buffer_size: 4000
+
+  # SO400m@512 → 1024 patch tokens × policy_depth=24 cross-attn is heavy.
+  # Measured peak ~14GB at B=16 (gradient_checkpointing=true) on 24GB card.
+  # OOMs at B=32. Use 16 per GPU; raise gradient_accumulation_steps for larger effective batch.
+  batch_size: 16
+  max_steps: 10000
+  num_workers: 4
+
+  input_modality: "image"
+  view_mode: "single"
+
+  cam_exterior: "tool_camera"
+  cam_wrist: ""
+  cam_top: ""
+
+  augmentation:
+    enabled: false
+
+model:
+  # Vision-only backbone — set lmm_path to the sentinel "vision_only" to skip LLM.
+  # vision_encoder_path picks the SigLIP2 model used as the patch encoder.
+  model_type: "vlanext"
+  lmm_path: "vision_only"
+  # SO400m at 512x512: 1152 dim, 27 layers, 32x32=1024 patches. Larger receptive
+  # field useful for fine needle/trocar contact detection.
+  vision_encoder_path: "google/siglip2-so400m-patch16-512"
+  backbone_mode: "frozen"   # SigLIP2 backbone frozen; head/projector/queries trainable
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj", "k_proj", "out_proj"]
+
+  action_dim: 6
+  # SigLIP2_fine baseline에서 sensor만 추가. 단일변수: proprio 6→8 + use_sensor true.
+  # sensor_dist: 8D 중 마지막 2개 [sensor_close, hole_through], 20mm 클리핑, 정규화 X.
+  # 가설: vision feature가 mm precision 부족 → sensor가 close-loop proximity feedback 제공해서 hold 개선.
+  proprio_dim: 8
+  use_sensor: true
+
+  loss_type: "diffusion"
+  num_train_timesteps: 1000
+  num_inference_timesteps: 10
+  scheduler_type: "flow_match"
+  num_bins: 256
+  action_vqvae:
+    enabled: false
+    frozen: true
+    codebook_size: 1024
+    hidden_size: 256
+    depth: 4
+    num_heads: 8
+    steps: 1000
+    learning_rate: 1.0e-3
+
+  condition_type: "soft"
+  num_queries: 32
+  use_transformer_connector: true
+  connector_depth: 2
+  connector_num_heads: 4
+
+  # SigLIP2 SO400m has 27 transformer layers (28 hidden states w/ embedding).
+  # Keep policy_depth ≤ 27. policy_hidden_size matches SO400m's 1152.
+  policy_hidden_size: 1152
+  policy_depth: 24
+  policy_num_heads: 16
+  policy_mlp_ratio: 4.0
+
+  future_image_loss_weight: 0.0
+  generator_hidden_size: 768
+  generator_depth: 24
+  generator_num_heads: 12
+  generator_mlp_ratio: 4.0
+  future_image_mode: "horizon"
+
+  dct_loss_weight: 0.1
+  dct_freq_split: 0.125
+  dct_low_freq_weight: 1.0
+  dct_high_freq_weight: 1.0
+  dct_similarity_type: "mae"
+
+  use_proprio_input_vlm: true
+  use_transformer_proprio_projector: false
+  projector_depth: 2
+  projector_num_heads: 4
+  use_action_input_policy: false
+  gradient_checkpointing: true
+
+  aux_distance_loss:
+    enabled: true
+    weight: 0.2
+    # Action stats (compute_action_stats.py): pos delta max ~0.37mm/step (p99 ~0.36mm).
+    # Cumulative over T=8: up to ~3mm. margin 0.1mm gives small slack per chunk —
+    # was 0.05 before; loosened slightly since the symmetric ±0.37mm denorm matches
+    # the empirical max well and 0.05 mm was below numerical noise floor on early steps.
+    margin_mm: 0.1
+    pos_denorm_mm: [0.37, 0.37, 0.37]   # matches action_max_sim_align[:3] (sim_act_align.py:40)
+    near_goal_scale_mm: 5.0
+    near_goal_max_boost: 5.0
+    apply_to_main_loss: true
+
+  direction_decoupled_loss:
+    enabled: false
+    pos_mag_weight: 0.5
+    pos_dir_weight: 0.1
+    other_weight: 1.0
+    min_mag_threshold: 0.05
+
+train:
+  seed: 2026
+  resume_path: ""
+  pretrained_checkpoint: ""
+  learning_rate: 5.0e-5    # sensor proprio scale mismatch causes gnorm explosion at lr 1e-4 (#7 diverged at step 3000+)
+  weight_decay: 0.01
+  warmup_steps: 500
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  device: "cuda"
+  distributed: false      # GPU 0 hardware fail + NVML probe 죽음 → single-GPU 강제. 살아나면 true로.
+  dist_backend: "nccl"
+  deepspeed:
+    enabled: false        # distributed off일 땐 같이 끔
+    zero_stage: 2
+    offload_optimizer_device: "none"
+    offload_param_device: "none"

@@ -76,6 +76,12 @@ class SimActAlign(IterableDataset):
         cam_top="top_camera",
         skip_history_padding=False,
         use_sensor=True,
+        sensor_encoding="binary",   # "binary" (current: 2 flags) or "continuous" (1D clipped/normalized)
+        sensor_clip_mm=30.0,         # continuous: clip raw at this many mm before /clip
+        near_goal_oversample=1.0,    # near-goal frames (dist<thr) emitted this many times. 1.0 = no oversample
+        near_goal_threshold_mm=15.0, # frames with ||needle_tip - trocar_entry|| < this are "near-goal"
+        local_crop_enabled=False,    # 추가 center-crop view (wrist 슬롯) 생성 — tool_camera가 wrist-mounted이라 center crop ≈ needle ROI
+        local_crop_size=320,         # 640×480 원본에서 중앙 정사각형 crop 크기 (px). 320 = 50%
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -94,6 +100,12 @@ class SimActAlign(IterableDataset):
         self.cam_wrist = cam_wrist
         self.cam_top = cam_top
         self.use_sensor = use_sensor
+        self.sensor_encoding = sensor_encoding
+        self.sensor_clip_mm = float(sensor_clip_mm)
+        self.near_goal_oversample = float(near_goal_oversample)
+        self.near_goal_threshold_mm = float(near_goal_threshold_mm)
+        self.local_crop_enabled = bool(local_crop_enabled)
+        self.local_crop_size = int(local_crop_size)
 
         # Action normalization to [-1, 1]
         self.action_min = np.array(action_min_sim_align, dtype=np.float32)
@@ -184,10 +196,16 @@ class SimActAlign(IterableDataset):
             proprio_np = ee_pose_raw  # already in Mecademic convention, gripper dropped above
             if self.use_sensor:
                 sensor_raw = f["observations"]["sensor_dist"][:].astype(np.float32).reshape(-1)
-                sensor_close = ((sensor_raw >= 0.0) & (sensor_raw <= 5.0)).astype(np.float32)
-                hole_through = (sensor_raw >= 15.0).astype(np.float32)
-                sensor_feat = np.stack([sensor_close, hole_through], axis=-1)  # (N, 2)
-                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 8)
+                if self.sensor_encoding == "continuous":
+                    # raw mm → clipped at sensor_clip_mm → normalized [0,1] (1D continuous).
+                    # cavity reading (~28mm) preserved when clip>=28; "very far" raws collapsed to 1.0
+                    s = np.clip(sensor_raw, 0.0, self.sensor_clip_mm) / self.sensor_clip_mm
+                    sensor_feat = s.reshape(-1, 1)                  # (N, 1)
+                else:  # "binary" — legacy 2-flag encoding
+                    sensor_close = ((sensor_raw >= 0.0) & (sensor_raw <= 5.0)).astype(np.float32)
+                    hole_through = (sensor_raw >= 15.0).astype(np.float32)
+                    sensor_feat = np.stack([sensor_close, hole_through], axis=-1)  # (N, 2)
+                proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 8 or 7)
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None
@@ -233,6 +251,15 @@ class SimActAlign(IterableDataset):
                         [self._decode_jpeg(img_grp[self.cam_top][i]) for i in range(traj_len)],
                         axis=0,
                     )
+
+            # Local crop: tool_camera (wrist-mounted) 이므로 needle은 항상 같은 픽셀 위치
+            # → 중앙 정사각형 crop이 곧 needle ROI. wrist 슬롯에 stack.
+            if self.local_crop_enabled and self.view_mode == "multi" and wrist_np is None:
+                H, W = images_np.shape[1], images_np.shape[2]
+                s = self.local_crop_size
+                y0 = max(0, (H - s) // 2)
+                x0 = max(0, (W - s) // 2)
+                wrist_np = images_np[:, y0:y0 + s, x0:x0 + s, :].copy()
 
         return (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
                 spatial_targets_np, action_weight_np, needle_tip_np, trocar_entry_np)
@@ -289,6 +316,24 @@ class SimActAlign(IterableDataset):
                 else:
                     num_samples = max(1, traj_len // (15 * 5))
                     sample_indices = np.random.choice(traj_len, size=num_samples, replace=False)
+
+                # Near-goal oversampling: duplicate indices where ||needle_tip - trocar_entry|| < threshold.
+                # Bernoulli handles fractional factors. needle_tip / trocar_entry are absent for real datasets.
+                if (self.near_goal_oversample > 1.0
+                        and needle_tip_np is not None and trocar_entry_np is not None):
+                    dist_per_t = np.linalg.norm(needle_tip_np - trocar_entry_np, axis=-1)  # (N,)
+                    f = self.near_goal_oversample
+                    n_floor = int(f)
+                    n_extra_prob = f - n_floor
+                    new_sample_indices = []
+                    for t in sample_indices:
+                        if dist_per_t[t] < self.near_goal_threshold_mm:
+                            n = n_floor + (1 if np.random.rand() < n_extra_prob else 0)
+                        else:
+                            n = 1
+                        new_sample_indices.extend([t] * n)
+                    sample_indices = np.array(new_sample_indices, dtype=np.int64)
+                    np.random.shuffle(sample_indices)
 
                 for t in sample_indices:
                     # History observation indices (for image / proprio)

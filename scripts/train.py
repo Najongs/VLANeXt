@@ -210,6 +210,8 @@ class DataCollatorForVLANeXt:
         is_paligemma = "PaliGemma" in self.processor.__class__.__name__
         is_qwen = "Qwen" in self.processor.__class__.__name__
         is_llama = "Llama" in self.processor.__class__.__name__
+        # Vision-only path: LlamaProcessorWrapper with tokenizer=None signals "skip text".
+        is_vision_only = is_llama and getattr(self.processor, "tokenizer", None) is None
 
         for sample in batch:
             instruction = sample["instruction"]
@@ -247,7 +249,8 @@ class DataCollatorForVLANeXt:
                 else:
                     images.append(im0)
 
-                texts.append(instruction)
+                if not is_vision_only:
+                    texts.append(instruction)
 
             elif is_qwen:
                 content = []
@@ -322,16 +325,30 @@ class DataCollatorForVLANeXt:
                 return_tensors="pt",
             )
         elif is_llama:
-            inputs = self.processor.tokenizer(
-                texts,
-                padding=True,
-                return_tensors="pt"
-            )
-            image_inputs = self.processor.image_processor(
-                images,
-                return_tensors="pt"
-            )
-            inputs["pixel_values"] = image_inputs["pixel_values"]
+            if is_vision_only:
+                # No tokenizer/text — only image inputs needed.
+                image_inputs = self.processor.image_processor(
+                    images,
+                    return_tensors="pt"
+                )
+                B = len(batch)
+                # Provide dummy input_ids/attention_mask so downstream batch dict stays consistent.
+                inputs = {
+                    "input_ids": torch.zeros(B, 1, dtype=torch.long),
+                    "attention_mask": torch.zeros(B, 1, dtype=torch.long),
+                    "pixel_values": image_inputs["pixel_values"],
+                }
+            else:
+                inputs = self.processor.tokenizer(
+                    texts,
+                    padding=True,
+                    return_tensors="pt"
+                )
+                image_inputs = self.processor.image_processor(
+                    images,
+                    return_tensors="pt"
+                )
+                inputs["pixel_values"] = image_inputs["pixel_values"]
         elif is_qwen:
             if self.input_modality == "video":
                 video_metadata = [
@@ -521,6 +538,7 @@ def train(config):
             projector_depth=config['model']['projector_depth'],
             projector_num_heads=config['model']['projector_num_heads'],
             backbone_mode=config['model'].get('backbone_mode', 'finetune'),
+            n_unfreeze_layers=config['model'].get('n_unfreeze_layers', 4),
             gradient_checkpointing=config['model'].get('gradient_checkpointing', False),
             num_bins=config['model'].get('num_bins', 256),
         ).to(device, dtype=torch.bfloat16)
@@ -551,6 +569,7 @@ def train(config):
             connector_depth=config['model']['connector_depth'],
             connector_num_heads=config['model']['connector_num_heads'],
             backbone_mode=config['model'].get('backbone_mode', 'finetune'),
+            n_unfreeze_layers=config['model'].get('n_unfreeze_layers', 4),
             gradient_checkpointing=config['model'].get('gradient_checkpointing', False),
             num_bins=config['model'].get('num_bins', 256),
             generator_hidden_size=config['model'].get('generator_hidden_size', 768),
@@ -566,6 +585,8 @@ def train(config):
             aux_distance_loss=config['model'].get('aux_distance_loss', None),
             direction_decoupled_loss=config['model'].get('direction_decoupled_loss', None),
             proprio_dim=config['model'].get('proprio_dim', None),
+            input_image_size=config['model'].get('input_image_size', None),
+            attn_implementation=config['model'].get('attn_implementation', 'flash_attention_2'),
         ).to(device, dtype=torch.bfloat16)
     # Load pretrained checkpoint BEFORE DeepSpeed init (so state_dict shapes
     # are visible), but load to CPU first to avoid GPU memory duplication.
@@ -712,6 +733,12 @@ def train(config):
                 cam_top=config['data'].get('cam_top', ''),
                 skip_history_padding=config['data'].get('skip_history_padding', False),
                 use_sensor=config['model'].get('use_sensor', True),
+                sensor_encoding=config['model'].get('sensor_encoding', 'binary'),
+                sensor_clip_mm=config['model'].get('sensor_clip_mm', 30.0),
+                near_goal_oversample=config['data'].get('near_goal_oversample', 1.0),
+                near_goal_threshold_mm=config['data'].get('near_goal_threshold_mm', 15.0),
+                local_crop_enabled=config['data'].get('local_crop_enabled', False),
+                local_crop_size=config['data'].get('local_crop_size', 320),
             )
         elif dataset_name == "sim_insertion":
             ds = SimActInsertion(
@@ -978,11 +1005,17 @@ def train(config):
                 elif not is_distributed and list(state_dict.keys())[0].startswith('module.'):
                     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
                     
-                model.load_state_dict(state_dict)
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                if 'scheduler_state_dict' in checkpoint:
-                    lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                start_step = checkpoint['step']
+                model.load_state_dict(state_dict, strict=False)
+                reset_opt_sched = config['train'].get('reset_optimizer_scheduler', False)
+                if not reset_opt_sched:
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    if 'scheduler_state_dict' in checkpoint:
+                        lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    start_step = checkpoint['step']
+                else:
+                    if global_rank == 0:
+                        print("reset_optimizer_scheduler=True → keep weights only, fresh optimizer/scheduler/step=0")
+                    start_step = 0
             if global_rank == 0:
                 print(f"Resumed at step {start_step}")
         else:
@@ -1078,6 +1111,8 @@ def train(config):
                     proprioception=proprio,
                     history_actions=hist_actions,
                     future_images=future_images,
+                    needle_tip_pos=needle_tip_pos,
+                    trocar_entry_pos=trocar_entry_pos,
                     **forward_args
                 )
                 loss, loss_dict = (out if isinstance(out, tuple) else (out, {}))

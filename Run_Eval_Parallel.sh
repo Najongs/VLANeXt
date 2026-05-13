@@ -22,11 +22,9 @@
 # Examples:
 # bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0507_10step --phantom-pos 0.0 0.0 --retreat-mm 2 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1 --sensor-stop
 # bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0508 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 3 --z-steps 2 --angle-steps 3 --repeats 1
-#   bash Run_Eval_Parallel.sh /path/to/checkpoint --sensor-success
-#   bash Run_Eval_Parallel.sh align /path/to/checkpoint --randomize-phantom --sensor-success
-#   bash Run_Eval_Parallel.sh approach /data/public/NAS/VLANeXt/output_dir_approach_2mix_0426 --phantom-pos 0.0 -0.4
-#   bash Run_Eval_Parallel.sh insertion /data/public/NAS/VLANeXt/output_dir_insertion_0415
-#   bash Run_Eval_Parallel.sh basic /data/public/NAS/VLANeXt/output_dir_motion_wrist
+# bash Run_Eval_Parallel.sh lerobot_dp /data/public/NAS/VLANeXt/outputs/train/lerobot_dp_align_20260511_0205/checkpoints/last/pretrained_model --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1
+
+
 
 # Auto-detect: if first arg starts with / or . it's a checkpoint path, not a mode
 if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
@@ -43,8 +41,15 @@ else
     EXTRA_ARGS=("${@:2}")
 fi
 
-# Override with NUM_SHARDS env var (default 5). Each shard pinned to GPU index = shard_id.
-NUM_SHARDS=${NUM_SHARDS:-3}
+# GPU 할당: GPUS env var로 override 가능 (예: GPUS="1,2" bash Run_Eval_Parallel.sh ...)
+# 각 shard는 GPU_LIST의 순서대로 1장씩 pinned.
+# CUDA_DEVICE_ORDER=PCI_BUS_ID: GPU 0 에러카드가 enumeration 망가뜨리지 않도록 PCI 순서로 강제.
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+# MuJoCo rendering: NVIDIA EGL driver가 nvkms_open_common에서 hang → Mesa software EGL 강제.
+export MUJOCO_GL=egl
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+IFS=',' read -r -a GPU_LIST <<< "${GPUS:-0,1}"
+NUM_SHARDS=${#GPU_LIST[@]}
 
 # Mode-specific config
 if [ "$MODE" = "approach" ]; then
@@ -81,7 +86,7 @@ for arg in "${EXTRA_ARGS[@]}"; do
     EXTRA_FLAGS="${EXTRA_FLAGS} ${arg}"
 done
 
-echo "=== Parallel Eval: ${NUM_SHARDS} GPUs ==="
+echo "=== Parallel Eval: ${NUM_SHARDS} shards on GPUs ${GPU_LIST[*]} ==="
 echo "Mode: ${MODE}"
 echo "Checkpoint: ${CHECKPOINT}"
 echo "Script: ${EVAL_SCRIPT}"
@@ -97,9 +102,9 @@ if [[ "${EXTRA_FLAGS}" == *"--sensor-stop"* ]]; then
     echo "Sensor Stop: ON (early-success when sensor sees through hole)"
 fi
 
-# Launch shards in parallel
+# Launch shards in parallel (1 GPU per shard)
 for SHARD in $(seq 0 $((NUM_SHARDS - 1))); do
-    GPU_ID=${SHARD}
+    GPU_ID=${GPU_LIST[$SHARD]}
     echo "Starting shard ${SHARD} on GPU ${GPU_ID}..."
     if [[ "$MODE" == lerobot_* ]]; then
         CUDA_VISIBLE_DEVICES=${GPU_ID} python -m ${EVAL_SCRIPT} \

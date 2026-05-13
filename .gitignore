@@ -25,3 +25,6 @@ real_approach/
 occlusion_check/
 compare_replay_vs_sim/
 lerobot_sim/
+logs/
+*.log
+viz/

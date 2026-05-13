@@ -12,7 +12,7 @@ Usage:
 """
 
 import os
-os.environ['MUJOCO_GL'] = 'egl'
+os.environ.setdefault('MUJOCO_GL', 'egl')
 
 import sys
 import argparse
@@ -871,12 +871,21 @@ def run_eval(cfg):
             # Match training convention: proprio orientation in Mecademic intrinsic XYZ
             ee_pose_mec = ee_pose.copy()
             ee_pose_mec[3:6] = mujoco_to_mecademic_euler(ee_pose[3:6])
-            # Proprio: 6-DoF EE pose + 2 sensor binary flags (sensor_close ≤5mm, hole_through ≥15mm).
+            # Proprio: 6-DoF EE pose + sensor feat (binary 2D or continuous 1D, matched to train cfg).
             proprio6 = ee_pose_mec[:6].astype(np.float32)
             sensor_raw_mm = float(env.get_sensor_dist())
-            sensor_close = 1.0 if (0.0 <= sensor_raw_mm <= 5.0) else 0.0
-            hole_through = 1.0 if (sensor_raw_mm >= 15.0) else 0.0
-            proprio = np.concatenate([proprio6, np.array([sensor_close, hole_through], dtype=np.float32)])  # (8,)
+            pdim = getattr(model, "proprio_dim", 8)
+            if pdim <= 6:
+                proprio = proprio6  # (6,)
+            elif pdim == 7:
+                # continuous 1D — must match dataset clip (default 30mm)
+                clip_mm = float(getattr(model, "sensor_clip_mm", 30.0))
+                s = max(0.0, min(sensor_raw_mm, clip_mm)) / clip_mm
+                proprio = np.concatenate([proprio6, np.array([s], dtype=np.float32)])  # (7,)
+            else:
+                sensor_close = 1.0 if (0.0 <= sensor_raw_mm <= 5.0) else 0.0
+                hole_through = 1.0 if (sensor_raw_mm >= 15.0) else 0.0
+                proprio = np.concatenate([proprio6, np.array([sensor_close, hole_through], dtype=np.float32)])  # (8,)
             state_history.append(proprio)
 
             observation = {
@@ -993,9 +1002,15 @@ def run_eval(cfg):
 
         # Save trajectory (ee_pose only, without gripper/sensor)
         ee_traj = np.array([s[:6] for s in state_history])  # (T, 6): xyz + rpy
+        dist_arr = np.array([m.get("dist_mm", np.nan) for m in metrics_history], dtype=np.float32)
+        lat_arr = np.array([m.get("lateral_mm", np.nan) for m in metrics_history], dtype=np.float32)
+        ang_arr = np.array([m.get("angle_deg", np.nan) for m in metrics_history], dtype=np.float32)
         np.savez_compressed(
             eval_dir / f"traj_ep{ep:03d}_{'S' if success else 'F'}.npz",
-            ee_pose=ee_traj[:, :3],  # position (mm)
+            ee_pose=ee_traj[:, :3],     # position (mm)
+            dist_mm=dist_arr,           # tip→trocar distance per step
+            lateral_mm=lat_arr,         # lateral distance per step
+            angle_deg=ang_arr,          # tip-axis vs trocar-axis angle per step
         )
 
     csv_file.close()
