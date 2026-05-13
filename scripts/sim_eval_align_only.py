@@ -958,6 +958,27 @@ def run_eval(cfg):
                 metrics_history.append(env.get_spatial_metrics())
                 break
 
+        # --- Sensor handoff (only if VLA did NOT succeed, and got close enough) ---
+        handoff_log = None
+        min_dist_pre_handoff = min(m["dist_mm"] for m in metrics_history)
+        if (getattr(cfg, "use_handoff", False)
+                and not success
+                and min_dist_pre_handoff <= getattr(cfg, "handoff_trigger_mm", 15.0)):
+            from scripts.sensor_handoff import run_sensor_handoff
+            try:
+                handoff_log = run_sensor_handoff(env, verbose=True, frames_out=replay_images)
+                metrics_history.append(env.get_spatial_metrics())
+                # Re-evaluate success after handoff. Use stricter "insertion achieved" criterion:
+                #   - did_align (sensor through-hole confirmed)
+                #   - insertion_depth_mm > 2 (needle pushed into trocar)
+                if not success and handoff_log["aligned"]["achieved"]:
+                    post_m = env.get_spatial_metrics()
+                    if post_m.get("insertion_depth_mm", 0) > 2.0 or env.check_success():
+                        success = True
+                        success_reason = "handoff"
+            except Exception as e:
+                print(f"  [handoff] ERROR: {e}")
+
         if success:
             total_successes += 1
 
@@ -1072,6 +1093,10 @@ if __name__ == "__main__":
                         help="(grid) Angle steps. Default 1 → angle=0 fixed")
     parser.add_argument("--repeats", type=int, default=1,
                         help="(grid) Repeats per cell (for stochastic policy variance)")
+    parser.add_argument("--handoff", action="store_true",
+                        help="After VLA loop ends, run sensor-based handoff (lateral sweep + insertion)")
+    parser.add_argument("--handoff-trigger-mm", type=float, default=15.0,
+                        help="Only run handoff if min_dist reached during VLA is ≤ this threshold")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -1096,5 +1121,7 @@ if __name__ == "__main__":
     cfg.z_steps = args.z_steps
     cfg.angle_steps = args.angle_steps
     cfg.repeats = args.repeats
+    cfg.use_handoff = args.handoff
+    cfg.handoff_trigger_mm = args.handoff_trigger_mm
 
     run_eval(cfg)

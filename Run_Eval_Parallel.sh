@@ -46,8 +46,8 @@ fi
 # CUDA_DEVICE_ORDER=PCI_BUS_ID: GPU 0 에러카드가 enumeration 망가뜨리지 않도록 PCI 순서로 강제.
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # MuJoCo rendering: NVIDIA EGL driver가 nvkms_open_common에서 hang → Mesa software EGL 강제.
-export MUJOCO_GL=egl
-export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+export MUJOCO_GL=${MUJOCO_GL:-egl}
+export __EGL_VENDOR_LIBRARY_FILENAMES=${__EGL_VENDOR_LIBRARY_FILENAMES:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}
 IFS=',' read -r -a GPU_LIST <<< "${GPUS:-0,1}"
 NUM_SHARDS=${#GPU_LIST[@]}
 
@@ -75,7 +75,7 @@ elif [ "$MODE" = "lerobot_act" ] || [ "$MODE" = "lerobot_dp" ] || [ "$MODE" = "l
     TRAIN_CONFIG=""
 else
     CONFIG=config/sim_eval_align_config.yaml
-    TRAIN_CONFIG=config/sim_train_align_config.yaml
+    TRAIN_CONFIG="${TRAIN_CONFIG_OVERRIDE:-config/sim_train_align_config.yaml}"
     EVAL_SCRIPT=scripts.sim_eval_align_only
     MERGE_PREFIX="align"
 fi
@@ -107,13 +107,14 @@ for SHARD in $(seq 0 $((NUM_SHARDS - 1))); do
     GPU_ID=${GPU_LIST[$SHARD]}
     echo "Starting shard ${SHARD} on GPU ${GPU_ID}..."
     if [[ "$MODE" == lerobot_* ]]; then
-        CUDA_VISIBLE_DEVICES=${GPU_ID} python -m ${EVAL_SCRIPT} \
+        LEROBOT_PY="${LEROBOT_PYTHON:-/home/yohan/miniconda3/envs/lerobot/bin/python}"
+        CUDA_VISIBLE_DEVICES=${GPU_ID} PYTHONPATH="/data/public/NAS/VLANeXt:${PYTHONPATH}" ${LEROBOT_PY} -m ${EVAL_SCRIPT} \
             --policy ${LEROBOT_POLICY} \
             --checkpoint ${CHECKPOINT} \
             --shard-id ${SHARD} \
             --num-shards ${NUM_SHARDS} ${EXTRA_FLAGS} &
     else
-        CUDA_VISIBLE_DEVICES=${GPU_ID} python -m ${EVAL_SCRIPT} \
+        CUDA_VISIBLE_DEVICES=${GPU_ID} python -u -m ${EVAL_SCRIPT} \
             --config ${CONFIG} \
             --checkpoint ${CHECKPOINT} \
             --train-config ${TRAIN_CONFIG} \

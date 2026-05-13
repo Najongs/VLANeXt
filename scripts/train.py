@@ -997,15 +997,17 @@ def train(config):
                     raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {resume_path}")
                 start_step = int((client_state or {}).get('step', 0))
             else:
-                checkpoint = torch.load(resume_path, map_location=device)
+                # map_location='cpu' to avoid OOM peak (ckpt has model+optimizer+scheduler dicts)
+                checkpoint = torch.load(resume_path, map_location='cpu')
                 state_dict = checkpoint['model_state_dict']
 
                 if is_distributed and not list(state_dict.keys())[0].startswith('module.'):
                     state_dict = {f'module.{k}': v for k, v in state_dict.items()}
                 elif not is_distributed and list(state_dict.keys())[0].startswith('module.'):
                     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-                    
+
                 model.load_state_dict(state_dict, strict=False)
+                del state_dict
                 reset_opt_sched = config['train'].get('reset_optimizer_scheduler', False)
                 if not reset_opt_sched:
                     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -1016,6 +1018,8 @@ def train(config):
                     if global_rank == 0:
                         print("reset_optimizer_scheduler=True → keep weights only, fresh optimizer/scheduler/step=0")
                     start_step = 0
+                del checkpoint
+                torch.cuda.empty_cache()
             if global_rank == 0:
                 print(f"Resumed at step {start_step}")
         else:
