@@ -1,14 +1,15 @@
 project:
-  name: "VLANeXt_SigLIP2_repro_b24_ft10mm_ddl"
+  name: "VLANeXt_SigLIP2_repro_b24_ft10mm_HOLD_focus_v2"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 2500
+  save_interval: 1000
   use_wandb: true
 
 data:
   dataset_name: "sim_align"
+  # HOLD focus v2: tip + tip2 둘 다 사용 (55% / 80% <5mm). 데이터 2배 + 평균 ~67% close.
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged"
   - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
 
   task_suite_name: ""
@@ -20,7 +21,7 @@ data:
   buffer_size: 4000
 
   batch_size: 16
-  max_steps: 15000
+  max_steps: 3000
   num_workers: 4
 
   input_modality: "image"
@@ -94,6 +95,8 @@ model:
   use_action_input_policy: false
   gradient_checkpointing: true
 
+  # aux_strong sweet spot — NEW b100 trained with default(w 0.2/scale 5mm/boost 5x);
+  # 5mm 정밀도 push 위해 sweet spot으로 업그레이드.
   aux_distance_loss:
     enabled: true
     weight: 0.5
@@ -103,22 +106,23 @@ model:
     near_goal_max_boost: 10.0
     apply_to_main_loss: true
 
-  # DDL: position channel을 magnitude + direction으로 분리 supervision.
-  # 5mm 도달은 하나 time_near 0% — over-shoot 의심. magnitude supervision으로
-  # 진폭 자체 정확도 끌어올려 over-shoot 줄이기.
   direction_decoupled_loss:
-    enabled: true
-    pos_mag_weight: 1.0
-    pos_dir_weight: 0.5
+    enabled: false
+    pos_mag_weight: 0.5
+    pos_dir_weight: 0.1
     other_weight: 1.0
-    min_mag_threshold: 0.02
+    min_mag_threshold: 0.05
 
 train:
   seed: 2026
-  # Resume from aux_strong/ckpt5000 (best so far: close_5mm 25%, min_dist 17.99mm).
-  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong/checkpoint_5000.pt"
+  # Load NEW b100/20k weights as starting point (state_dict only, no optimizer).
+  # pretrained_checkpoint = dir with pytorch_model.bin — train.py auto-detects.
+  resume_path: ""
   reset_optimizer_scheduler: true
-  pretrained_checkpoint: ""
+  # HOLD focus: continue from NEW_finetune best ckpt10000 (이미 검증된 best). tip2만으로 3k step 추가.
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_NEW_finetune/checkpoint_10000.pt"
+  # lr 5e-6: continue-train below ceiling 1e-5. aux strong supervision needs lower lr to
+  # stabilize transition from default-aux to strong-aux.
   learning_rate: 5.0e-6
   weight_decay: 0.01
   warmup_steps: 200

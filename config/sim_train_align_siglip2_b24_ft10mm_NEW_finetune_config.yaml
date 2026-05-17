@@ -1,8 +1,8 @@
 project:
-  name: "VLANeXt_SigLIP2_repro_b24_ft10mm_aux_xstrong"
+  name: "VLANeXt_SigLIP2_repro_b24_ft10mm_NEW_finetune"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 5000
+  save_interval: 2500
   use_wandb: true
 
 data:
@@ -20,7 +20,7 @@ data:
   buffer_size: 4000
 
   batch_size: 16
-  max_steps: 20000
+  max_steps: 10000
   num_workers: 4
 
   input_modality: "image"
@@ -94,16 +94,15 @@ model:
   use_action_input_policy: false
   gradient_checkpointing: true
 
-  # AUX XSTRONG: aux_strong (w0.5, scale 2mm, boost 10x) 보다 한 단계 더 극단.
-  # 5mm 이내 정확도 극대화. near_goal_scale 1mm로 진짜 마지막 1mm에 gradient 집중,
-  # boost 20x → 1mm 영역에서 baseline 대비 20x amplification.
+  # aux_strong sweet spot — NEW b100 trained with default(w 0.2/scale 5mm/boost 5x);
+  # 5mm 정밀도 push 위해 sweet spot으로 업그레이드.
   aux_distance_loss:
     enabled: true
-    weight: 1.0
-    margin_mm: 0.05
+    weight: 0.5
+    margin_mm: 0.1
     pos_denorm_mm: [0.37, 0.37, 0.37]
-    near_goal_scale_mm: 1.0
-    near_goal_max_boost: 20.0
+    near_goal_scale_mm: 2.0
+    near_goal_max_boost: 10.0
     apply_to_main_loss: true
 
   direction_decoupled_loss:
@@ -115,10 +114,14 @@ model:
 
 train:
   seed: 2026
-  resume_path: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_fine_align/checkpoint_5000.pt"
+  # Load NEW b100/20k weights as starting point (state_dict only, no optimizer).
+  # pretrained_checkpoint = dir with pytorch_model.bin — train.py auto-detects.
+  resume_path: ""
   reset_optimizer_scheduler: true
-  pretrained_checkpoint: ""
-  learning_rate: 1.0e-5
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/output_dir_b100_ft10mm_fine_align_20000step_fixed"
+  # lr 5e-6: continue-train below ceiling 1e-5. aux strong supervision needs lower lr to
+  # stabilize transition from default-aux to strong-aux.
+  learning_rate: 5.0e-6
   weight_decay: 0.01
   warmup_steps: 200
   gradient_accumulation_steps: 1
