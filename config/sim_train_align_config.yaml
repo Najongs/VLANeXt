@@ -2,13 +2,13 @@ project:
   name: "VLANeXt_Qwen3.5_fine_align"
   output_dir: "/data/public/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 1000
+  save_interval: 2500
   use_wandb: true
 
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_00/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
   # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
@@ -19,10 +19,10 @@ data:
 
   history_len: 8
   future_len: 8
-  buffer_size: 3000
+  buffer_size: 4000
 
-  batch_size: 126
-  max_steps: 10000
+  batch_size: 102
+  max_steps: 5000
   num_workers: 4
 
   input_modality: "image"
@@ -35,7 +35,7 @@ data:
   cam_top: ""
 
   augmentation:
-    enabled: true
+    enabled: false
     random_resized_crop:
       scale: [0.8, 1.0]
       ratio: [0.9, 1.1]
@@ -52,8 +52,8 @@ data:
 
 model:
   model_type: "vlanext"
-  lmm_path: "Qwen/Qwen3-VL-2B-Instruct" # "Qwen/Qwen3.5-2B"
-  vision_encoder_path: "google/siglip2-base-patch16-256"
+  lmm_path: "Qwen/Qwen3.5-2B"  # "Qwen/Qwen3-VL-2B-Instruct" # 
+  # vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:
     r: 16
@@ -61,8 +61,11 @@ model:
     lora_dropout: 0.05
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
-  action_dim: 7
-  proprio_dim: 7
+  action_dim: 6
+  # 6-DoF EE delta only (gripper dropped). Sensor is detection-only (sensor_stop in eval),
+  # not a training input. To re-enable sensor as proprio, see src/utils/sensor_proc.py
+  # and add 2 channels here + concat in sim_act_align.py (+1 for gripper if restored).
+  proprio_dim: 6
   use_sensor: false
 
   loss_type: "diffusion"
@@ -111,14 +114,42 @@ model:
   use_action_input_policy: false
   gradient_checkpointing: true
 
+  # Auxiliary distance loss (sim-only — uses HDF5 needle_tip_pos / trocar_entry_pos).
+  # Encourages predicted actions not to increase needle-tip → trocar distance.
+  # Set enabled=false (or omit) when GT not available (e.g., real fine-tune).
+  aux_distance_loss:
+    enabled: true
+    weight: 0.1                       # λ — bumped with tighter margin
+    margin_mm: 0.05                    # tolerated distance increase (mm) — tightened from 0.1
+    pos_denorm_mm: [0.20, 0.20, 0.20]  # MUST match action_max_sim_align[:3] (symmetric) — sim_act_align.py:28 (tip + trap)
+    # Near-goal weighting: boost per-sample loss when needle tip close to trocar.
+    # Targets BC underweight-near-goal: small actions → small absolute MSE → undertrained tail.
+    # weight = 1 + clamp(near_goal_scale_mm / (cur_dist_mm + 1), max=near_goal_max_boost)
+    # cur_dist=20mm → 1.24x;  10mm → 1.45x;  5mm → 1.83x;  2mm → 2.67x;  1mm → 3.50x
+    near_goal_scale_mm: 5.0            # 0 to disable
+    near_goal_max_boost: 5.0           # max sample weight = 1 + 4 = 5x
+    apply_to_main_loss: true           # also reweight main action MSE
+
+  # Direction-decoupled action loss (replaces MSE on main loss when enabled).
+  # Splits position channels (first 3 dims) into magnitude and unit-direction terms:
+  #   loss = α * (|a_pred| - |a_gt|)² + β * (1 - cos_sim) + γ * MSE(rot, gripper)
+  # Targets BC near-goal direction blindness: when |a_gt|→0 plain MSE gives near-zero
+  # signal regardless of predicted direction. Direction term keeps signal alive.
+  direction_decoupled_loss:
+    enabled: false                # baseline first — gnorm unstable with cosine grad
+    pos_mag_weight: 0.5           # α
+    pos_dir_weight: 0.1           # β
+    other_weight: 1.0             # γ
+    min_mag_threshold: 0.05
+
 train:
-  seed: 2026
+  seed: 2027
   resume_path: ""
-  pretrained_checkpoint: ""
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/output_dir_align_0507"
   learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 500
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
   distributed: true

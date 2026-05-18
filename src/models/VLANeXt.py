@@ -250,8 +250,38 @@ class VLANeXt(nn.Module):
         dct_similarity_type="mse",  # Options: "mse", "mae", "cosine"
         spatial_loss_weight=0.0,
         proprio_dim=None,
+        aux_distance_loss=None,
+        direction_decoupled_loss=None,
     ):
         super().__init__()
+        # Aux distance loss config (sim-only). Disabled if config missing/false.
+        adl = aux_distance_loss or {}
+        self.aux_dist_enabled = bool(adl.get("enabled", False))
+        self.aux_dist_weight = float(adl.get("weight", 0.0))
+        self.aux_dist_margin_mm = float(adl.get("margin_mm", 0.1))
+        pos_max = adl.get("pos_denorm_mm", [0.30, 0.30, 0.25])
+        self.register_buffer(
+            "aux_pos_denorm_mm",
+            torch.tensor(pos_max, dtype=torch.float32),
+            persistent=False,
+        )
+        # Near-goal weighting: boost loss for samples where needle tip is close to trocar.
+        # weight_per_sample = 1 + clamp(near_goal_scale_mm / (cur_dist_mm + 1), max=near_goal_max_boost)
+        # Disabled when near_goal_scale_mm <= 0 (default).
+        self.aux_dist_near_goal_scale_mm = float(adl.get("near_goal_scale_mm", 0.0))
+        self.aux_dist_near_goal_max_boost = float(adl.get("near_goal_max_boost", 4.0))
+        self.aux_dist_apply_to_main = bool(adl.get("apply_to_main_loss", True))
+
+        # Direction-decoupled action loss (replaces plain MSE on main loss).
+        # Splits position-channel target into magnitude and unit-direction supervisions:
+        #   loss = α * (|a_pred| - |a_gt|)² + β * (1 - cos(a_pred, a_gt))
+        # Other channels (rotation, gripper) keep plain MSE.
+        ddl = direction_decoupled_loss or {}
+        self.ddl_enabled = bool(ddl.get("enabled", False))
+        self.ddl_pos_mag_weight = float(ddl.get("pos_mag_weight", 1.0))
+        self.ddl_pos_dir_weight = float(ddl.get("pos_dir_weight", 0.5))
+        self.ddl_other_weight = float(ddl.get("other_weight", 1.0))
+        self.ddl_min_mag = float(ddl.get("min_mag_threshold", 0.01))
 
         print(f"Initializing VLM {lmm_path} with attn_implementation: {attn_implementation}")
         if "paligemma" in lmm_path.lower():
@@ -895,7 +925,7 @@ class VLANeXt(nn.Module):
             raise ValueError(f"Unknown dct_similarity_type: {sim_type!r}. "
                              f"Options are: 'mse', 'mae', 'cosine'.")
 
-    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, task=None):
+    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None, task=None):
         if task == "action_vqvae_pretrain":
             return self.forward_action_vqvae_pretrain(actions), {}
 
@@ -913,7 +943,9 @@ class VLANeXt(nn.Module):
             return self._forward_diffusion(
                 input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask,
                 pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images, spatial_targets,
-                action_weights=action_weights
+                action_weights=action_weights,
+                needle_tip_pos=needle_tip_pos,
+                trocar_entry_pos=trocar_entry_pos,
             )
 
     def _forward_classification(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
@@ -1046,7 +1078,7 @@ class VLANeXt(nn.Module):
             loss = loss + self.spatial_loss_weight * spatial_loss
         return loss, loss_dict
 
-    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None):
+    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -1087,31 +1119,117 @@ class VLANeXt(nn.Module):
         else:
              raise ValueError(f"Unknown condition type: {self.condition_type}")
         
-        if action_weights is not None:
-            # Weighted MSE: action_weights is (B,), expand to match pred shape
-            w = action_weights.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
-            loss = (w * (pred - target) ** 2).mean()
-        else:
-            loss = F.mse_loss(pred, target)
-        loss_dict = {"loss/main": loss.item()}
+        # Near-goal sample weighting: boost loss when needle tip is close to trocar.
+        # Reuses GT positions already passed for aux_dist_loss. (B,) per-sample weight.
+        near_goal_w = None
+        cur_dist_mm = None
+        if (self.aux_dist_near_goal_scale_mm > 0
+                and needle_tip_pos is not None and trocar_entry_pos is not None):
+            tip_b = needle_tip_pos.float()      # (B, 3) in mm
+            trocar_b = trocar_entry_pos.float() # (B, 3) in mm
+            cur_dist_mm = torch.norm(tip_b - trocar_b, dim=-1)  # (B,) mm
+            boost = self.aux_dist_near_goal_scale_mm / (cur_dist_mm + 1.0)
+            near_goal_w = (1.0 + boost).clamp(max=1.0 + self.aux_dist_near_goal_max_boost)
 
-        if self.dct_loss_weight > 0:
-            pred_x_start = None
+        # Combine action_weights × near_goal_w for main MSE (only if apply_to_main_loss).
+        effective_w = action_weights
+        if near_goal_w is not None and self.aux_dist_apply_to_main:
+            effective_w = near_goal_w if action_weights is None else (action_weights * near_goal_w)
+
+        if self.ddl_enabled:
+            # Direction-decoupled loss for position channels (first 3 dims).
+            # Other channels (rotation + gripper) use plain squared error.
+            pos_pred = pred[..., :3]
+            pos_target = target[..., :3]
+            mag_pred = torch.norm(pos_pred, dim=-1)                      # (B, T)
+            mag_target = torch.norm(pos_target, dim=-1)                  # (B, T)
+            mag_diff_sq = (mag_pred - mag_target) ** 2                   # (B, T)
+
+            # F.cosine_similarity handles small-norm cases safely (NaN-free with eps).
+            # Mask out frames where either pred or target magnitude is too small —
+            # direction is undefined and gradient explodes through the division.
+            cos_sim = F.cosine_similarity(pos_pred, pos_target, dim=-1, eps=1e-3)  # (B, T)
+            dir_loss_raw = 1.0 - cos_sim                                 # (B, T) ∈ [0, 2]
+            valid = (
+                (mag_target > self.ddl_min_mag)
+                & (mag_pred.detach() > self.ddl_min_mag)                 # detach: mask doesn't backprop
+            ).float()
+            dir_loss = dir_loss_raw * valid                              # (B, T)
+
+            other_pred = pred[..., 3:]
+            other_target = target[..., 3:]
+            other_diff_sq = ((other_pred - other_target) ** 2).mean(dim=-1)  # (B, T)
+
+            per_frame = (
+                self.ddl_pos_mag_weight * mag_diff_sq
+                + self.ddl_pos_dir_weight * dir_loss
+                + self.ddl_other_weight * other_diff_sq
+            )                                                              # (B, T)
+
+            if effective_w is not None:
+                w_b = effective_w.view(B, *([1] * (per_frame.ndim - 1)))
+                loss = (w_b * per_frame).mean()
+            else:
+                loss = per_frame.mean()
+            loss_dict = {
+                "loss/main": loss.item(),
+                "loss/main_pos_mag": mag_diff_sq.mean().item(),
+                "loss/main_pos_dir": dir_loss.mean().item(),
+                "loss/main_other": other_diff_sq.mean().item(),
+            }
+        else:
+            if effective_w is not None:
+                w = effective_w.view(B, *([1] * (pred.ndim - 1)))  # (B, 1, 1) or (B, 1)
+                loss = (w * (pred - target) ** 2).mean()
+            else:
+                loss = F.mse_loss(pred, target)
+            loss_dict = {"loss/main": loss.item()}
+
+        # Reconstruct predicted x_start (clean action) — needed by DCT and aux distance losses.
+        pred_x_start = None
+        need_x_start = self.dct_loss_weight > 0 or (
+            self.aux_dist_enabled and self.aux_dist_weight > 0
+            and needle_tip_pos is not None and trocar_entry_pos is not None
+        )
+        if need_x_start:
             if self.scheduler_type == "flow_match":
-                 pred_x_start = noisy_actions - sigmas_expanded * pred
+                pred_x_start = noisy_actions - sigmas_expanded * pred
             elif self.scheduler_type == "ddim":
-                 def view_right(t):
+                def view_right(t):
                     while t.ndim < pred.ndim:
                         t = t.unsqueeze(-1)
                     return t
-                 alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device=pred.device, dtype=pred.dtype)
-                 alpha_prod_t = alphas_cumprod[timesteps]
-                 pred_x_start = (noisy_actions - view_right((1 - alpha_prod_t).sqrt()) * pred) / view_right(alpha_prod_t.sqrt())
+                alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(device=pred.device, dtype=pred.dtype)
+                alpha_prod_t = alphas_cumprod[timesteps]
+                pred_x_start = (noisy_actions - view_right((1 - alpha_prod_t).sqrt()) * pred) / view_right(alpha_prod_t.sqrt())
 
-            if pred_x_start is not None:
-                 loss_dct = self._compute_dct_loss(pred_x_start.float(), actions.float())
-                 loss_dict["loss/dct"] = loss_dct.item()
-                 loss = loss + self.dct_loss_weight * loss_dct
+        if self.dct_loss_weight > 0 and pred_x_start is not None:
+            loss_dct = self._compute_dct_loss(pred_x_start.float(), actions.float())
+            loss_dict["loss/dct"] = loss_dct.item()
+            loss = loss + self.dct_loss_weight * loss_dct
+
+        # --- Auxiliary distance loss (sim-only) ---
+        # Penalize predicted action chunks that increase needle-tip → trocar distance.
+        # Uses small-angle approx: tip displacement ≈ ee_pos delta.
+        if (self.aux_dist_enabled and self.aux_dist_weight > 0
+                and needle_tip_pos is not None and trocar_entry_pos is not None
+                and pred_x_start is not None):
+            pred_pos_norm = pred_x_start[..., :3].float()                         # (B, T, 3) in [-1, 1]
+            denorm = self.aux_pos_denorm_mm.to(pred_pos_norm.device).view(1, 1, 3)
+            pred_pos_mm = pred_pos_norm * denorm                                  # (B, T, 3) mm
+            tip = needle_tip_pos.float().unsqueeze(1)                             # (B, 1, 3)
+            trocar = trocar_entry_pos.float().unsqueeze(1)                        # (B, 1, 3)
+            cum_disp = torch.cumsum(pred_pos_mm, dim=1)                           # (B, T, 3)
+            pred_tip_chunk = tip + cum_disp                                       # (B, T, 3)
+            cur_dist = torch.norm(tip - trocar, dim=-1)                           # (B, 1)
+            pred_dist = torch.norm(pred_tip_chunk - trocar, dim=-1)               # (B, T)
+            aux_per_sample = F.relu(pred_dist - cur_dist + self.aux_dist_margin_mm).mean(dim=-1)  # (B,)
+            if near_goal_w is not None:
+                loss_aux = (near_goal_w * aux_per_sample).mean()
+            else:
+                loss_aux = aux_per_sample.mean()
+            loss_dict["loss/aux_dist"] = loss_aux.item()
+            loss = loss + self.aux_dist_weight * loss_aux
 
         if self.future_image_loss_weight > 0:
             loss_dict["loss/future_image"] = loss_img.item() if isinstance(loss_img, torch.Tensor) else loss_img

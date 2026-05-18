@@ -17,11 +17,10 @@
 # Usage:
 #   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 [extra_flags...]
 #
-# Examples:
-#   # Dry-run (no robot motion — recommended first):
-#   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 \
-#       --dry-run --num-episodes 1
-#
+
+
+
+
 #   # Live, joint-space mirror, 10 episodes:
 #   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 0.0 --num-episodes 1000 --stream-rate-hz 7.5
 #
@@ -33,6 +32,10 @@
 #   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 \
 #       --num-episodes 20 --seed 42
 #
+
+
+
+
 #   # Stricter safety (smaller occlusion tolerance → reject more aggressively):
 #   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 \
 #       --occlusion-tolerance-mm 0.5 --max-perturb-retries 10

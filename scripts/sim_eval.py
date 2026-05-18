@@ -150,7 +150,7 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         connector_depth=mc["connector_depth"],
         connector_num_heads=mc["connector_num_heads"],
         backbone_mode=mc.get("backbone_mode", "finetune"),
-        lora_config=mc.get("lora", None),
+        # lora_config=mc.get("lora", None),
         gradient_checkpointing=False,
         num_bins=mc.get("num_bins", 256),
         action_vqvae=mc.get("action_vqvae", None),
@@ -164,7 +164,7 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
         dct_high_freq_weight=mc.get("dct_high_freq_weight", 1.0),
         dct_freq_split=mc.get("dct_freq_split", 0.125),
         dct_similarity_type=mc.get("dct_similarity_type", "mae"),
-        spatial_loss_weight=mc.get("spatial_loss_weight", 0.0),
+        # spatial_loss_weight=mc.get("spatial_loss_weight", 0.0),
         proprio_dim=mc.get("proprio_dim", None),
     )
 

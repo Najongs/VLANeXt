@@ -203,6 +203,8 @@ class DataCollatorForVLANeXt:
         future_images_list = []
         spatial_target_list = []
         action_weight_list = []
+        needle_tip_list = []
+        trocar_entry_list = []
         source_info_list = []
 
         is_paligemma = "PaliGemma" in self.processor.__class__.__name__
@@ -301,6 +303,9 @@ class DataCollatorForVLANeXt:
                 )
             if "action_weight" in sample:
                 action_weight_list.append(sample["action_weight"])
+            if "needle_tip_pos" in sample and "trocar_entry_pos" in sample:
+                needle_tip_list.append(sample["needle_tip_pos"])
+                trocar_entry_list.append(sample["trocar_entry_pos"])
 
             if self.load_future_image and "future_image" in sample:
                 f_img = sample["future_image"]
@@ -354,8 +359,17 @@ class DataCollatorForVLANeXt:
         future_images = torch.stack(future_images_list) if self.load_future_image else None
         spatial_targets = torch.stack(spatial_target_list) if spatial_target_list else None
         action_weights = torch.stack(action_weight_list) if action_weight_list else None
+        # Aux distance loss inputs (sim only). Both-or-neither — full batch coverage required.
+        if needle_tip_list and len(needle_tip_list) == len(gt_actions_list):
+            needle_tip_pos = torch.stack(needle_tip_list)
+            trocar_entry_pos = torch.stack(trocar_entry_list)
+        else:
+            needle_tip_pos = None
+            trocar_entry_pos = None
 
-        return inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights, source_info_list
+        return (inputs, gt_actions, proprio, hist_actions, future_images,
+                spatial_targets, action_weights, needle_tip_pos, trocar_entry_pos,
+                source_info_list)
 
 def _collect_per_module_grad_norm(model_root, mod_names=("meta_queries", "meta_queries_norm", "action_head", "connector", "action_projector", "vision_projector")):
     """Best-effort per-module grad norm. Under ZeRO-2 only the local partition is observed
@@ -537,7 +551,6 @@ def train(config):
             connector_depth=config['model']['connector_depth'],
             connector_num_heads=config['model']['connector_num_heads'],
             backbone_mode=config['model'].get('backbone_mode', 'finetune'),
-            lora_config=config['model'].get('lora', None),
             gradient_checkpointing=config['model'].get('gradient_checkpointing', False),
             num_bins=config['model'].get('num_bins', 256),
             generator_hidden_size=config['model'].get('generator_hidden_size', 768),
@@ -550,7 +563,8 @@ def train(config):
             dct_high_freq_weight=config['model'].get('dct_high_freq_weight', 1.0),
             dct_freq_split=config['model'].get('dct_freq_split', 0.125),
             dct_similarity_type=config['model'].get('dct_similarity_type', 'mae'),
-            spatial_loss_weight=config['model'].get('spatial_loss_weight', 0.0),
+            aux_distance_loss=config['model'].get('aux_distance_loss', None),
+            direction_decoupled_loss=config['model'].get('direction_decoupled_loss', None),
             proprio_dim=config['model'].get('proprio_dim', None),
         ).to(device, dtype=torch.bfloat16)
     # Load pretrained checkpoint BEFORE DeepSpeed init (so state_dict shapes
@@ -1010,7 +1024,9 @@ def train(config):
             data_iter = iter(dataloader)
             batch = next(data_iter)
             
-        inputs, gt_actions, proprio, hist_actions, future_images, spatial_targets, action_weights, source_info = batch
+        (inputs, gt_actions, proprio, hist_actions, future_images,
+         spatial_targets, action_weights, needle_tip_pos, trocar_entry_pos,
+         source_info) = batch
         del batch
         model_inputs = {k: v.to(device) for k, v in inputs.items()}
         del inputs
@@ -1029,21 +1045,25 @@ def train(config):
             spatial_targets = spatial_targets.to(device, dtype=torch.bfloat16)
         if action_weights is not None:
             action_weights = action_weights.to(device, dtype=torch.bfloat16)
+        if needle_tip_pos is not None:
+            needle_tip_pos = needle_tip_pos.to(device, dtype=torch.bfloat16)
+            trocar_entry_pos = trocar_entry_pos.to(device, dtype=torch.bfloat16)
 
         valid_keys = {"input_ids", "attention_mask", "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
         do_update = (batch_idx + 1) % gradient_accumulation_steps == 0
         per_module_gn = {}
         if use_deepspeed:
-            loss, loss_dict = model(
+            out = model(
                 actions=gt_actions,
                 proprioception=proprio,
                 history_actions=hist_actions,
                 future_images=future_images,
-                spatial_targets=spatial_targets,
-                action_weights=action_weights,
+                needle_tip_pos=needle_tip_pos,
+                trocar_entry_pos=trocar_entry_pos,
                 **forward_args
             )
+            loss, loss_dict = (out if isinstance(out, tuple) else (out, {}))
             loss = loss / gradient_accumulation_steps
             did_update = model.is_gradient_accumulation_boundary()
             model.backward(loss)
@@ -1053,15 +1073,14 @@ def train(config):
         else:
             sync_context = model.no_sync if (is_distributed and not do_update) else nullcontext
             with sync_context():
-                loss, loss_dict = model(
+                out = model(
                     actions=gt_actions,
                     proprioception=proprio,
                     history_actions=hist_actions,
                     future_images=future_images,
-                    spatial_targets=spatial_targets,
-                    action_weights=action_weights,
                     **forward_args
                 )
+                loss, loss_dict = (out if isinstance(out, tuple) else (out, {}))
                 loss = loss / gradient_accumulation_steps
                 loss.backward()
             did_update = do_update

@@ -8,6 +8,17 @@ import h5py
 import torch
 from torch.utils.data import IterableDataset
 
+from src.datasets.euler_convention import (
+    convert_ee_pose_to_mecademic,
+    recompute_delta_orientation,
+    infer_convention,
+)
+from src.utils.sensor_proc import (
+    process_sensor_dist,
+    SENSOR_MAX_MM,
+    SENSOR_PROPRIO_CHANNELS,
+)
+
 # Action normalization stats for align-only dataset (99th percentile, symmetric)
 # delta_pose(6) + gripper(1)
 # Each dimension uses max(abs(p1), abs(p99)) so that normalized 0 = no movement.
@@ -18,11 +29,21 @@ from torch.utils.data import IterableDataset
 # action_min_sim_align = [-0.677914559841156, -0.5127751231193542, -0.48736560344696045, -0.0034193717874586582, -0.0012368694879114628, -0.005416739732027054, -1.0]
 # action_max_sim_align = [+0.677914559841156, +0.5127751231193542, +0.48736560344696045, +0.0034193717874586582, +0.0012368694879114628, +0.005416739732027054, -1.0]
 
-# action_min_sim_align = [-1, -1, -1, -0.01, -0.01, -0.01, -1]
-# action_max_sim_align = [1, 1, 1, 0.01, 0.01, 0.01, 1]
+# Tip-frame + trapezoidal velocity stats (10mm_fine_align_00_tip2, 4902 ep, 331605 steps):
+#   pos max ≈ 0.20mm; p99 ≈ 0.18mm  (trap cruise ~0.18mm peak, then HOLD zero)
+#   rot_x max 0.0037, p99 0.0015
+#   rot_y max 0.0062 (asymmetric -0.0062..+0.0054), p99 0.0005
+#   rot_z max 0.0069, p99 0.0019
+# pos bound = max (0.20 covers all, no saturation, full dynamic range).
+# rot bound = p99 + small margin (max-tail saturates rarely; better dynamic range than max-based).
+action_min_sim_align = [-0.20, -0.20, -0.20, -0.0020, -0.0008, -0.0025]
+action_max_sim_align = [0.20, 0.20, 0.20, 0.0020, 0.0008, 0.0025]
 
-action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
-action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
+# action_min_sim_align = [-0.6, -0.6, -0.5, -0.003, -0.001, -0.003, -1.0]
+# action_max_sim_align = [0.6, 0.6, 0.5, 0.003, 0.001, 0.003, 1.0]
+
+# action_min = [-0.30098918080329895, -0.3030067980289459, -0.24719569087028503, -0.001181896310299635, -0.0003889248182531446, -0.0016234046779572964, -1.0]
+# action_max = [0.29908251762390137, 0.3093980550765991, 0.23300492763519287, 0.001246135332621634, 0.00043210681178607047, 0.001614645472727716, -1.0]
 
 # action_min_sim_align = [-0.38991427421569824, -0.05123097822070122, -0.37570905685424805, -0.0019127572886645794, -0.0008466076687909663, 7.329344953177497e-05, -1.0]
 # action_max_sim_align = [0.2393515408039093, 0.5194841623306274, 0.27770981192588806, 0.003510331502184272, 0.0007455003215000033, 0.006129839923232794, -1.0]
@@ -84,19 +105,28 @@ class SimActAlign(IterableDataset):
         #   - list of str: multiple paths, all episodes used
         #   - list of dict: multiple paths with optional max_episodes per path
         #     e.g. [{"path": "/data/...", "max_episodes": 10000}, ...]
+        # Track per-episode Euler convention ("mujoco" or "mecademic").
+        # Dict entries can override via "convention" key; otherwise inferred from path.
+        self._path_to_conv = {}
+
         if isinstance(data_dir, (list, tuple)):
             self.episode_paths = []
             for d in data_dir:
                 if isinstance(d, dict):
                     p = d["path"]
                     max_ep = d.get("max_episodes", None)
+                    conv = d.get("convention", None)
                 else:
                     p = d
                     max_ep = None
+                    conv = None
                 eps = sorted(glob.glob(os.path.join(p, "**", "*.h5"), recursive=True))
                 if max_ep is not None and len(eps) > max_ep:
                     rng = np.random.RandomState(42)
                     eps = sorted(rng.choice(eps, size=max_ep, replace=False).tolist())
+                use_conv = conv if conv is not None else infer_convention(p)
+                for ep in eps:
+                    self._path_to_conv[ep] = use_conv
                 self.episode_paths.extend(eps)
             self.episode_paths = sorted(self.episode_paths)
             if not self.episode_paths:
@@ -105,6 +135,9 @@ class SimActAlign(IterableDataset):
             self.episode_paths = sorted(glob.glob(os.path.join(data_dir, "**", "*.h5"), recursive=True))
             if not self.episode_paths:
                 raise FileNotFoundError(f"No .h5 files found in {data_dir} (recursive)")
+            conv = infer_convention(data_dir)
+            for ep in self.episode_paths:
+                self._path_to_conv[ep] = conv
 
     @staticmethod
     def _decode_jpeg(jpeg_data):
@@ -126,33 +159,43 @@ class SimActAlign(IterableDataset):
         with h5py.File(h5_path, "r") as f:
             traj_len = f["action"].shape[0]
 
-            # --- Actions (N, 7): normalize delta_pose + gripper to [-1, 1] ---
-            actions_np = f["action"][:].astype(np.float32)
+            # --- Raw actions + ee_pose; orientation convention may differ
+            #     between sim (MuJoCo extrinsic XYZ) and real (Mecademic
+            #     intrinsic XYZ). Unify to Mecademic before normalization. ---
+            actions_raw = f["action"][:].astype(np.float32)                       # (N, 7) raw
+            ee_pose_raw = f["observations"]["ee_pose"][:].astype(np.float32)      # (N, 7) raw
+            conv = self._path_to_conv.get(h5_path, "mujoco")
+            if conv == "mujoco":
+                ee_pose_raw = convert_ee_pose_to_mecademic(ee_pose_raw, src="mujoco")
+                actions_raw = recompute_delta_orientation(actions_raw, ee_pose_raw)
+
+            # Drop gripper (last dim) — predict only 6-DoF EE delta. Gripper not needed for align task.
+            actions_raw = actions_raw[:, :6]
+            ee_pose_raw = ee_pose_raw[:, :6]
+
+            # --- Actions (N, 6): normalize delta_pose to [-1, 1] ---
+            actions_np = actions_raw
             denominator = self.action_max - self.action_min
             denominator = np.where(denominator == 0, 1.0, denominator)
             actions_np = 2.0 * (actions_np - self.action_min) / denominator - 1.0
             actions_np = np.clip(actions_np, -1.0, 1.0)
 
-            # --- Proprioception: ee_pose (N, 7) + optional sensor_dist (N, 1) ---
-            proprio_np = f["observations"]["ee_pose"][:].astype(np.float32)  # (N, 7)
-            if self.use_sensor and "sensor_dist" in f["observations"]:
-                sensor_dist = f["observations"]["sensor_dist"][:].astype(np.float32)  # (N,) or (N,1)
-                if sensor_dist.ndim == 1:
-                    sensor_dist = sensor_dist[:, None]  # (N, 1)
-                # 클리핑만: 음수/무한대 → 20mm (미감지), 범위 [0, 20]
-                sensor_dist = np.where((sensor_dist < 0) | (sensor_dist > 20.0), 20.0, sensor_dist)
-                proprio_np = np.concatenate([proprio_np, sensor_dist], axis=-1)  # (N, 8)
+            # --- Proprioception: ee_pose (N, 6) — sensor excluded from training (detection-only) ---
+            proprio_np = ee_pose_raw  # already in Mecademic convention, gripper dropped above
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None
+            needle_tip_np = None
+            trocar_entry_np = None
+            if "needle_tip_pos" in f["observations"]:
+                needle_tip_np = f["observations"]["needle_tip_pos"][:].astype(np.float32)
+                trocar_entry_np = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
             if "keypoints_wrist" in f["observations"]:
-                needle_tip = f["observations"]["needle_tip_pos"][:].astype(np.float32)
-                trocar_entry = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
                 kp_wrist = f["observations"]["keypoints_wrist"][:].astype(np.float32)
                 kp_vis = f["observations"]["keypoints_visibility"][:].astype(np.float32)
                 phase_raw = f["phase"][:].astype(np.float32)
 
-                dist = np.linalg.norm(trocar_entry - needle_tip, axis=-1, keepdims=True)
+                dist = np.linalg.norm(trocar_entry_np - needle_tip_np, axis=-1, keepdims=True)
                 dist_normalized = dist / 100.0
                 phase_binary = np.clip(phase_raw - 1, 0, 1).reshape(-1, 1)
 
@@ -185,7 +228,8 @@ class SimActAlign(IterableDataset):
                         axis=0,
                     )
 
-        return traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np
+        return (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
+                spatial_targets_np, action_weight_np, needle_tip_np, trocar_entry_np)
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -219,7 +263,9 @@ class SimActAlign(IterableDataset):
 
             for ep_path in episode_paths:
                 try:
-                    traj_len, actions_np, proprio_np, images_np, wrist_np, top_np, spatial_targets_np, action_weight_np = self._load_episode(ep_path)
+                    (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
+                     spatial_targets_np, action_weight_np,
+                     needle_tip_np, trocar_entry_np) = self._load_episode(ep_path)
                 except Exception as e:
                     print(f"[Warn] Skipping {ep_path}: {e}")
                     continue
@@ -287,6 +333,11 @@ class SimActAlign(IterableDataset):
                     else:
                         sample["spatial_target"] = None
 
+                    # Raw 3D positions (mm) for aux distance loss; None for real datasets.
+                    if needle_tip_np is not None:
+                        sample["needle_tip_pos"] = torch.from_numpy(needle_tip_np[t].copy())
+                        sample["trocar_entry_pos"] = torch.from_numpy(trocar_entry_np[t].copy())
+
                     # Action loss weight
                     sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)
 
@@ -331,6 +382,8 @@ class SimActAlign(IterableDataset):
                     del top_np
                 if spatial_targets_np is not None:
                     del spatial_targets_np
+                if needle_tip_np is not None:
+                    del needle_tip_np, trocar_entry_np
                 gc.collect()
 
         # No flush — loop back and keep filling the buffer

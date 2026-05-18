@@ -123,7 +123,8 @@ class OAKCameraManager:
 class ApproachRealEnv:
     """Real Meca500 + OAK cameras. Drop-in replacement for ApproachSimEnv during eval."""
 
-    def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False, skip_home=False):
+    def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False, skip_home=False,
+                 joint_vel_limit=None):
         self.swap_cameras = swap_cameras
         self.skip_home = skip_home
 
@@ -136,6 +137,12 @@ class ApproachRealEnv:
         logger.info("✅ Robot connected. Activating + homing...")
         self.robot.ActivateAndHome()
         self.robot.SetRealTimeMonitoring(1)
+        if joint_vel_limit is not None and joint_vel_limit > 0:
+            try:
+                self.robot.SetJointVelLimit(float(joint_vel_limit))
+                logger.info(f"⚙️  SetJointVelLimit = {joint_vel_limit} deg/s (slower = smoother)")
+            except Exception as e:
+                logger.warning(f"SetJointVelLimit failed (non-fatal): {e}")
         if not skip_home:
             self.robot.MoveJoints(*HOME_JOINTS)
             self.robot.WaitIdle()
@@ -172,13 +179,20 @@ class ApproachRealEnv:
 
     # ── matches ApproachSimEnv.get_ee_pose ────────────────────────────────────
     def get_ee_pose(self) -> np.ndarray:
-        """Return [x_mm, y_mm, z_mm, rx_rad, ry_rad, rz_rad] — same format as sim env."""
+        """Return [x_mm, y_mm, z_mm, rx_rad, ry_rad, rz_rad] in NEEDLE-TIP frame.
+
+        Mecademic GetPose() returns flange pose; we shift it by R_flange @ TIP_OFFSET
+        so the model sees the same TCP as the sim/training data.
+        """
+        from src.utils.tip_frame import flange_to_tip_euler6
         for _ in range(5):
             try:
                 pose = list(self.robot.GetPose())
                 if pose and len(pose) >= 6:
-                    arr = np.array(pose[:6], dtype=np.float32)
-                    return np.concatenate([arr[:3], np.deg2rad(arr[3:])])
+                    arr = np.array(pose[:6], dtype=np.float64)
+                    flange_pose = np.concatenate([arr[:3], np.deg2rad(arr[3:])])
+                    tip_pose = flange_to_tip_euler6(flange_pose, mm=True)
+                    return tip_pose.astype(np.float32)
             except Exception:
                 time.sleep(0.01)
         logger.warning("GetPose failed; returning zeros")
@@ -214,6 +228,13 @@ class ApproachRealEnv:
         This mirrors sim's `target = current + delta` in base frame, since training
         data was collected with delta = next_ee - current_ee in base/world frame.
         """
+        # delta_ee_6d is in TIP frame (matches training data). Steps:
+        #   1) read flange GetPose (mm + deg) → convert to tip (mm + rad)
+        #   2) tip_target = tip + delta
+        #   3) invert tip_target → flange_target (mm + rad)
+        #   4) MovePose(flange_target with rot in deg)
+        from src.utils.tip_frame import flange_to_tip_euler6, tip_to_flange_euler6
+
         delta_clamped = delta_ee_6d.copy().astype(np.float32)
         delta_clamped[:3] = np.clip(delta_clamped[:3], -SAFETY_CLAMP_POS_MM, SAFETY_CLAMP_POS_MM)
         delta_clamped[3:6] = np.clip(delta_clamped[3:6], -SAFETY_CLAMP_ROT_RAD, SAFETY_CLAMP_ROT_RAD)
@@ -225,13 +246,24 @@ class ApproachRealEnv:
             time.sleep(control_dt)
             return None
 
+        # current is flange (mm + deg). Convert to tip (mm + rad), apply delta, invert.
+        flange_pose = np.array(
+            [current[0], current[1], current[2],
+             np.deg2rad(current[3]), np.deg2rad(current[4]), np.deg2rad(current[5])],
+            dtype=np.float64,
+        )
+        tip_pose = flange_to_tip_euler6(flange_pose, mm=True)
+        tip_target = tip_pose.copy()
+        tip_target[:3] += delta_clamped[:3]
+        tip_target[3:6] += delta_clamped[3:6].astype(np.float64)
+        flange_target = tip_to_flange_euler6(tip_target, mm=True)
         target = [
-            float(current[0] + delta_clamped[0]),
-            float(current[1] + delta_clamped[1]),
-            float(current[2] + delta_clamped[2]),
-            float(current[3] + np.rad2deg(delta_clamped[3])),
-            float(current[4] + np.rad2deg(delta_clamped[4])),
-            float(current[5] + np.rad2deg(delta_clamped[5])),
+            float(flange_target[0]),
+            float(flange_target[1]),
+            float(flange_target[2]),
+            float(np.rad2deg(flange_target[3])),
+            float(np.rad2deg(flange_target[4])),
+            float(np.rad2deg(flange_target[5])),
         ]
 
         if dry_run:
@@ -305,6 +337,7 @@ def run_real_eval(cfg):
     env = ApproachRealEnv(
         robot_address=getattr(cfg, "robot_address", ROBOT_ADDRESS_DEFAULT),
         swap_cameras=getattr(cfg, "swap_cameras", False),
+        joint_vel_limit=getattr(cfg, "joint_vel_limit", None),
     )
     dry_run = getattr(cfg, "dry_run", False)
     if dry_run:
@@ -344,10 +377,10 @@ def run_real_eval(cfg):
                 image_history.append(img_primary)
                 image_history_wrist.append(img_secondary)
 
-                # 3. Proprio (7D: ee_pose 6 + gripper sentinel 0.0) — match sim_eval_approach_only.py:505
+                # 3. Proprio: 6-DoF EE pose only (gripper dropped, sensor detection-only)
                 ee_pose = env.get_ee_pose()
                 ee_traj.append(ee_pose[:3].copy())  # log mm-pos for trajectory plot
-                proprio = np.concatenate([ee_pose, [0.0]])
+                proprio = ee_pose[:6].astype(np.float32)  # (6,)
                 state_history.append(proprio)
 
                 observation = {
@@ -455,6 +488,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-episodes", type=int, default=1)
     parser.add_argument("--swap-cameras", action="store_true",
                         help="Swap camera1↔camera2 mapping")
+    parser.add_argument("--joint-vel-limit", type=float, default=None,
+                        help="Mecademic SetJointVelLimit (deg/s). Lower = slower + smoother. "
+                             "Combine with larger --max-steps for slower trajectory. e.g. 5")
     parser.add_argument("--dry-run", action="store_true",
                         help="Skip MovePose; just print targets (safe smoke test)")
     args = parser.parse_args()
@@ -472,6 +508,7 @@ if __name__ == "__main__":
     cfg.max_steps = args.max_steps
     cfg.num_episodes = args.num_episodes
     cfg.swap_cameras = args.swap_cameras
+    cfg.joint_vel_limit = args.joint_vel_limit
     cfg.dry_run = args.dry_run
 
     run_real_eval(cfg)
