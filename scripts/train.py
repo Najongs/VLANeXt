@@ -739,6 +739,7 @@ def train(config):
                 near_goal_threshold_mm=config['data'].get('near_goal_threshold_mm', 15.0),
                 local_crop_enabled=config['data'].get('local_crop_enabled', False),
                 local_crop_size=config['data'].get('local_crop_size', 320),
+                use_keypoint_proprio=config['model'].get('use_keypoint_proprio', False),
             )
         elif dataset_name == "sim_insertion":
             ds = SimActInsertion(

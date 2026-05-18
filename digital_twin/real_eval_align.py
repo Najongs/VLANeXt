@@ -16,11 +16,21 @@ Differences from real_eval_approach.py:
     the trocar before inference starts (sim's pre-align + perturbation pipeline
     has no real-world counterpart)
 
+2026-05-18 status:
+  - **VLA-only**. handoff/KP head 미구현 (sensor_handoff.py가 sim env API에 의존).
+    sim의 close_5mm 66.7% 같은 수치는 handoff 포함 결과 — real에선 그 보정 없음.
+  - 추천 ckpt:
+    A) frozen baseline (안정): HOLD_focus_v2/checkpoint_3000.pt
+       + config/sim_train_align_siglip2_b24_ft10mm_HOLD_focus_v2_config.yaml
+    B) unfreeze last4 (sim 최고, seed lottery): unfreeze_last4/checkpoint_1000.pt
+       + config/sim_train_align_siglip2_b24_ft10mm_unfreeze_last4_config.yaml
+  - ckpt와 train-config는 반드시 짝이 맞아야 함 (architecture mismatch 방지).
+
 Usage:
     python -m digital_twin.real_eval_align \
         --config config/sim_eval_align_config.yaml \
         --checkpoint /path/to/checkpoint \
-        --train-config config/sim_train_align_config.yaml \
+        --train-config <ckpt에 맞는 train config> \
         --max-steps 200 [--skip-home] [--use-sensor] [--dry-run] [--swap-cameras]
 """
 
@@ -100,6 +110,15 @@ def run_real_eval(cfg):
     max_steps = int(getattr(cfg, "max_steps", 200))
     control_dt = 1.0 / float(video_fps)  # ~67ms at 15 Hz
 
+    # Convergence-based early stop (action magnitude self-report).
+    # When mean(||dpos[:3]||) over last K steps drops below threshold, model declares "done".
+    converge_thresh_mm = float(getattr(cfg, "converge_thresh_mm", 0.0))
+    converge_window = int(getattr(cfg, "converge_window", 5))
+    converge_min_step = int(getattr(cfg, "converge_min_step", 30))
+    if converge_thresh_mm > 0:
+        logger.info(f"🛑 Convergence stop: mean(|dpos|) < {converge_thresh_mm:.2f}mm "
+                    f"over last {converge_window} steps (after step {converge_min_step})")
+
     # Output dir alongside checkpoint
     ckpt_path = pathlib.Path(checkpoint_path)
     try:
@@ -142,6 +161,8 @@ def run_real_eval(cfg):
             replay_images = []
             ee_traj = []
             user_quit = False
+            dpos_norms_mm = []
+            converged = False
             ctrl_step = 0
 
             for ctrl_step in range(max_steps):
@@ -190,6 +211,22 @@ def run_real_eval(cfg):
                 # 6. Apply
                 target = env.apply_delta_ee(delta_ee, control_dt=control_dt, dry_run=dry_run)
 
+                # 6b. Convergence check (action magnitude self-report)
+                dpos_mm = float(np.linalg.norm(delta_ee[:3]) * 1000.0)
+                dpos_norms_mm.append(dpos_mm)
+                if (converge_thresh_mm > 0
+                        and ctrl_step + 1 >= converge_min_step
+                        and len(dpos_norms_mm) >= converge_window):
+                    recent_mean = float(np.mean(dpos_norms_mm[-converge_window:]))
+                    if recent_mean < converge_thresh_mm:
+                        msg = (f"  ✓ converged at step {ctrl_step+1}: "
+                               f"mean|dpos| over last {converge_window} = {recent_mean:.3f}mm "
+                               f"< {converge_thresh_mm:.2f}mm")
+                        logger.info(msg)
+                        log_file.write(msg + "\n"); log_file.flush()
+                        converged = True
+                        break
+
                 # 7. Replay overlay
                 # Note: tool first (primary), then top, to highlight what model sees
                 replay_frame = np.concatenate([img_tool, img_top], axis=1)
@@ -227,7 +264,8 @@ def run_real_eval(cfg):
                     log_file.flush()
 
             # End of episode
-            done_msg = f"  Episode {ep} ended after {ctrl_step + 1} steps (user_quit={user_quit})"
+            done_msg = (f"  Episode {ep} ended after {ctrl_step + 1} steps "
+                        f"(user_quit={user_quit}, converged={converged})")
             logger.info(done_msg)
             log_file.write(done_msg + "\n")
             log_file.flush()
@@ -261,7 +299,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Real-robot eval for VLANeXt fine-alignment policy")
     parser.add_argument("--config", type=str, default="config/sim_eval_align_config.yaml")
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--train-config", type=str, default="config/sim_train_align_config.yaml")
+    parser.add_argument("--train-config", type=str,
+                        default="config/sim_train_align_siglip2_b24_ft10mm_HOLD_focus_v2_config.yaml",
+                        help="ckpt 학습 시 사용한 train config. 반드시 ckpt와 짝이 맞아야 함.")
     parser.add_argument("--robot-address", type=str, default=ROBOT_ADDRESS_DEFAULT)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--num-episodes", type=int, default=1)
@@ -278,6 +318,13 @@ if __name__ == "__main__":
                              "Required if checkpoint was trained with use_sensor=True (proprio_dim=9).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Skip MovePose; just print targets (safe smoke test)")
+    parser.add_argument("--converge-thresh-mm", type=float, default=0.0,
+                        help="Early-stop when mean(|dpos|) over last K steps < this (mm). "
+                             "0 = disabled. Recommended: 0.3 (action range ±0.6mm/step).")
+    parser.add_argument("--converge-window", type=int, default=5,
+                        help="K: window of recent steps for convergence mean.")
+    parser.add_argument("--converge-min-step", type=int, default=30,
+                        help="Don't check convergence before this step (avoid premature stop at init).")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -297,5 +344,8 @@ if __name__ == "__main__":
     cfg.use_sensor = args.use_sensor
     cfg.joint_vel_limit = args.joint_vel_limit
     cfg.dry_run = args.dry_run
+    cfg.converge_thresh_mm = args.converge_thresh_mm
+    cfg.converge_window = args.converge_window
+    cfg.converge_min_step = args.converge_min_step
 
     run_real_eval(cfg)

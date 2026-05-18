@@ -39,6 +39,7 @@ import numpy as np
 
 SCRIPT_MAP = {
     "align": "Save_dataset_align_only",
+    "align_hard": "Save_dataset_align_HARD",
     "approach": "Save_dataset_approach_only",
     "insertion": "Save_dataset_insertion_only",
     "basic": "Save_dataset_basic_motion",
@@ -120,7 +121,7 @@ def main():
 
     # --- Grid mode: 셀 생성 및 워커 분배 ---
     grid_worker_files = {}  # worker_id -> json file path
-    if args.grid and args.script == "align":
+    if args.grid and args.script in ("align", "align_hard"):
         xy_mm = 30.0   # PERTURB_POS_XY_MM
         z_min_mm = 0.0   # PERTURB_POS_Z_MIN_MM — 음수면 팬텀에 바늘팁 가림
         z_max_mm = 20.0  # PERTURB_POS_Z_MAX_MM
@@ -214,7 +215,7 @@ def main():
 
     # Build bias override lines for align-only script
     bias_lines = ""
-    if args.bias and args.script == "align" and not args.grid:
+    if args.bias and args.script in ("align", "align_hard") and not args.grid:
         bias_lines = f"""
 {module_name}.BIAS_DIRECTION = '{args.bias}'
 {module_name}.BIAS_RATIO = {args.bias_ratio}
@@ -237,7 +238,7 @@ def main():
     cameras_line = f"{module_name}.CAMERA_LIST = {args.cameras}" if args.cameras is not None else ""
 
     # Allow occluded (align only — other scripts ignore the global)
-    allow_occluded_line = f"{module_name}.ALLOW_OCCLUDED = True" if args.allow_occluded and args.script == "align" else ""
+    allow_occluded_line = f"{module_name}.ALLOW_OCCLUDED = True" if args.allow_occluded and args.script in ("align", "align_hard") else ""
 
     # Basic motion: steps per episode
     basic_steps_line = f"{module_name}.STEPS_PER_EPISODE = {args.steps_per_episode}" if args.script == "basic" else ""
@@ -262,7 +263,7 @@ def main():
         if args.perturb_frames is not None:
             parts.append(f"{module_name}.INSERTION_PERTURB_FRAMES = {args.perturb_frames}")
         insertion_lines = "\n".join(parts)
-    elif args.script == "align" and args.retreat_mm is not None:
+    elif args.script in ("align", "align_hard") and args.retreat_mm is not None:
         insertion_lines = f"{module_name}.RETREAT_MM = {args.retreat_mm}"
 
 

@@ -60,6 +60,111 @@ from scripts.sim_eval import (
 )
 
 import glob as _glob
+import torch.nn as _nn
+
+
+class _KPHeadUV(_nn.Module):
+    def __init__(self, h):
+        super().__init__()
+        self.mlp = _nn.Sequential(
+            _nn.Linear(h, 512), _nn.GELU(), _nn.Dropout(0.1),
+            _nn.Linear(512, 256), _nn.GELU(), _nn.Dropout(0.1),
+            _nn.Linear(256, 2),
+        )
+    def forward(self, x): return torch.sigmoid(self.mlp(x.mean(dim=1)))
+
+
+class _KPHeadDist(_nn.Module):
+    def __init__(self, h):
+        super().__init__()
+        self.mlp = _nn.Sequential(
+            _nn.Linear(h, 512), _nn.GELU(), _nn.Dropout(0.1),
+            _nn.Linear(512, 256), _nn.GELU(), _nn.Dropout(0.1),
+            _nn.Linear(256, 1),
+        )
+    def forward(self, x): return self.mlp(x.mean(dim=1)).squeeze(-1)
+
+
+class KeypointInferencer:
+    """Load frozen SigLIP2 + uv head + dist head. Predict (troc_u, troc_v, dist_norm) from tool_camera frame.
+
+    Used for VLA proprio inference when proprio_dim == 9 (ee_pose 6 + uv 2 + dist_norm 1).
+
+    Projection bias correction: HDF5 GT projection has systematic offset vs visual feature
+    center (measured 2026-05-14 — sim 0/0, real -5/+10 px). Apply via `domain` arg.
+    """
+    DIST_NORM = 50.0  # mm — must match dataset / training
+    VISION_MODEL = "google/siglip2-so400m-patch16-512"
+    # Per-domain offset (du, dv) in pixels — added to predicted UV to align with visual feature.
+    # Source: project_keypoint_projection_bias memory.
+    PROJECTION_OFFSET_PX = {"sim": (0.0, 0.0), "real": (-5.0, 10.0), "none": (0.0, 0.0)}
+
+    def __init__(self, uv_ckpt_path, dist_ckpt_path, device="cuda", domain="sim"):
+        from transformers import SiglipVisionModel, SiglipImageProcessor
+        self.device = device
+        self.proc = SiglipImageProcessor.from_pretrained(self.VISION_MODEL)
+        self.vm = SiglipVisionModel.from_pretrained(self.VISION_MODEL, dtype=torch.bfloat16).to(device).eval()
+        for p in self.vm.parameters(): p.requires_grad_(False)
+        hidden = self.vm.config.hidden_size
+        self.uv_head = _KPHeadUV(hidden).to(device).to(torch.bfloat16).eval()
+        self.dist_head = _KPHeadDist(hidden).to(device).to(torch.bfloat16).eval()
+        self.uv_head.load_state_dict(torch.load(uv_ckpt_path, map_location=device)["head_state"])
+        self.dist_head.load_state_dict(torch.load(dist_ckpt_path, map_location=device)["head_state"])
+        if domain not in self.PROJECTION_OFFSET_PX:
+            raise ValueError(f"domain must be one of {list(self.PROJECTION_OFFSET_PX)}, got {domain}")
+        self.domain = domain
+        off = self.PROJECTION_OFFSET_PX[domain]
+        self._uv_offset_norm = np.array([off[0] / 256.0, off[1] / 256.0], dtype=np.float32)
+        print(f"[KeypointInferencer] loaded uv={uv_ckpt_path} dist={dist_ckpt_path} domain={domain} uv_offset_px={off}")
+
+    @torch.no_grad()
+    def predict(self, img_uint8_HW3):
+        """img: uint8 HxWx3 numpy. Returns (troc_u, troc_v, dist_norm).
+        Applies domain-specific UV offset to align prediction with visual feature center.
+        IMPORTANT: input is resized to 256x256 (LANCZOS) to match training distribution
+        (HDF5 stored 256x256 frames). Live MuJoCo renders (640x480) MUST be resized first
+        — direct pass causes distribution mismatch (processor's internal resize differs).
+        """
+        from PIL import Image as _Image
+        pil = _Image.fromarray(img_uint8_HW3).convert("RGB")
+        if pil.size != (256, 256):
+            pil = pil.resize((256, 256), _Image.LANCZOS)
+        pv = self.proc(images=pil, return_tensors="pt")["pixel_values"].to(self.device, dtype=torch.bfloat16)
+        feats = self.vm(pixel_values=pv).last_hidden_state
+        uv = self.uv_head(feats).float().cpu().numpy()[0]
+        dnorm = float(self.dist_head(feats).float().cpu().numpy()[0])
+        # Apply projection-bias correction: predictions match GT distribution (biased),
+        # add domain offset to get visually-accurate UV.
+        uv_corrected = uv + self._uv_offset_norm
+        return float(uv_corrected[0]), float(uv_corrected[1]), max(0.0, min(dnorm, 2.0))
+
+    def predict_world_seed(self, img_uint8_HW3, cam_pos, cam_mat, fovy_deg=58.0,
+                            tip_uv=(0.48789975, 0.32647642)):
+        """Predict a world-frame XYZ lateral offset that moves tip toward predicted trocar.
+
+        Used to SEED handoff grid search — instead of blind grid around current tip,
+        first apply this delta, then refine via sensor.
+
+        Returns: (world_delta_mm 3-vec, predicted_dist_mm, predicted_lateral_norm)
+        """
+        tu, tv, dnorm = self.predict(img_uint8_HW3)
+        du_img = tu - tip_uv[0]
+        dv_img = tv - tip_uv[1]
+        dist_mm = dnorm * self.DIST_NORM
+        # mm per normalized image unit at the predicted distance.
+        # Vertical FOV; image is square so same for u.
+        mm_per_norm = 2.0 * np.tan(np.deg2rad(fovy_deg) / 2.0) * dist_mm
+        # MuJoCo project_to_2d: u = -f*(px/pz) → px (cam x) flipped in image.
+        # So moving robot in cam +x = trocar moves in image -u.
+        # To bring trocar (at troc_uv) onto tip (at tip_uv): need image content shift
+        # by -(du_img, dv_img). Camera moves by +(cam_x_offset, cam_y_offset) accordingly:
+        cam_x = -du_img * mm_per_norm
+        cam_y =  dv_img * mm_per_norm
+        cam_offset_mm = np.array([cam_x, cam_y, 0.0], dtype=np.float64)
+        # Camera frame → world frame. cam_mat columns are camera basis in world.
+        world_delta_mm = (cam_mat @ cam_offset_mm).astype(np.float32)
+        lateral_norm = float(np.hypot(du_img, dv_img))
+        return world_delta_mm, dist_mm, lateral_norm
 
 
 def _save_trajectory_plot(eval_dir):
@@ -140,7 +245,7 @@ PERTURB_ANGLE_DEG = 25.0
 # Success: needle tip within distance + angle threshold
 ALIGN_SUCCESS_THRESHOLD_M = 0.005  # 5mm
 ALIGN_SUCCESS_ANGLE_DEG = 10.0      # needle-trocar axis angle < 10deg
-ALIGN_SUCCESS_HOLD_STEPS = 5        # consecutive steps within threshold
+ALIGN_SUCCESS_HOLD_STEPS = 20       # consecutive steps within threshold (stable hold, was 5)
 ALIGN_SUCCESS_SENSOR_MIN_MM = 20.0   # snsor must see through hole (> this value)
 
 # --- Sensor-stop trigger (independent of distance criterion) ---
@@ -755,6 +860,21 @@ def run_eval(cfg):
     model = load_model(checkpoint_path, diffusion_steps=diff_steps, scheduler_type=sched_type, train_config_path=train_config_path)
     processor = load_processor(checkpoint_path, train_config_path=train_config_path)
 
+    # Keypoint inferencer — provides per-step (troc_u, troc_v, dist_norm).
+    # Used for: (a) VLA proprio when proprio_dim=9, (b) keypoint-based handoff trigger.
+    kp_inferencer = None
+    uv_ckpt = getattr(cfg, "uv_ckpt", None)
+    dist_ckpt = getattr(cfg, "dist_ckpt", None)
+    pdim = getattr(model, "proprio_dim", 8)
+    if uv_ckpt and dist_ckpt:
+        kp_inferencer = KeypointInferencer(uv_ckpt, dist_ckpt, device="cuda",
+                                            domain=getattr(cfg, "kp_domain", "sim"))
+        print(f"[kp_inferencer] active (pdim={pdim}, use_kp_handoff={getattr(cfg, 'use_kp_handoff', False)})")
+    elif pdim == 9 and not getattr(cfg, "use_oracle_kp", False):
+        raise RuntimeError(f"model.proprio_dim=9 requires --uv-ckpt+--dist-ckpt OR --oracle-kp")
+    if getattr(cfg, "use_oracle_kp", False):
+        print(f"[oracle-kp] ACTIVE — VLA proprio uses GT keypoints (diagnostic upper bound)")
+
     image_size = getattr(cfg.eval, "image_size", 256)
     num_episodes = getattr(cfg.eval, "num_episodes", 50)
     max_steps = getattr(cfg, "max_steps", None) or getattr(cfg.eval, "max_steps_per_episode", 200)
@@ -767,11 +887,19 @@ def run_eval(cfg):
     perturb_mode = getattr(cfg, "perturb_mode", "random")
     grid_cells_all = None
     if perturb_mode == "grid":
+        # Optional override of perturb ranges (realistic eval).
+        x_rng = getattr(cfg, "perturb_xy_mm", PERTURB_POS_XY_MM)
+        y_rng = (getattr(cfg, "perturb_y_min_mm", PERTURB_POS_Y_MIN_MM),
+                 getattr(cfg, "perturb_y_max_mm", PERTURB_POS_Y_MAX_MM))
+        z_rng = (getattr(cfg, "perturb_z_min_mm", PERTURB_POS_Z_MIN_MM),
+                 getattr(cfg, "perturb_z_max_mm", PERTURB_POS_Z_MAX_MM))
+        a_rng = getattr(cfg, "perturb_angle_deg", PERTURB_ANGLE_DEG)
         grid_cells_all = build_perturb_grid(
             xy_steps=getattr(cfg, "xy_steps", 5),
             z_steps=getattr(cfg, "z_steps", 2),
             angle_steps=getattr(cfg, "angle_steps", 1),
             repeats=getattr(cfg, "repeats", 1),
+            x_range=x_rng, y_range=y_rng, z_range=z_rng, angle_range=a_rng,
         )
         num_episodes = len(grid_cells_all)
         print(f"[grid] perturb_mode=grid → {num_episodes} cells "
@@ -832,6 +960,14 @@ def run_eval(cfg):
         csv_header.extend(["phantom_x", "phantom_y", "phantom_angle_deg"])
     csv_writer.writerow(csv_header)
 
+    # VQA dump setup (one frame per episode, best within target lateral band).
+    vqa_dump_dir = getattr(cfg, "dump_vqa_out", None)
+    vqa_records = []
+    if vqa_dump_dir:
+        os.makedirs(os.path.join(vqa_dump_dir, "frames"), exist_ok=True)
+        print(f"[VQA dump] enabled — saving frames with lateral in "
+              f"[{cfg.vqa_band_lo}, {cfg.vqa_band_hi}] mm to {vqa_dump_dir}/")
+
     for ep in all_episodes:
         env.reset(grid_cell=ep_to_cell[ep])
 
@@ -843,11 +979,15 @@ def run_eval(cfg):
         action_buffer = []
         replay_images = []
         metrics_history = []
+        vqa_best = None  # (score, dict) for this ep
 
         success = False
         success_reason = ""  # "" | "dist" | "sensor_stop"
         sensor_spike_count = 0
         sensor_was_close = False  # arms the sensor_stop trigger
+        # Per-step keypoint-predicted dist/lateral history (for handoff trigger)
+        kp_dist_history = []  # predicted dist_mm per step
+        kp_lateral_history = []  # |troc_uv - tip_uv| in normalized [0,1] space per step
 
         for ctrl_step in range(max_steps):
             frames = env.render_cameras()
@@ -864,6 +1004,30 @@ def run_eval(cfg):
 
             metrics = env.get_spatial_metrics()
             metrics_history.append(metrics)
+
+            # VQA frame capture: keep frame closest to band center, with trocar in-frame.
+            if vqa_dump_dir:
+                lat = float(metrics["lateral_mm"])
+                if cfg.vqa_band_lo <= lat <= cfg.vqa_band_hi:
+                    tip_uv_n = metrics.get("tip_uv"); troc_uv_n = metrics.get("trocar_uv")
+                    if tip_uv_n is not None and troc_uv_n is not None:
+                        tip_uv_px = (float(tip_uv_n[0]) * 256.0, float(tip_uv_n[1]) * 256.0)
+                        troc_uv_px = (float(troc_uv_n[0]) * 256.0, float(troc_uv_n[1]) * 256.0)
+                        in_frame = (0 <= troc_uv_px[0] < 256) and (0 <= troc_uv_px[1] < 256)
+                        if in_frame:
+                            band_mid = (cfg.vqa_band_lo + cfg.vqa_band_hi) / 2.0
+                            score = abs(lat - band_mid)
+                            if vqa_best is None or score < vqa_best[0]:
+                                vqa_best = (score, {
+                                    "lateral_mm": lat,
+                                    "angle_deg": float(metrics["angle_deg"]),
+                                    "dist_mm": float(metrics["dist_mm"]),
+                                    "sensor_dist_mm": float(metrics["sensor_dist_mm"]) if metrics["sensor_dist_mm"] is not None else None,
+                                    "tip_uv": list(tip_uv_px),
+                                    "trocar_uv": list(troc_uv_px),
+                                    "delta_uv": [troc_uv_px[0] - tip_uv_px[0], troc_uv_px[1] - tip_uv_px[1]],
+                                    "img": frames["tool_camera"].copy(),
+                                })
 
             replay_frame = np.concatenate([img_ext, img_wrist, img_top], axis=1)
 
@@ -882,10 +1046,29 @@ def run_eval(cfg):
                 clip_mm = float(getattr(model, "sensor_clip_mm", 30.0))
                 s = max(0.0, min(sensor_raw_mm, clip_mm)) / clip_mm
                 proprio = np.concatenate([proprio6, np.array([s], dtype=np.float32)])  # (7,)
+            elif pdim == 9:
+                # Keypoint signal source: oracle (GT) or kp_inferencer (learned).
+                # Oracle = upper bound (matches training distribution exactly).
+                if getattr(cfg, "use_oracle_kp", False):
+                    om = env.get_spatial_metrics()
+                    tu, tv = float(om["trocar_uv"][0]), float(om["trocar_uv"][1])
+                    dnorm = min(float(om["dist_mm"]) / 50.0, 2.0)
+                elif kp_inferencer is not None:
+                    tu, tv, dnorm = kp_inferencer.predict(frames["tool_camera"])
+                else:
+                    raise RuntimeError("proprio_dim=9 requires --uv-ckpt+--dist-ckpt OR --oracle-kp")
+                proprio = np.concatenate([proprio6, np.array([tu, tv, dnorm], dtype=np.float32)])  # (9,)
+                kp_dist_history.append(dnorm * 50.0)  # mm
+                kp_lateral_history.append(float(np.hypot(tu - 0.488, tv - 0.326)))  # vs constant tip
             else:
                 sensor_close = 1.0 if (0.0 <= sensor_raw_mm <= 5.0) else 0.0
                 hole_through = 1.0 if (sensor_raw_mm >= 15.0) else 0.0
                 proprio = np.concatenate([proprio6, np.array([sensor_close, hole_through], dtype=np.float32)])  # (8,)
+            # When pdim != 9 but kp_inferencer available: still predict for handoff trigger.
+            if kp_inferencer is not None and pdim != 9:
+                tu, tv, dnorm = kp_inferencer.predict(frames["tool_camera"])
+                kp_dist_history.append(dnorm * 50.0)
+                kp_lateral_history.append(float(np.hypot(tu - 0.488, tv - 0.326)))
             state_history.append(proprio)
 
             observation = {
@@ -918,6 +1101,31 @@ def run_eval(cfg):
             a_min = np.array(action_min_sim, dtype=np.float32)
             a_max = np.array(action_max_sim, dtype=np.float32)
             denorm_action = (raw_action + 1.0) / 2.0 * (a_max - a_min) + a_min
+
+            # Angle-dominated action gate: when model issues large rx/ry rotation, suppress
+            # the tip-frame Z retreat component (positive Z = away from trocar) to prevent
+            # the "tries to fix angle but distance grows" failure mode.
+            # Env-gated: ANGLE_Z_GATE=1 enables (default off — empirically no SR change vs baseline 67%).
+            import os as _os
+            if _os.getenv("ANGLE_Z_GATE", "0") == "1":
+                _thr = float(_os.getenv("ANGLE_Z_GATE_THR", "0.05"))
+                _angmag = float(abs(denorm_action[3]) + abs(denorm_action[4]))
+                if _angmag > _thr and denorm_action[2] > 0:
+                    denorm_action = denorm_action.copy()
+                    denorm_action[2] = 0.0
+
+            # Close-range action damping: when sensor reads close, scale action down.
+            # scale = clamp((sensor - MIN)/(MAX - MIN), SCALE_MIN, 1.0)
+            # Env-gated: ACTION_SCALE_NEAR=1, defaults MAX=8mm, MIN=2mm, SCALE_MIN=0.3.
+            if _os.getenv("ACTION_SCALE_NEAR", "0") == "1":
+                _smax = float(_os.getenv("ACTION_SCALE_MAX_MM", "8.0"))
+                _smin = float(_os.getenv("ACTION_SCALE_MIN_MM", "2.0"))
+                _floor = float(_os.getenv("ACTION_SCALE_FLOOR", "0.3"))
+                _s = float(sensor_raw_mm) if sensor_raw_mm is not None else _smax
+                if 0.0 < _s < _smax:
+                    _scale = max(_floor, min(1.0, (_s - _smin) / (_smax - _smin)))
+                    denorm_action = denorm_action.copy()
+                    denorm_action *= _scale
 
             # denorm_action[3:6] is delta in Mecademic intrinsic XYZ (training convention).
             # Convert to delta in MuJoCo extrinsic XYZ for apply_delta_ee.
@@ -958,15 +1166,93 @@ def run_eval(cfg):
                 metrics_history.append(env.get_spatial_metrics())
                 break
 
+            # === Mid-trajectory keypoint-based handoff trigger ===
+            # If KP-handoff enabled AND current predicted dist < threshold AND lateral OK:
+            # break out of VLA loop immediately at the close state. Handoff fires below.
+            if (kp_inferencer is not None
+                    and getattr(cfg, "use_kp_handoff", False)
+                    and getattr(cfg, "kp_inline_trigger", True)
+                    and len(kp_dist_history) > 0):
+                cur_kp_dist = kp_dist_history[-1]
+                cur_kp_lat = kp_lateral_history[-1]
+                lat_thr = getattr(cfg, "kp_lateral_thresh", None)
+                if cur_kp_dist <= getattr(cfg, "handoff_trigger_mm", 15.0):
+                    if lat_thr is None or cur_kp_lat <= lat_thr:
+                        print(f"  [inline-trigger step {ctrl_step}] kp_dist={cur_kp_dist:.2f}mm "
+                              f"kp_lat_norm={cur_kp_lat:.3f} → break VLA, run handoff")
+                        metrics_history.append(env.get_spatial_metrics())
+                        break
+
         # --- Sensor handoff (only if VLA did NOT succeed, and got close enough) ---
+        # Trigger source: oracle dist (default) or keypoint-predicted dist (calibration-free).
+        # Keypoint trigger = realistic real-world scenario; oracle = upper bound.
         handoff_log = None
-        min_dist_pre_handoff = min(m["dist_mm"] for m in metrics_history)
+        oracle_min_dist = min(m["dist_mm"] for m in metrics_history)
+        kp_min_dist = None
+        kp_min_lateral_norm = None
+        if kp_inferencer is not None and len(kp_dist_history) > 0:
+            kp_min_dist = min(kp_dist_history)
+            kp_min_lateral_norm = min(kp_lateral_history)
+        use_kp_trigger = getattr(cfg, "use_kp_handoff", False) and kp_min_dist is not None
+        trigger_dist = kp_min_dist if use_kp_trigger else oracle_min_dist
+        trigger_thresh = getattr(cfg, "handoff_trigger_mm", 15.0)
+        # Smart trigger: dist + lateral both close (keypoint mode only)
+        if use_kp_trigger and getattr(cfg, "kp_lateral_thresh", None) is not None:
+            kp_lateral_ok = kp_min_lateral_norm <= cfg.kp_lateral_thresh
+        else:
+            kp_lateral_ok = True
         if (getattr(cfg, "use_handoff", False)
                 and not success
-                and min_dist_pre_handoff <= getattr(cfg, "handoff_trigger_mm", 15.0)):
+                and trigger_dist <= trigger_thresh
+                and kp_lateral_ok):
+            print(f"  [handoff trigger] mode={'kp' if use_kp_trigger else 'oracle'} "
+                  f"dist={trigger_dist:.2f}mm thr={trigger_thresh:.1f}mm "
+                  f"lat={kp_min_lateral_norm if kp_min_lateral_norm is not None else 'n/a'}")
             from scripts.sensor_handoff import run_sensor_handoff
+            # Compute keypoint-seeded lateral offset for handoff grid steering.
+            kp_seed_mm = None
+            if kp_inferencer is not None and getattr(cfg, "kp_seed_handoff", True):
+                try:
+                    frames_now = env.render_cameras()
+                    cam_pos = env.data.cam_xpos[env._tool_cam_id].copy()
+                    cam_mat = env.data.cam_xmat[env._tool_cam_id].reshape(3, 3)
+                    fovy = float(env.model.cam_fovy[env._tool_cam_id])
+                    kp_seed_mm, kp_pred_dist, kp_pred_lat = kp_inferencer.predict_world_seed(
+                        frames_now["tool_camera"], cam_pos, cam_mat, fovy_deg=fovy
+                    )
+                    print(f"  [kp_seed] world_delta={kp_seed_mm.round(2)}mm "
+                          f"predicted_dist={kp_pred_dist:.2f}mm lat_norm={kp_pred_lat:.3f}")
+                except Exception as e:
+                    print(f"  [kp_seed] failed: {e}; skipping seed")
+                    kp_seed_mm = None
+            kp_track_fn = None
+            kp_track_iters = int(getattr(cfg, "kp_track_iters", 1))
+            if kp_inferencer is not None and kp_track_iters > 1:
+                def _kp_track_fn(_env, _kpi=kp_inferencer):
+                    _frames = _env.render_cameras()
+                    _cpos = _env.data.cam_xpos[_env._tool_cam_id].copy()
+                    _cmat = _env.data.cam_xmat[_env._tool_cam_id].reshape(3, 3)
+                    _fovy = float(_env.model.cam_fovy[_env._tool_cam_id])
+                    wdelta, _d, latn = _kpi.predict_world_seed(_frames["tool_camera"], _cpos, _cmat, fovy_deg=_fovy)
+                    return wdelta, latn
+                kp_track_fn = _kp_track_fn
             try:
-                handoff_log = run_sensor_handoff(env, verbose=True, frames_out=replay_images)
+                # KP query for sweep video labels (only used when HANDOFF_VIDEO_SWEEP=1).
+                kp_query_fn = None
+                if kp_inferencer is not None and os.environ.get("HANDOFF_VIDEO_SWEEP", "0") == "1":
+                    def _kp_query(_env, _kpi=kp_inferencer):
+                        _frames = _env.render_cameras()
+                        _cpos = _env.data.cam_xpos[_env._tool_cam_id].copy()
+                        _cmat = _env.data.cam_xmat[_env._tool_cam_id].reshape(3, 3)
+                        _fovy = float(_env.model.cam_fovy[_env._tool_cam_id])
+                        _wd, _d, _ln = _kpi.predict_world_seed(_frames["tool_camera"], _cpos, _cmat, fovy_deg=_fovy)
+                        return float(_d), float(_ln)
+                    kp_query_fn = _kp_query
+                handoff_log = run_sensor_handoff(env, verbose=True, frames_out=replay_images,
+                                                  keypoint_seed_world_mm=kp_seed_mm,
+                                                  keypoint_track_fn=kp_track_fn,
+                                                  kp_track_iters=kp_track_iters,
+                                                  kp_query_fn=kp_query_fn)
                 metrics_history.append(env.get_spatial_metrics())
                 # Re-evaluate success after handoff. Use stricter "insertion achieved" criterion:
                 #   - did_align (sensor through-hole confirmed)
@@ -981,6 +1267,33 @@ def run_eval(cfg):
 
         if success:
             total_successes += 1
+
+        # Save VQA frame for this ep if captured.
+        if vqa_dump_dir and vqa_best is not None:
+            _, d = vqa_best
+            fname = f"ep{ep:03d}.png"
+            from PIL import Image as _PILImage
+            _PILImage.fromarray(d["img"]).save(os.path.join(vqa_dump_dir, "frames", fname))
+            du, dv = d["delta_uv"]
+            mag = float(np.hypot(du, dv))
+            if mag < 8.0:
+                gt_dir = "centered"
+            else:
+                ang_img = (np.degrees(np.arctan2(-dv, du)) + 360.0) % 360.0
+                sectors = [("right", 0.0), ("up-right", 45.0), ("up", 90.0), ("up-left", 135.0),
+                           ("left", 180.0), ("down-left", 225.0), ("down", 270.0), ("down-right", 315.0)]
+                gt_dir = min(sectors, key=lambda s: min(abs(ang_img - s[1]), 360.0 - abs(ang_img - s[1])))[0]
+            lat = d["lateral_mm"]
+            gt_mag = "tiny" if lat < 2 else ("small" if lat < 5 else ("medium" if lat < 10 else "large"))
+            vqa_records.append({
+                "ep": int(ep), "frame": f"frames/{fname}",
+                "lateral_mm": lat, "angle_deg": d["angle_deg"], "dist_mm": d["dist_mm"],
+                "sensor_dist_mm": d["sensor_dist_mm"],
+                "tip_uv": d["tip_uv"], "trocar_uv": d["trocar_uv"], "delta_uv": d["delta_uv"],
+                "trocar_in_frame": True,
+                "gt_direction": gt_dir, "gt_magnitude": gt_mag,
+            })
+            print(f"  [VQA] saved {fname}: lat={lat:.2f} ang={d['angle_deg']:.1f} -> {gt_dir}/{gt_mag}")
 
         ep_done = all_episodes.index(ep) + 1
         sr = total_successes / ep_done * 100
@@ -1045,6 +1358,12 @@ def run_eval(cfg):
     log_file.write(summary + "\n")
     log_file.close()
 
+    if vqa_dump_dir and vqa_records:
+        import json as _json
+        with open(os.path.join(vqa_dump_dir, "ground_truth.json"), "w") as _f:
+            _json.dump({"samples": vqa_records, "image_size": [256, 256]}, _f, indent=2)
+        print(f"[VQA dump] {len(vqa_records)} frames saved to {vqa_dump_dir}/")
+
     # Only rename directory when NOT running as a shard (merge handles final naming)
     if shard_id is None:
         new_dir = eval_dir.parent / f"{eval_dir.name}_SR{final_sr:.2f}"
@@ -1095,6 +1414,38 @@ if __name__ == "__main__":
                         help="(grid) Repeats per cell (for stochastic policy variance)")
     parser.add_argument("--handoff", action="store_true",
                         help="After VLA loop ends, run sensor-based handoff (lateral sweep + insertion)")
+    parser.add_argument("--dump-vqa-out", type=str, default=None,
+                        help="If set, dump tool_camera frames + GT JSON whenever lateral_mm in [vqa-band-lo, vqa-band-hi] (at most 1 per ep)")
+    parser.add_argument("--vqa-band-lo", type=float, default=1.0)
+    parser.add_argument("--vqa-band-hi", type=float, default=15.0)
+    parser.add_argument("--uv-ckpt", type=str, default=None,
+                        help="Keypoint head ckpt for UV prediction. Used for proprio_dim=9 AND/OR keypoint handoff.")
+    parser.add_argument("--dist-ckpt", type=str, default=None,
+                        help="Keypoint head ckpt for dist_mm prediction.")
+    parser.add_argument("--use-kp-handoff", action="store_true",
+                        help="Use keypoint-predicted dist as handoff trigger (vs oracle dist). Calibration-free.")
+    parser.add_argument("--kp-lateral-thresh", type=float, default=None,
+                        help="Smart trigger: also require predicted lateral (normalized) ≤ this. e.g. 0.05 = 5% image.")
+    parser.add_argument("--kp-domain", type=str, default="sim", choices=["sim", "real", "none"],
+                        help="Projection bias correction domain. Sim eval default = sim.")
+    parser.add_argument("--no-kp-seed-handoff", dest="kp_seed_handoff", action="store_false",
+                        help="Disable keypoint-seeded handoff (default ON when kp_inferencer active).")
+    parser.set_defaults(kp_seed_handoff=True)
+    parser.add_argument("--no-kp-inline-trigger", dest="kp_inline_trigger", action="store_false",
+                        help="Disable mid-trajectory KP handoff trigger (default ON: interrupts VLA loop when close).")
+    parser.set_defaults(kp_inline_trigger=True)
+    parser.add_argument("--oracle-kp", action="store_true",
+                        help="Diagnostic: feed VLA oracle (GT) keypoints instead of learned head predictions.")
+    parser.add_argument("--perturb-xy-mm", type=float, default=None,
+                        help="Override XY perturb range ±mm (default 25).")
+    parser.add_argument("--perturb-y-min-mm", type=float, default=None)
+    parser.add_argument("--perturb-y-max-mm", type=float, default=None)
+    parser.add_argument("--perturb-z-min-mm", type=float, default=None)
+    parser.add_argument("--perturb-z-max-mm", type=float, default=None)
+    parser.add_argument("--perturb-angle-deg", type=float, default=None,
+                        help="Override angle perturb range ±deg (default 25).")
+    parser.add_argument("--kp-track-iters", type=int, default=1,
+                        help="Iterative KP visual-servo iters BEFORE sensor grid (1=seed only, 3 recommended).")
     parser.add_argument("--handoff-trigger-mm", type=float, default=15.0,
                         help="Only run handoff if min_dist reached during VLA is ≤ this threshold")
     args = parser.parse_args()
@@ -1123,5 +1474,23 @@ if __name__ == "__main__":
     cfg.repeats = args.repeats
     cfg.use_handoff = args.handoff
     cfg.handoff_trigger_mm = args.handoff_trigger_mm
+    cfg.uv_ckpt = args.uv_ckpt
+    cfg.dist_ckpt = args.dist_ckpt
+    cfg.use_kp_handoff = args.use_kp_handoff
+    cfg.kp_lateral_thresh = args.kp_lateral_thresh
+    cfg.kp_domain = args.kp_domain
+    cfg.kp_seed_handoff = args.kp_seed_handoff
+    cfg.kp_inline_trigger = args.kp_inline_trigger
+    cfg.use_oracle_kp = args.oracle_kp
+    cfg.kp_track_iters = args.kp_track_iters
+    if args.perturb_xy_mm is not None: cfg.perturb_xy_mm = args.perturb_xy_mm
+    if args.perturb_y_min_mm is not None: cfg.perturb_y_min_mm = args.perturb_y_min_mm
+    if args.perturb_y_max_mm is not None: cfg.perturb_y_max_mm = args.perturb_y_max_mm
+    if args.perturb_z_min_mm is not None: cfg.perturb_z_min_mm = args.perturb_z_min_mm
+    if args.perturb_z_max_mm is not None: cfg.perturb_z_max_mm = args.perturb_z_max_mm
+    if args.perturb_angle_deg is not None: cfg.perturb_angle_deg = args.perturb_angle_deg
+    cfg.dump_vqa_out = args.dump_vqa_out
+    cfg.vqa_band_lo = args.vqa_band_lo
+    cfg.vqa_band_hi = args.vqa_band_hi
 
     run_eval(cfg)

@@ -82,6 +82,7 @@ class SimActAlign(IterableDataset):
         near_goal_threshold_mm=15.0, # frames with ||needle_tip - trocar_entry|| < this are "near-goal"
         local_crop_enabled=False,    # 추가 center-crop view (wrist 슬롯) 생성 — tool_camera가 wrist-mounted이라 center crop ≈ needle ROI
         local_crop_size=320,         # 640×480 원본에서 중앙 정사각형 crop 크기 (px). 320 = 50%
+        use_keypoint_proprio=False,  # HDF5 keypoints_wrist (tip_uv, trocar_uv) 4-dim을 proprio에 concat
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -106,6 +107,7 @@ class SimActAlign(IterableDataset):
         self.near_goal_threshold_mm = float(near_goal_threshold_mm)
         self.local_crop_enabled = bool(local_crop_enabled)
         self.local_crop_size = int(local_crop_size)
+        self.use_keypoint_proprio = bool(use_keypoint_proprio)
 
         # Action normalization to [-1, 1]
         self.action_min = np.array(action_min_sim_align, dtype=np.float32)
@@ -206,6 +208,28 @@ class SimActAlign(IterableDataset):
                     hole_through = (sensor_raw >= 15.0).astype(np.float32)
                     sensor_feat = np.stack([sensor_close, hole_through], axis=-1)  # (N, 2)
                 proprio_np = np.concatenate([proprio_np, sensor_feat], axis=-1)  # (N, 8 or 7)
+
+            # --- Keypoint proprio (Option A: trocar UV only — tip_uv is rigid-attached constant) ---
+            # kp_wrist: (N, 4) = [tip_u, tip_v, troc_u, troc_v] in normalized [0,1] coords.
+            # We take only [troc_u, troc_v] (2 dims): tip_uv is constant (~0.488, 0.326)
+            # due to wrist-mounted tool_camera + rigid needle attachment.
+            # At inference: replaced by frozen keypoint head prediction.
+            if self.use_keypoint_proprio:
+                if "keypoints_wrist" not in f["observations"]:
+                    raise KeyError(
+                        f"use_keypoint_proprio=True but episode {os.path.basename(h5_path)} "
+                        f"missing observations/keypoints_wrist"
+                    )
+                kp_wrist_full = f["observations"]["keypoints_wrist"][:].astype(np.float32)  # (N, 4)
+                troc_uv = kp_wrist_full[:, 2:4]  # (N, 2)
+                troc_uv = np.clip(np.nan_to_num(troc_uv, nan=0.5), -0.2, 1.2)
+                # 3D tip-trocar distance normalized by 50mm (clipped at 2.0). Matches
+                # dist_only head training (uv head 4.4px / dist head 1.03mm validated).
+                tip_p = f["observations"]["needle_tip_pos"][:].astype(np.float32)
+                ent_p = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
+                dist_mm = np.linalg.norm(tip_p - ent_p, axis=-1).reshape(-1, 1)
+                dist_norm = np.clip(dist_mm / 50.0, 0.0, 2.0)
+                proprio_np = np.concatenate([proprio_np, troc_uv, dist_norm], axis=-1)
 
             # --- Spatial auxiliary targets (backward compatible) ---
             spatial_targets_np = None

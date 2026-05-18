@@ -1,0 +1,126 @@
+"""Single-task: predict tip-trocar 3D distance ONLY. Isolated learnability test.
+
+Output: dist_norm (normalized by 50mm). Loss: MSE(dist_norm).
+Same backbone (SigLIP2 frozen) + small MLP head.
+"""
+import argparse, time
+from pathlib import Path
+import h5py, numpy as np, torch
+import torch.nn as nn, torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from transformers import SiglipVisionModel, SiglipImageProcessor
+
+VISION_MODEL = "google/siglip2-so400m-patch16-512"
+DIST_NORM = 50.0
+
+
+class DS(Dataset):
+    def __init__(self, h5, proc, training=True):
+        self.path = h5; self.proc = proc; self.training = training
+        with h5py.File(h5, "r") as f: self.n = f["image"].shape[0]
+        self._f = None
+    def _o(self):
+        if self._f is None: self._f = h5py.File(self.path, "r")
+    def __len__(self): return self.n
+    def __getitem__(self, i):
+        self._o()
+        img = self._f["image"][i]
+        dist = float(self._f["lateral_mm"][i])
+        pil = Image.fromarray(img)
+        if self.training:
+            a = np.array(pil, dtype=np.float32) / 255.0
+            s = np.random.uniform(0.85, 1.15, size=(1,1,3)).astype(np.float32)
+            sh = np.random.uniform(-0.1, 0.1, size=(1,1,3)).astype(np.float32)
+            pil = Image.fromarray((np.clip(a*s+sh, 0, 1)*255).astype(np.uint8))
+        return {
+            "pv": self.proc(images=pil, return_tensors="pt")["pixel_values"].squeeze(0),
+            "dist_norm": torch.tensor(min(dist/DIST_NORM, 2.0), dtype=torch.float32),
+            "dist_mm": torch.tensor(dist, dtype=torch.float32),
+        }
+
+
+class Head(nn.Module):
+    def __init__(self, h, drop=0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(h, 512), nn.GELU(), nn.Dropout(drop),
+            nn.Linear(512, 256), nn.GELU(), nn.Dropout(drop),
+            nn.Linear(256, 1),
+        )
+    def forward(self, x):
+        return self.mlp(x.mean(dim=1)).squeeze(-1)
+
+
+def evaluate(vm, head, loader, device):
+    vm.eval(); head.eval()
+    errs = []
+    with torch.no_grad():
+        for b in loader:
+            pv = b["pv"].to(device, dtype=torch.bfloat16)
+            dist_mm = b["dist_mm"].to(device)
+            feats = vm(pixel_values=pv).last_hidden_state
+            pred = head(feats).float() * DIST_NORM
+            errs.extend((pred - dist_mm).abs().cpu().numpy().tolist())
+    e = np.array(errs)
+    return {"med": float(np.median(e)), "mean": float(e.mean()), "p90": float(np.percentile(e,90)), "p99": float(np.percentile(e,99))}
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--train-h5", required=True)
+    p.add_argument("--val-h5", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--steps", type=int, default=5000)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--eval-interval", type=int, default=500)
+    p.add_argument("--num-workers", type=int, default=4)
+    args = p.parse_args()
+
+    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    log_f = open(out/"train.log", "w")
+    def lg(m): print(m); log_f.write(m+"\n"); log_f.flush()
+
+    dev = "cuda"
+    proc = SiglipImageProcessor.from_pretrained(VISION_MODEL)
+    vm = SiglipVisionModel.from_pretrained(VISION_MODEL, dtype=torch.bfloat16).to(dev).eval()
+    for x in vm.parameters(): x.requires_grad_(False)
+    head = Head(vm.config.hidden_size).to(dev).to(torch.bfloat16)
+    lg(f"head params={sum(p.numel() for p in head.parameters())}")
+
+    tr = DS(args.train_h5, proc, True); vl = DS(args.val_h5, proc, False)
+    lg(f"train={len(tr)} val={len(vl)}")
+    trl = DataLoader(tr, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    vll = DataLoader(vl, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+
+    opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=1e-4)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
+    it = iter(trl); best = 1e9; t0 = time.time()
+    for step in range(1, args.steps+1):
+        try: b = next(it)
+        except StopIteration: it = iter(trl); b = next(it)
+        pv = b["pv"].to(dev, dtype=torch.bfloat16)
+        dnorm = b["dist_norm"].to(dev)
+        with torch.no_grad():
+            feats = vm(pixel_values=pv).last_hidden_state
+        pred = head(feats).float()
+        loss = F.mse_loss(pred, dnorm)
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+        opt.step(); sch.step()
+        if step % 50 == 0:
+            lg(f"[{step:5d}] L={loss.item():.5f} lr={sch.get_last_lr()[0]:.1e}")
+        if step % args.eval_interval == 0 or step == args.steps:
+            m = evaluate(vm, head, vll, dev)
+            lg(f"  [val {step}] dist mm med/mean/p90/p99 = {m['med']:.2f}/{m['mean']:.2f}/{m['p90']:.2f}/{m['p99']:.2f}")
+            ck = {"head_state": head.state_dict(), "step": step, "metrics": m}
+            torch.save(ck, out/f"head_step{step}.pt")
+            if m["med"] < best:
+                best = m["med"]; torch.save(ck, out/"head_best.pt")
+                lg(f"  ★ best {best:.2f}mm")
+    lg(f"Done {time.time()-t0:.0f}s, best med={best:.2f}mm"); log_f.close()
+
+
+if __name__ == "__main__":
+    main()

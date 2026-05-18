@@ -698,3 +698,192 @@ Realistic 12ep에서 모든 success가 `[dist]` — VLA criterion이 5mm/10°로
 
 **현 SOTA (2026-05-18)**: unfreeze_n4/2000, base=HOLD_focus_v2/3k, lr=1e-5 batch=8, sensor_stop 제외 시 baseline 재측정 필요. config 보존: `unfreeze_last4_config.yaml`, `unfreeze_last4_HARDv4_config.yaml` (HARDv4는 tie지만 검증 가치로 보존).
 
+---
+
+## 2026-05-18 ⚠️ sensor_stop OFF 재측정 — SOTA 거품 발각
+
+기존 77.78% 두 ckpt는 **sensor_stop success criterion이 가짜 success 만들어내고 있었음**.
+
+| ckpt | with sensor_stop (이전 SOTA) | **no_sensor_stop + img512** | 거품 |
+|---|---|---|---|
+| n4/2000 | 77.78% | **55.56%** (30/54) | -22pp |
+| n4_HARDv4/2000 | 77.78% | **33.33%** (18/54) | -44pp |
+
+**핵심 발견**:
+1. **HARDv4 ckpt이 last4보다 sensor_stop 의존도 2배** — HARDv4 데이터 학습은 정밀 정렬 안 늘리고 sensor 트리거에 더 의존하는 행동 패턴 학습. **재확정 dead-end**, 절대 다시 시도 금지
+2. **last4/2000 진짜 SR 55.56%** — 이전 paper headline 77.78%는 inflated
+3. last4 < HARDv4의 sensor_stop 거품 차이가 두 ckpt가 tied로 보인 원인
+
+**img_size 효과 확정 (control 완료)**:
+| ckpt | img256+nss | img512+nss | Δ |
+|---|---|---|---|
+| n4/2000 | 48.15% (26/54) | **55.56%** (30/54) | **+7.41pp** |
+| n4/1500 | 46.30% (25/54) | 진행 중 | — |
+
+**해결**: train-eval resolution mismatch (학습 512 native, eval 256→512 upscale)가 진짜 +7.4pp 손실. `cfg.eval.image_size: 512` 영구 적용. save_video=false 필수 (KP 256 vs VLA 512 프레임 사이즈 충돌).
+
+**진짜 SOTA (2026-05-18)**: **n4/2000 + img512 + no_sensor_stop = 55.56%** (이전 77.78% 헤드라인은 sensor_stop 거품 22pp + img_size 7pp 합산으로 inflated)
+
+**n4 ckpt sweep (img512+nss, seed=2031)**:
+| ckpt | SR | 
+|---|---|
+| n4/500 | 42.59% (23/54) |
+| **n4/1000** | **61.11%** (33/54) ← peak |
+| n4/1500 | 57.41% (31/54) |
+| n4/2000 | 55.56% (30/54) |
+
+**핵심**: bell curve, **1000 step이 peak**. 500, 1500, 2000 모두 lower.
+
+**finegrain run (seed=2034, save_interval=200, max=1600) 결과**:
+- ckpt 1000 (mid-eval ep19): 31.6% ← 같은 step인데 -30pp! seed 영향 매우 큼
+- 800 (진행 중)
+
+**🚨 PAPER HEADLINE 무효화 — seed lottery 확정 (2026-05-18)**:
+
+n4 unfreeze, lr=1e-5, ckpt 1000, img512+nss, 4 seeds:
+| seed | SR |
+|---|---|
+| 2031 | 61.11% (원본 "SOTA") |
+| 2034 | 25.93% |
+| 2035 | 7.41% |
+| 2036 | 42.59% |
+| **mean** | **34.26%** |
+| **σ** | **~23pp** |
+
+**결정적 결과**: 
+- Frozen baseline (lr_low/3k) = 48.1% > mean 34%
+- 4 seeds 중 단 1개만 baseline 초과
+- **unfreeze 방법은 평균적으로 frozen보다 나쁘다**
+- 원본 61% = seed 2031의 **lucky strike**, 재현 불가능
+
+**결론**: unfreeze SigLIP last4 = paper contribution으로 부적합. 
+- Mean-of-seeds ≤ frozen, σ 너무 큼
+- 단일 seed cherry-pick은 academic integrity 위반
+
+**다음 axis 후보** (안정성 우선):
+1. lr=5e-6 unfreeze (안정성 개선 가설, 진행 중)
+2. frozen baseline 자체 개선 (lr/batch sweep)
+3. KP head 학습 quality (mm 정밀도 향상)
+4. lerobot ACT/DP baseline 비교
+
+---
+
+## 2026-05-18 SR 이외 지표 정리 (multi-metric audit)
+
+**Why**: SR(handoff + sensor_stop 보정)만 보면 sensor_stop 거품을 못 잡는다. close_5mm + median(min_dist) + lateral을 같이 봐야 진짜 mm 정밀도 평가 가능.
+
+### KP head 자체 능력 (offline, end-to-end와 분리)
+
+| 지표 | 값 |
+|---|---|
+| uv pixel error (median) | **4.4 px** @ 256×256 |
+| dist regression error (median) | **1.03 mm** |
+| projection bias (real) | (-5, +10) px systematic offset vs visual center |
+| projection bias (sim) | (0, 0) px |
+
+→ KP head는 mm-level intrinsic accuracy. **천장 원인이 KP에 없음**. 정렬 구간 진입(VLA)과 handoff 타이밍에 천장 존재.
+
+### End-to-end multi-metric (WIDE 54ep, img512, no_sensor_stop, handoff ON, retreat=0.5)
+
+| 구성 | SR | **close_5mm** | close_3mm | angle≤10°+min≤10mm | **med(min_dist)** | med(final_dist) | med(lat) | med_steps(succ) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **unfreeze_n4/1000** (seed2031, peak) | 61.1% | **66.7%** | **27.8%** | 61.1% | **3.7mm** | 3.7mm | 3.0mm | 169 |
+| unfreeze_n4/1500 | 57.4% | 61.1% | 27.8% | 57.4% | 4.3mm | 4.5mm | 3.1mm | 161 |
+| unfreeze_n4/2000 | 55.6% | 64.8% | 27.8% | 55.6% | 4.1mm | 4.2mm | 2.8mm | 158 |
+| unfreeze_n4/500 | 43.4% | 54.7% | 15.1% | 52.8% | 4.2mm | 19.7mm | 11.2mm | 209 |
+| **lr_low/3k (frozen baseline, retreat=1)** | 50.0% | 46.3% | 14.8% | 44.4% | 5.6mm | 10.0mm | 4.2mm | 184 |
+| seed2036/1000 (n4 reroll) | 42.6% | 51.9% | 11.1% | 46.3% | 5.0mm | 6.8mm | 4.0mm | 152 |
+| seed2034/1000 (finegrain) | 25.9% | 25.9% | 11.1% | 44.4% | 6.5mm | 12.6mm | 4.2mm | 152 |
+| seed2035/1000 (n4 reroll) | 7.8% | 17.6% | 3.9% | 9.8% | 21.0mm | 22.7mm | 12.0mm | 240 |
+| n4_HARDv4/2000 (nss) | 34.0% | 35.8% | 24.5% | 35.8% | 8.7mm | 8.7mm | 3.4mm | 99 |
+| unfreeze_n2/2000 | 48.1% | 20.4% | 1.9% | 46.3% | 10.6mm | 15.6mm | 14.5mm | 188 |
+| unfreeze_n6/2000 | 46.3% | 38.9% | 22.2% | 48.1% | 6.4mm | 12.3mm | 8.6mm | 203 |
+
+### sensor_stop 거품 정량화 (same ckpt, sensor_stop ON vs OFF)
+
+| ckpt | SR (ON) | SR (OFF) | close_5mm (ON) | close_5mm (OFF) | med(min_dist) ON | med(min_dist) OFF |
+|---|---:|---:|---:|---:|---:|---:|
+| **unfreeze_n4_HARDv4/2000** | **77.8%** | 34.0% | **33.3%** | 35.8% | **17.7mm** | 8.7mm |
+| unfreeze_n4_HARDv4/2000_r0 | 79.6% | – | 33.3% | – | 18.2mm | – |
+| unfreeze_n4/2000 | 79.2% | 55.6% | 50.9% | 64.8% | 5.0mm | 4.1mm |
+
+**해석**:
+- **HARDv4 ckpt: SR 77.8%인데 close_5mm 33.3%, median min_dist 17.7mm**. SR과 정밀도가 완전 분리. sensor가 trocar 옆면만 찍어 success로 카운트된 케이스가 약 44pp 거품.
+- last4(non-HARDv4)도 SR 22pp 거품이지만 close_5mm는 오히려 OFF가 더 높음(64.8% > 50.9%) — sensor_stop이 너무 일찍 멈춰 5mm 안으로 못 들어가던 케이스도 존재.
+- **HARDv4는 sensor 트리거 의존하도록 학습됨** → 정밀 정렬 실력은 안 올라감. dead-end 재확정.
+
+### img_size mismatch (control 완료, multi-metric)
+
+| ckpt | img256+nss SR | img512+nss SR | close_5mm 256 | close_5mm 512 | Δ close_5mm |
+|---|---:|---:|---:|---:|---:|
+| n4/2000 | 50.0% | 55.6% | 57.7% | 64.8% | +7.1pp |
+| n4/1500 | 48.1% | 57.4% | 53.8% | 61.1% | +7.3pp |
+
+→ resolution mismatch 단독으로 close_5mm +7pp. eval default 512 확정.
+
+### Key takeaways (multi-metric 기준)
+
+1. **진짜 best**: unfreeze_n4/1000 seed2031 close_5mm 66.7%, med(min_dist) 3.7mm — 단 **재현 불가** (seed lottery).
+2. **신뢰 가능 baseline**: lr_low/3k frozen close_5mm 46.3%, med(min_dist) 5.6mm.
+3. **SR-only 보지 말 것**: HARDv4 SR 78%인데 med(min_dist) 18mm → 18mm는 phantom으로 들어갈 거리 아님. SR이 평가 task를 잘못 표현했음.
+4. **handoff (KP head)는 정당한 컴포넌트**: 자체 intrinsic mm-level. handoff disable한 VLA-only ablation은 task #56 pending.
+5. **lateral 지표 유용**: lateral 작은데 (≤3mm) min_dist 크면(>15mm) → axial(Z) 부족. 반대면 → 회전/측면 정렬 부족. 천장의 성격 진단 가능.
+
+### 권장 metric set (이후 모든 eval에 적용)
+
+| 1차 지표 | 보조 |
+|---|---|
+| **close_5mm (%)** | close_3mm, close_10mm |
+| **median(min_dist) mm** | median(final_dist) |
+| **median(lateral) mm** | (axial = sqrt(min_dist² − lat²) 별도 계산 가능) |
+| angle ≤ 10° + min_dist ≤ 10mm % | hold-time 유지 (현재 미수집) |
+| median(steps) on success | early-stop 효율성 |
+
+SR은 **참고용**으로만, 헤드라인 metric에서 제외. paper figure도 close_5mm + min_dist scatter로 가야 함.
+
+---
+
+## 2026-05-18 실배포용 최종 정리 + 두 가지 surprise
+
+### Surprise 1: VLA-only가 handoff 포함과 **완전 동일**
+unfreeze_last4/checkpoint_1000 (seed 2031) on WIDE 54ep, img512, no sensor_stop, retreat=0.5:
+
+| 구성 | SUCCESS | FAIL | SR | close_5mm | med(min_dist) |
+|---|---:|---:|---:|---:|---:|
+| handoff ON | 33 | 21 | 61.11% | 66.7% | 3.7mm |
+| **handoff OFF (VLA-only)** | **33** | **21** | **61.11%** | **66.7%** | **3.7mm** |
+
+→ **이 ckpt는 handoff 없어도 동일**. VLA가 이미 5mm 안에 들어감, handoff 12mm trigger가 실제로 보정 안 함.
+→ **real 배포 시 handoff/KP 미구현 무관**. VLA-only 그대로 가도 sim 성능 그대로.
+
+### Surprise 2: HOLD_focus_v2/3000 baseline은 약함
+HOLD_focus_v2/checkpoint_3000.pt (frozen, 3000 step fresh) WIDE img512+nss+handoff r=0.5:
+- **SR 25.93% (14/54)** ← 예상보다 낮음
+- 이전 lr_low/3k frozen 50%은 다른 ckpt (HARD_cotrain_lr_low, lr=1e-6 cotrain on HOLD_focus_v2 base, retreat=1)
+
+→ "frozen baseline 50%"이라는 표현은 **HOLD_focus_v2 단독 학습이 아니라 HARD_cotrain_lr_low**의 수치. paper baseline 후보 재정리 필요.
+
+### 실배포 최종 추천 (2026-05-18 확정)
+
+**A. 추천 1순위 — unfreeze_last4/checkpoint_1000**
+- 경로: `checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_unfreeze_last4/checkpoint_1000.pt`
+- train-config: `config/sim_train_align_siglip2_b24_ft10mm_unfreeze_last4_config.yaml`
+- sim 성능: SR 61.11%, close_5mm 66.7%, med(min_dist) 3.7mm
+- 특기: **VLA-only로도 동일 성능** → real_eval_align.py 그대로 사용 가능
+- 단점: seed 2031 lucky strike (재학습 못 함), 하지만 weight는 진짜 잘함
+
+**B. fallback — HARD_cotrain_lr_low/checkpoint_3000** (검증 필요)
+- 경로: `checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain_lr_low/checkpoint_3000.pt`
+- 이전 r=1.0 eval: SR 50%, close_5mm 46.3% (config 삭제됐으니 train-config 재현 어려움)
+
+**C. 향후 진행 중 — HOLD_focus_v2 multi-seed (seed 2027, 2028)**
+- train 진행 중 (~75분). 결과 보고 paper headline 안정 후보 확정 시도.
+
+### Real 배포 명령 (확정)
+```bash
+bash Run_Real_Eval_Align.sh \
+  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_unfreeze_last4/checkpoint_1000.pt \
+  --train-config config/sim_train_align_siglip2_b24_ft10mm_unfreeze_last4_config.yaml \
+  --skip-home --dry-run --max-steps 20      # smoke test
+# 정상이면 --dry-run 빼고 --max-steps 100~150
+```
