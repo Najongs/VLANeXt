@@ -81,12 +81,16 @@ FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
 # 0.1 = sharper trapezoid. Lower = more time at constant velocity, less "stop-near-goal" bias.
 FINE_ALIGN_ACCEL_FRAC = 0.15
 
-# --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
-PERTURB_POS_XY_MM = 5.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MIN_MM = -5.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
-PERTURB_POS_Z_MAX_MM = 5.0  # Z축 상한 (mm)
-PERTURB_ANGLE_DEG = 5.0    # 각도 perturbation 범위 (±deg)
-ALLOW_OCCLUDED = False      # True 시 tool_camera에서 needle tip이 가려져도 폐기하지 않음
+# --- Perturbation 설정 (HARD variant: eval realistic ±10° + 여유) ---
+PERTURB_POS_XY_MM = 25.0       # legacy fallback (사용 안 함)
+PERTURB_POS_X_MIN_MM = 5.0     # X: +15 corner fill (eval x=+15 cell 보완)
+PERTURB_POS_X_MAX_MM = 25.0
+PERTURB_POS_Y_MIN_MM = -35.0   # Y: -25 corner fill (eval y=-25 cell 보완)
+PERTURB_POS_Y_MAX_MM = -15.0
+PERTURB_POS_Z_MIN_MM = -10.0
+PERTURB_POS_Z_MAX_MM = 10.0
+PERTURB_ANGLE_DEG = 15.0
+ALLOW_OCCLUDED = False
 
 # --- 성공 조건 ---
 ALIGN_THRESHOLD_M = 0.002   # needle tip - trocar entry 거리 (m)
@@ -95,23 +99,16 @@ ALIGN_HOLD_STEPS = 10       # threshold 이내 연속 유지 횟수
 # --- Task Instruction ---
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
-# --- Holding (정렬 완료 후 자세 유지 녹화) ---
-HOLD_RECORD_STEPS = 10           # 정렬 완료 후 녹화 control steps
+# --- Holding (HARD: hold mass 3× — time_near 학습) ---
+HOLD_RECORD_STEPS = 30           # 10 → 30
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
-TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
-MAX_CTRL_STEPS = 250        # 녹화 control step 상한 (초과 시 에피소드 폐기)
+TIMEOUT_SEC = 40.0          # 30 → 40 (어려운 케이스 시간 여유)
+MAX_CTRL_STEPS = 350        # 250 → 350
 
 # --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
 RETREAT_MM = 1.0           # insertion axis 반대 방향 retreat (mm)
-
-# --- Phantom randomization range (meters / degrees) ---
-# run_parallel.py가 patch함. 기존 bimodal(Y에 따라 angle 0°/-90° 고정) 폐기.
-PHANTOM_X_RANGE_M = (-0.025, 0.025)
-PHANTOM_Y_RANGE_M = (-0.025, 0.075)
-PHANTOM_Z_RANGE_M = (0.0, 0.0)
-PHANTOM_ANGLE_RANGE_DEG = (-25.0, 25.0)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
@@ -301,22 +298,37 @@ def trapezoid_step(t, accel_frac=0.2):
 
 
 def randomize_phantom_pos(model, data, phantom_id, rot_id, combo_counts=None):
-    """팬텀 위치/회전 랜덤화 (uniform random in configured range).
-
-    combo_counts: 호환용 인자 (사용 안 함). 이전 bimodal 로직 폐기 후
-                  PHANTOM_*_RANGE_* 모듈 변수 기반 uniform sampling으로 단순화.
+    """팬텀 위치/회전 랜덤화.
+    combo_counts: {(angle, z_dir): count} — 4-way 균등 배분용 카운터.
+                  덜 모인 각도 구간을 우선 선택. None이면 50/50 랜덤.
     """
-    offset_x = np.random.uniform(*PHANTOM_X_RANGE_M)
-    offset_y = np.random.uniform(*PHANTOM_Y_RANGE_M)
-    offset_z = np.random.uniform(*PHANTOM_Z_RANGE_M)
-    random_angle_deg = float(np.random.uniform(*PHANTOM_ANGLE_RANGE_DEG))
+    # X: [-0.03, 0.05] (phantom_grid_test_v3 결과: X=-0.05 좌측, X=0.053+ 우측 실패)
+    offset_x = np.random.uniform(-0.03, 0.05)
+    # Y=-0.24~-0.20 제외 (회전 전환 경계 + IK 실패 다발 구간, phantom_grid_test_v3 결과)
+    # combo_counts에서 각도별 합산으로 덜 모인 쪽 우선 선택
+    if combo_counts is not None:
+        count_0 = combo_counts.get((0, "pos"), 0) + combo_counts.get((0, "neg"), 0)
+        count_m90 = combo_counts.get((-90, "pos"), 0) + combo_counts.get((-90, "neg"), 0)
+        pick_m90 = count_m90 <= count_0
+    else:
+        pick_m90 = np.random.random() < 0.5
+    if pick_m90:
+        offset_y = np.random.uniform(-0.4, -0.24)   # → angle -90°
+    else:
+        offset_y = np.random.uniform(-0.20, 0.0)    # → angle 0°
+    offset_z = 0.0
 
     model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
+
+    if offset_y >= -0.25:
+        random_angle_deg = 0 # np.random.uniform(-15, 15)
+    else:
+        random_angle_deg = -90 # np.random.uniform(-15 - 90, 15 - 90)
 
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
     model.body_quat[rot_id] = new_quat
-    print(f">>> Randomize: Pos=({offset_x:.3f}, {offset_y:.3f}, {offset_z:.3f}), Angle={random_angle_deg:.1f} deg")
+    print(f">>> Randomize: Pos=({offset_x:.2f}, {offset_y:.2f}), Angle={random_angle_deg:.1f} deg")
     mujoco.mj_forward(model, data)
     return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32), np.float32(random_angle_deg)
 
@@ -614,8 +626,8 @@ def main():
             else:
                 z_val = np.random.uniform(0, PERTURB_POS_Z_MAX_MM) / 1000.0
             perturb_xyz = np.array([
-                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
-                np.random.uniform(-PERTURB_POS_XY_MM, PERTURB_POS_XY_MM) / 1000.0,
+                np.random.uniform(PERTURB_POS_X_MIN_MM, PERTURB_POS_X_MAX_MM) / 1000.0,
+                np.random.uniform(PERTURB_POS_Y_MIN_MM, PERTURB_POS_Y_MAX_MM) / 1000.0,
                 z_val,
             ])
             # Apply directional bias if configured

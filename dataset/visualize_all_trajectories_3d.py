@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 
-python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/approach"
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
 python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
 
 # Multiple folders:

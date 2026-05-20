@@ -1,0 +1,77 @@
+project:
+  name: "DP_baseline_align"
+  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  log_interval: 1
+  save_interval: 5000
+  use_wandb: true
+
+data:
+  dataset_name: "sim_align"
+  data_root:
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  # 새 데이터 모두 모이면 아래 두 줄도 활성화:
+  # - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_eval_range_v1"
+  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1"
+
+  task_suite_name: ""
+  full_sequence: true
+  skip_history_padding: true
+
+  history_len: 8
+  future_len: 8
+  buffer_size: 4000
+
+  batch_size: 64
+  max_steps: 30000
+  num_workers: 4
+
+  input_modality: "image"
+  view_mode: "single"
+
+  cam_exterior: "tool_camera"
+  cam_wrist: ""
+  cam_top: ""
+
+  augmentation:
+    enabled: false
+
+model:
+  model_type: "dp"
+  # VLANeXt 공통 키 — DP는 대부분 무시
+  lmm_path: "vision_only"
+  vision_encoder_path: "google/siglip2-so400m-patch16-512"
+  action_dim: 6
+  proprio_dim: 6
+  use_sensor: false
+  use_proprio_input_vlm: true
+  use_action_input_policy: false
+  # DP-specific hyper-params (diffusion_policy.py 기본값과 동일, override 가능)
+  dp:
+    vision_feat_dim: 512
+    proprio_emb_dim: 64
+    diffusion_step_embed_dim: 128
+    unet_down_dims: [256, 512, 1024]
+    unet_kernel_size: 5
+    n_groups: 8
+    num_train_timesteps: 100
+    num_inference_timesteps: 16
+    beta_schedule: "squaredcos_cap_v2"
+    prediction_type: "epsilon"
+    vision_pretrained: true
+
+train:
+  seed: 2026
+  resume_path: ""
+  reset_optimizer_scheduler: true
+  pretrained_checkpoint: ""
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-6
+  warmup_steps: 500
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  device: "cuda"
+  distributed: false
+  dist_backend: "nccl"
+  deepspeed:
+    enabled: false

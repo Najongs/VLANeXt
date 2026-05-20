@@ -27,6 +27,8 @@ except ImportError:
 
 from src.models.VLANeXt import VLANeXt
 from src.models.rt2_like_baseline import RT2LikeBaseline
+from src.models.act_policy import ACTPolicy
+from src.models.diffusion_policy import DiffusionPolicy
 from src.datasets.libero_act import LiberoAct
 from src.datasets.droid_act import DroidAct
 from src.datasets.sim_act import SimAct
@@ -524,7 +526,49 @@ def train(config):
     pretrained_ckpt_path = config['train'].get('pretrained_checkpoint')
     has_pretrained_ckpt = (pretrained_ckpt_path and os.path.exists(pretrained_ckpt_path))
     model_type = config['model'].get('model_type', 'vlanext')
-    if model_type == 'rt2_baseline':
+    if model_type == 'act':
+        if global_rank == 0:
+            print("Initializing ACT (Action Chunking Transformer) baseline...")
+        act_cfg = config['model'].get('act', {})
+        model = ACTPolicy(
+            action_dim=config['model']['action_dim'],
+            num_actions=config['data']['future_len'],
+            num_history=config['data']['history_len'],
+            hidden_dim=act_cfg.get('hidden_dim', 512),
+            num_encoder_layers=act_cfg.get('num_encoder_layers', 4),
+            num_decoder_layers=act_cfg.get('num_decoder_layers', 6),
+            num_heads=act_cfg.get('num_heads', 8),
+            feedforward_dim=act_cfg.get('feedforward_dim', 2048),
+            dropout=act_cfg.get('dropout', 0.1),
+            latent_dim=act_cfg.get('latent_dim', 32),
+            kl_weight=act_cfg.get('kl_weight', 10.0),
+            vision_pretrained=act_cfg.get('vision_pretrained', True),
+            vision_encoder_path=config['model'].get('vision_encoder_path', "google/siglip2-so400m-patch16-512"),
+            use_proprio_input_vlm=use_proprio_input_vlm,
+        ).to(device, dtype=torch.bfloat16)
+    elif model_type == 'dp':
+        if global_rank == 0:
+            print("Initializing Diffusion Policy (Conditional UNet1D) baseline...")
+        dp_cfg = config['model'].get('dp', {})
+        model = DiffusionPolicy(
+            action_dim=config['model']['action_dim'],
+            num_actions=config['data']['future_len'],
+            num_history=config['data']['history_len'],
+            vision_feat_dim=dp_cfg.get('vision_feat_dim', 512),
+            proprio_emb_dim=dp_cfg.get('proprio_emb_dim', 64),
+            diffusion_step_embed_dim=dp_cfg.get('diffusion_step_embed_dim', 128),
+            unet_down_dims=tuple(dp_cfg.get('unet_down_dims', [256, 512, 1024])),
+            unet_kernel_size=dp_cfg.get('unet_kernel_size', 5),
+            n_groups=dp_cfg.get('n_groups', 8),
+            num_train_timesteps=dp_cfg.get('num_train_timesteps', 100),
+            num_inference_timesteps=dp_cfg.get('num_inference_timesteps', 16),
+            beta_schedule=dp_cfg.get('beta_schedule', 'squaredcos_cap_v2'),
+            prediction_type=dp_cfg.get('prediction_type', 'epsilon'),
+            vision_pretrained=dp_cfg.get('vision_pretrained', True),
+            vision_encoder_path=config['model'].get('vision_encoder_path', "google/siglip2-so400m-patch16-512"),
+            use_proprio_input_vlm=use_proprio_input_vlm,
+        ).to(device, dtype=torch.bfloat16)
+    elif model_type == 'rt2_baseline':
         if global_rank == 0:
             print("Initializing RT2LikeBaseline model...")
         model = RT2LikeBaseline(
@@ -740,6 +784,11 @@ def train(config):
                 local_crop_enabled=config['data'].get('local_crop_enabled', False),
                 local_crop_size=config['data'].get('local_crop_size', 320),
                 use_keypoint_proprio=config['model'].get('use_keypoint_proprio', False),
+                overlay_enabled=config['data'].get('overlay', {}).get('enabled', False),
+                overlay_color=tuple(config['data'].get('overlay', {}).get('color', [255, 0, 0])),
+                overlay_radius_px=config['data'].get('overlay', {}).get('radius_px', 3),
+                overlay_dropout_prob=config['data'].get('overlay', {}).get('dropout_prob', 0.0),
+                overlay_jitter_std_px=config['data'].get('overlay', {}).get('jitter_std_px', 0.0),
             )
         elif dataset_name == "sim_insertion":
             ds = SimActInsertion(

@@ -1,889 +1,792 @@
-# Fine-align 실험 정리 (2026-05-12 ~ 2026-05-17)
+# Fine-Align Experiments
 
-## 🧭 2026-05-17 02:00 현재 상태 요약 (compact 대비)
-
-**핵심 finding 5종**:
-1. **Eval SR 신뢰 불가**: `--retreat-mm` 기본 10mm = 트로카 진입점 5~15mm 앞도 success 처리. 데이터셋 RETREAT_MM=1.0mm 대비 너무 느슨. **SR 보지 말고 continuous metric (lat/ang/min_dist) 봐야 함**.
-2. **sensor_stop이 hard regime에서 false-positive 다발**: dist 100~250mm 인 episode도 SUCCESS[sensor_stop] 처리. raw SR 부풀려짐. `--sensor-stop` 빼면 lr_ultra hard40 raw 75%→5%.
-3. **lr_ultra(1e-6) vs lr_low(2.5e-6) trade-off**: lr_ultra median lat 3.6mm (vs lr_low 6.5mm), lat<5mm 13/24 vs 8/24. lr_low가 sub-mm <1mm은 3 vs 2로 약간 우. hard40 clean: lr_low 10% > lr_ultra 5% — lr_low가 hard generalization 우세.
-4. **handoff contribution = sensor_stop 효과 일체**: sensor_stop OFF일 때 handoff ON/OFF SR 동일 (lr_low 33=33, lr_ultra 25=25). handoff = visual servo + early termination 일체로 봐야 함.
-5. **Eval output dir collision**: 같은 ckpt 다중 eval시 `_shard0/metrics_summary.csv` 덮어쓰기. 다른 ckpt면 OK.
-
-**Fair-compare (realistic24, sensor_stop ON, handoff ON, retreat=10) continuous metric**:
-
-| ckpt | median lat | lat<5mm | lat<2mm | lat<1mm |
-|---|---|---|---|---|
-| HARD_cotrain_lr_low/2k | 6.54mm | 8/24 | 5/24 | **3/24** |
-| HARD_cotrain_lr_ultra_low/2k | **3.60mm** | **13/24** | **8/24** | 2/24 |
-
-**Clean (sensor_stop OFF) SR by eval**:
-
-| eval | lr_low/2k | lr_ultra/2k |
-|---|---|---|
-| realistic24 clean handoff ON | 33% | 25% |
-| realistic24 VLA-only (handoff OFF) | 33% | 25% |
-| hard40 clean | **10%** | 5% |
-
-**진행 중 (smi-1 train + smi-2 eval)**:
-- smi-1: `lr_ultra_low_EXT` 학습 — base=lr_ultra_low/ckpt_3000, lr=5e-7, max_steps=3000, ~30min
-- smi-2: retreat=1 fast sweep 시작 (xy=1, ang=3, rep=2 → 6ep, 5min/ckpt)
-
-**2026-05-17 03:50 — retreat=1 fast sweep 결과 (6ep mini grid: xy=±10, z=5, ang=±10, rep=2)**:
-
-| ckpt | SR[dist] | median lat | lat<2mm | dist (ep1-6, mm) |
-|---|---|---|---|---|
-| HARD_cotrain_lr_ultra_low/2k | 5/6 (83%) | 1.5mm | 4/6 | 2.3, 2.5, 3.7, 2.8, 5.1, 14.2(fail) |
-| HARD_cotrain_lr_low/2k | **6/6 (100%)** | **1.05mm** | 4/6 | 2.4, 2.4, 2.9, 2.2, 4.6, 4.8 |
-| HARD_cotrain_lr_ultra_low_EXT/500 | 5/6 (83%) | 1.25mm | 4/6 | 2.4, 2.5, 2.9, 2.5, 4.9, 20.8(fail) |
-| HARD_cotrain_lr_ultra_low_EXT/1000 | 4/6 (67%) | 2.05mm | 2/6 | 2.4, 2.4, 3.3, 3.8, 4.8(fail), 9.7(fail) |
-| HARD_cotrain_lr_ultra_low_EXT/2500 | 5/6 (83%) | 4.2mm | 2/6 | 2.4, 2.4, 4.2, 4.2, 4.7, 29.2(fail) |
-| HARD_cotrain_lr_ultra_low_EXT/3000 | **3/6 (50%)** | - | 2/6 | 2.5, 2.4, 4.0, 4.1(fail), 22.5(fail), 23.3(fail) |
-| HARD_cotrain_lr_low/3k | 5/6 (83%) | 1.3mm | 4/6 | 2.4, 2.3, 2.8, 2.5, 5.2(fail), 4.4 |
-| HARD_cotrain_lr_ultra_low/3k | 5/6 (83%) | 2.15mm | 2/6 | 2.4, 2.5, 3.2, 3.3, 5.4(fail), 4.9 |
-| NEW_finetune/10000 (paper baseline) | **2/6 (33%)** | catastrophic | 2/6 | 2.9, 2.9, 36.6, 41.5, 43.3, 43.0 |
-
-- **lr_low/2k가 retreat=1 mini-grid에서 lr_ultra/2k보다 우수**: SR 100% vs 83%, median lat 1.05mm vs 1.5mm, max lat 4.6mm vs 14.2mm (fail).
-- **EXT 학습 확정 실패**: lr=5e-7로 base(lr_ultra/3k)에서 추가 학습 → 500은 base 동급, 1000부터 degrade (67%), 2500은 83%로 회복하지만 4.2mm로 정밀도 떨어짐, 3000은 50%로 더 심하게 무너짐. **추가 fine-tune 회의적 → base lr 자체가 sweet spot**.
-- **lr_low 2k > 3k**: lr_low/3k도 sub-mm 영역에선 6/6→5/6으로 살짝 over-training 신호. **lr_low/2k가 fine-align champion**.
-- **NEW_finetune/10000 fragile**: angle=0° 정상 동작하지만 angle ≠ 0 에선 36~43mm catastrophic — HARD_cotrain 계열이 angle perturbation 훨씬 강건. **HARD 데이터 cotrain이 본질적**.
-- **paper headline 후보**: retreat=1 mini-grid(xy=±10, ang=±10, z=5) 6ep에서 NEW_finetune(VLA base) 33% → HARD_cotrain_lr_low 100% — sub-mm SR 3배 gap.
-
-**2026-05-17 05:45 — retreat=1 WIDE 54ep (xy=±10/0/+10, ang=±10/0/+10, z=5, rep=2)**:
-
-| ckpt | SR | median lat | mean lat | <1mm | <2mm | <5mm |
-|---|---|---|---|---|---|---|
-| HARD_cotrain_lr_low/2k | **50% (27/54)** | **4.15mm** | 10.0mm | 3 | 11 | 30 |
-| HARD_cotrain_lr_ultra_low/2k | 44% (24/54) | 6.95mm | 13.0mm | 2 | 7 | 22 |
-| NEW_finetune/10k (paper baseline) | **26% (14/54)** | **26.45mm** | 38.2mm | 4 | 5 | 10 |
-| HARD_cotrain_lr_low/1k | 41% (22/54) | 6.70mm | 14.3mm | 5 | 12 | 22 |
-| HARD_cotrain_lr_low/3k | 50% (27/54) | 4.10mm | 10.6mm | 2 | 12 | 33 |
-
-**retreat=0.5mm WIDE 54ep**:
-
-| ckpt | SR | median lat | <1mm | <2mm | <5mm |
-|---|---|---|---|---|---|
-| HARD_cotrain_lr_low/2k | 42.6% (23/54) | 4.65mm | 2 | 8 | 28 |
-| HARD_cotrain_lr_low/3k | **48.1% (26/54)** | **4.20mm** | 3 | 10 | 27 |
-| NEW_finetune/10k (paper baseline) | **24.1% (13/54)** | - | - | - | - |
-| HARD_cotrain_lr_low/3k VLA-only | **37.0% (20/54)** | - | - | - | - |
-| HARD_cotrain_lr_low/2k VLA-only | **24.1% (13/54)** | - | - | - | - |
-| NEW_finetune/10k VLA-only | **22.2% (12/54)** | - | - | - | - |
-
-**Handoff contribution (r=0.5 WIDE)**:
-- lr_low/3k: handoff 48.1% - VLA-only 37.0% = **+11.1%pt**
-- lr_low/2k: handoff 42.6% - VLA-only 24.1% = **+18.5%pt** ← 2k가 VLA 약해서 handoff 효과 더 큼
-
-→ paper takeaway: handoff(sensor servo) 자체가 method 핵심. 약한 VLA에서 더 큰 lift.
-
-| method | handoff | VLA-only | Δ handoff |
-|---|---|---|---|
-| HARD_cotrain lr_low/3k | 48.1% | 37.0% | +11.1%pt |
-| HARD_cotrain lr_low/2k | 42.6% | 24.1% | +18.5%pt |
-| NEW_finetune/10k | 24.1% | 22.2% | +1.9%pt |
-
-→ NEW_finetune은 lateral cue 약해서 handoff sensor servo도 못 살림. **HARD_cotrain의 fine-grained alignment가 handoff feasibility 자체를 만든다**.
-
-**2026-05-17 15:55 — HARD_v4 cotrain 시작 (PID 138218)**:
-- Base: lr_low/3k checkpoint_3000.pt
-- 추가 데이터: HARD_v4_y75 (1305 ep, Y range [-25,+75]mm 확장)
-- 총 13 paths (기존 3 + 신규 10 worker dirs)
-- lr 1e-6, max 3000, batch 16, seed 2028
-- 목표: dy=+25/+50/+75 OOD failure 회복
-
-**2026-05-17 17:10 — HARD_v4 cotrain 🚨 REGRESSION (apples-apples MINI 6ep r=0.5)**:
-
-| ckpt | SR | 패턴 |
-|---|---|---|
-| baseline lr_low/3k | **4/6 (67%)** | ang=-10° 2 OK + ang=0° 2 OK + ang=+10° 2 FAIL |
-| HARD_v4_500 | 2/6 (33%) | **ang=0° 모두 잃음** |
-| HARD_v4_1k | 2/6 | 동일 |
-| HARD_v4_2k | 2/6 | 동일 |
-| HARD_v4_3k | 2/6 | 동일 |
-| HARD_v4_final | 2/6 | 동일 |
-
-**HARD_v4 데이터 분포 (1305 ep)**: Y[-25,+58] (목표 +75 못 채움), angle ±15, |ang|<2°=201/1305 (15%) — 분포는 적절.
-
-**원인 미궁**:
-- 500 step만에 즉시 regress → catastrophic forgetting 의심
-- angle=0° 손실 → 새 데이터의 angle=0° GT가 약간 다를 가능성 (시각/액션)
-- Y >+50 region 13%로 적음 — 학습에 의미있는 영향 작을 듯
-
-**후속 옵션**:
-1. HARD_v4 데이터 vs HARD_v3 데이터 시각 비교 (render 차이 검증)
-2. lr 5e-7로 더 conservative cotrain (당장 다음 시도)
-3. Old:New = 17:3 비중 너무 큰가 — weighted sampling 또는 더 많은 v4 데이터 필요
-4. HARD_v4 폐기, **paper number = lr_low/3k r=0.5 WIDE 48.1%** 로 확정
-
-**현재 paper 최강 SR**: lr_low/3k r=0 WIDE = **53.7% (29/54)** — strictest retreat에서도 가장 강.
-
-**📊 Paper headline r=0.5 WIDE 54ep**: HARD_cotrain_lr_low/3k 48.1% vs NEW_finetune 24.1% = **2x SR gain**. r=1.0 WIDE: 50% vs 26% = 1.9x. Consistent.
-
-- retreat=0.5에서 HARD_cotrain_lr_low/2k는 r1.0 대비 -7%pt (50→43%). 정밀도(median lat)는 비슷한 4mm 수준 유지 — failure는 dist criterion(depth)에서 발생.
-
-**2026-05-17 12:30 — Failure-cell 분석 (lr_low/3k, r=1.0 WIDE)**:
-
-xy×angle 27 cells × 2 rep = 54 ep 중 27/54 fail. cell별 패턴:
-
-| 패턴 | 결과 | 진단 |
-|---|---|---|
-| **dy=+75mm 전 cell (5 cells × 2)** | **0/10 FAIL** | Y far 출발점, VLA가 도달 못함. lateral 9~103mm |
-| dy=+25 with dx≥0, ang≥0 (3 cells) | 0/6 FAIL | positive 조합에서 local minima. lateral 15~61mm |
-| dy=-25 (전 9 cells) | **12/18 OK** | best regime |
-| angle=-10° (18 ep) | 12/18 OK | |
-| angle=0° (18 ep) | **7/18 worst** | VLA가 angle cue 부재시 confidence 떨어짐 |
-| angle=+10° (18 ep) | 8/18 | |
-
-**개선 후보 (우선순위)**:
-1. **HARD_v3 데이터 생성** — dy∈[+25,+75] 범위 high-density + 모든 angle 조합. 현 HARD가 +Y 영역 underrepresented 의심.
-2. **Action smoothing (EMA α=0.7)** — angle=0 fail이 oscillation일 가능성. 추론 코드만 수정.
-3. **VLA proprio에 trocar relative pose** — visual cue가 약한 far-Y에서 proprio가 보완.
-
-**🚨 CRITICAL — 학습 데이터 분포 점검 (2026-05-17 12:40)**:
-
-| dataset | n | X range | Y range | angle range |
-|---|---|---|---|---|
-| 10mm_fine_align_00_tip | 8883 | ±10 | ±10 | ±5 |
-| 10mm_fine_align_00_tip2 | 4902 | ±10 | ±10 | ±5 |
-| HARD_ang15_hold30_part2 | 2000 | ±15 | ±15 | ±15 |
-
-**확정**: WIDE eval grid는 `y_range=(-25, +75)` 비대칭 (sim_eval_align_only.py:239-240).
-`xy_steps=3`이면 y ∈ {-25, 0+something, +75} 샘플링 — **3 cell 중 2개가 +Y OOD**.
-
-**결론**: lr_low/3k WIDE 50% SR은 1/3 in-distribution (y=-25) + 2/3 OOD (y=+25/+75) 평균.
-in-distribution만 보면:
-- y=-25 (18 ep): **12/18 = 67% SR** ← 실제 VLA 실력
-- y=+25 (18 ep): 9/18 = 50% (border OOD)
-- y=+75 (18 ep): **0/18 = 0%** ← pure OOD failure
-
-**Action items**:
-1. **HARD_v4 데이터 생성**: Y range를 [-15, +75] 또는 [-25, +75]로 확장 + ang ±15 + xy ±15. ~2000~3000 episode.
-2. **HARD_v3 base + Y-expanded cotrain**: 현 lr_low/3k에서 추가 cotrain (lr 1e-6 ~2k step).
-3. **OOD를 paper에 정직 보고**: in-distribution SR 67% / OOD SR 0% 분리 표시. 또는 Y range 조정해서 in-distribution coverage 확보 후 비교.
-
-
-**Stricter retreat eval (lr_low/2k, mini 6ep)**:
-
-| retreat | SR | median lat | episodes (lat mm) |
-|---|---|---|---|
-| 1.0mm | 6/6 (100%) | 1.05mm | 1.0, 1.0, 1.1, 0.7, 4.2, 4.6 |
-| **0.5mm** | **6/6 (100%)** | **2.1mm** | 1.0, 1.0, 2.0, 2.2, 4.7, 4.3 |
-| 0.0mm | 4/6 (67%) | 1.65mm | 1.2, 1.1, 2.2, 1.5, 1.8(fail), 2.4(fail) |
-| **0.5mm (lr_low/3k)** | **6/6 (100%)** | **1.1mm** | 1.1, 1.1, 1.1, 1.1, 2.7, 4.9 |
-
-- retreat=0(엄격 한계)에서도 lateral은 sub-2.5mm로 우수 — fails는 dist criterion(5/7mm)에 의해서지 정렬 자체는 잘됨.
-- **시사점**: lateral 정렬 정밀도는 lr_low/2k에서 stable 1~2mm. dist=lateral+depth이라 depth control도 필요.
-- **lr_low/3k retreat=0.5도 6/6 100%** (lr_low/2k와 동급). 두 ckpt 모두 stricter retreat=0.5 통과 — 정밀도 신뢰 확정.
-
-**Handoff Ablation (WIDE 54ep, retreat=1, lr_low/2k)**:
-
-| flags | SR (mid) | comment |
-|---|---|---|
-| lr_low/2k handoff+sensor_stop | 50% (27/54) | median lat 4.15mm |
-| lr_low/2k VLA-only | **29.6% (16/54)** | median lat 6.10mm — handoff +20%pt |
-| lr_low/3k handoff+sensor_stop | 50% (27/54) | median lat 4.10mm |
-| lr_low/3k VLA-only | **38.9% (21/54)** | median lat 4.25mm — 2k VLA-only(6.10mm 30%) 대비 정밀, +9%pt SR |
-
-- **lr_low/2k: handoff+sensor_stop이 +20%pt** (50% vs 30%). lr_low/3k: VLA-only도 정밀(median 4.0mm). 3k는 base VLA가 더 refined하여 handoff 효과 작을 가능성.
-
-- **lr_low/2k > lr_ultra/2k 확정 (WIDE 54ep)**: SR 50% vs 44%, median lat 4.15mm vs 6.95mm, lat<5mm 30 vs 22, lat<2mm 11 vs 7. mini 6ep와 일관된 결과.
-- **HARD_cotrain (lr_low/2k) vs NEW_finetune/10k baseline**: SR 50% vs 26% (≈2x), median lat 4.15mm vs **26.45mm** (6x 정밀도), lat<2mm 11 vs 5. **paper headline 가능 수치**.
-- **lr_low ckpt sweep WIDE**: 1k=41% (under-trained, <2mm=12 비슷하지만 <5mm 22 떨어짐), 2k=50%, 3k=~50%+ (median 4.10mm < 2k 4.15mm, <5mm=33 > 2k 30). **lr_low/3k가 marginal champion** 가능성.
-- 새 axis 진입: stricter retreat=0.5mm로 lr_low/2k mini eval (smi-2) — sub-mm 정렬 한계 검증.
-- lr_ultra/2k ep6 fail = angle +10° + xy(+10,0), sensor 0.5mm 도달했지만 lateral 10.3mm — sensor handoff polish-fine이 axis 잘못 잡음 (du=-0.9, dv=+0.9 발산).
-- **시사점**: realistic24 retreat=10에선 lr_ultra가 우세였지만 stricter retreat=1에선 lr_low의 sub-mm 정밀도 우위가 다시 드러남. 두 ckpt 모두 sub-mm 영역에서는 비등 (lat<2mm: 4 vs 4).
-
-**다음 axis 후보 (paper 가치 순)**:
-- (a) inference smoothing (action chunking EMA) — 코드만 수정, 즉시 확인
-- (b) Hold mass weighting (close-frame upweight) — sub-mm 정밀도 push
-- (c) Vision resolution 256→384/512 — SigLIP2 patch bottleneck
-- (d) Real domain eval — KP head는 real cotrain 됨
+Needle-trocar mm-level alignment using vision-only VLA. Calibration-free.
+Last reorg: 2026-05-19. Older logs in `attic/EXPERIMENTS_fine_align.md.bak_*`.
 
 ---
-# Fine-align 실험 정리 (2026-05-12 ~ 2026-05-15)
 
-Needle/trocar mm-level 정렬. Calibration-free vision policy + sensor handoff hybrid.
+## 1. Problem & Contribution
+
+**Task**: Surgical robot needle aligns to trocar entry within 5mm + 10° + 20-step hold.
+
+**3-phase pipeline**: Approach (far → near, `dataset/approach`) → **Fine-align (this doc, ±15mm → mm precision)** → Insertion (sensor grid sweep + axis push).
+
+**Why not original VLANeXt** (`config/libero_train_config.yaml`):
+- Qwen3-VL-2B tokenizer compresses vision tokens
+- SigLIP2-base@256 has insufficient pixel resolution for mm tasks
+- Result: alignment fails
+
+**Our solution — vision-only VLA variant**:
+- Drop Qwen LLM (single-instruction task)
+- SigLIP2-so400m-patch16-**512** native, frozen
+- 3-layer MLP projector (LLaVA-style) → policy hidden 1152
+- Action diffusion head (10-step flow-match) + aux distance loss
+- Cotrain mix: tip + tip2 + HARD_ang15_hold30_part2
+
+→ Contribution: removing LLM + scaling frozen vision encoder + diffusion policy beats Qwen-VL on mm precision.
+
+---
+
+## 2. Model Architecture (champion)
 
 ```
-Vision-conditioned diffusion policy (SigLIP2 frozen + DP head)
-  └─ trocar 근처(<15mm) 자율 진입
-     │
-     ▼  inline KP trigger (KP lateral < thresh)
-     ▼  iterative KP visual servo, 3 iters @ α=0.7  (calibration-free)
-     ▼  sensor grid sweep — coarse 6mm/1mm → angle ±15° → fine 0.9mm/0.3mm → polish
-     ▼  insert push (axis 방향 8mm)
+Image 480×640 raw  ───►  SigLIP2-so400m-patch16-512 (frozen, bf16)
+                           │  1024 patches × 1152 dim
+                           ▼
+                         3-layer MLP projector (Linear-LN-SiLU ×3)
+                           │
+Proprio 6-DoF (×8 hist) ─► Linear(6→1152) ──► 8 tokens
+                           │                       │
+meta_queries (learnable) ─► 32 tokens              │
+                           │                       │
+        ┌──────────────────┴───────────────────────┘
+        ▼
+   concat [vision (1024) | proprio (8) | meta_queries (32)] = 1064 × 1152
+   (per SigLIP layer, condition_type=soft)
+        │
+        ▼
+   ActionDiffusionTransformer (depth=24, heads=16, queries=32)
+   layer-wise soft conditioning: action blocks ↔ SigLIP layers
+        │
+        ▼
+   Action chunk (8 steps × 6 DoF, Mecademic XYZ euler)
 ```
 
----
+**Loss** (simple linear sum):
+```
+total = main_flow_match + 0.1·loss_dct + 0.5·loss_aux_dist
+```
+- `loss_dct`: 1D DCT on action chunk time-axis (smoothness regularizer)
+- `loss_aux_dist`: ReLU(pred_dist − cur_dist + margin), near-goal sample weight ×10
+- DDL, future_image, spatial losses: disabled
 
-## 🏆 챔피언
-
-**ckpt**: `checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain/checkpoint_1000.pt`
-**Recipe**: HOLDv2/ckpt3000 base → (tip + tip2 + HARD_ang15_hold30_part2) cotrain, lr 5e-6, 1k step
-**Eval flag**: `--max-steps 400` (250→400 +8pp free gain)
-
-### Headline metrics (max=250 baseline; max=400 표기시)
-
-| Grid | n | SR | lat_med (succ) | ang_med (succ) | min reached |
-|---|---|---|---|---|---|
-| Realistic 12ep | 12 | 66.7% / **75.0%**(max400) | 2.60 | 4.6° | 1.10mm |
-| Realistic 24ep | 24 | 75.0% | 2.60 | - | 1.60mm |
-| **Realistic 90ep** ⭐ | 90 | **82.2%** | **2.70** | **4.60°** | **0.90mm** (sub-mm) |
-| Hard 20ep (angle±25° OOD) | 20 | 0% | - | - | - |
-
-90ep 분포 통계 (success only, n=74):
-- lateral: median 2.70mm (mean 2.64, p25–p75: 1.82–3.48, range 0.20–4.70)
-- angle: median 4.60° (mean 4.47, p25–p75: 2.90–6.35, range 0.40–9.20)
-- 3D dist: median 9.80mm (z standoff 9.0mm 지배 — insertion 단계 미포함)
+**Champion config**: `config/sim_train_align_siglip2_b24_ft10mm_aux_strong_config.yaml`
+- backbone frozen, condition_type soft, batch 24
+- aux weight 0.5 (강화), near_goal_scale 2mm
+- 10k steps (best ckpt = 10000)
 
 ---
 
-## 🧩 구성 요소
+## 3. Paper Main Eval Grid
 
-### Vision-conditioned policy
-- Encoder: SigLIP2-SO400m@512 **frozen** (text tower 미사용)
-- Head: 1152-dim diffusion policy (depth 24, heads 16), flow_match, 10 inference steps
-- proprio: ee_pose 6-D only (Mecademic intrinsic XYZ euler, mm + rad)
-- action: 6-D delta tip frame
-- aux_distance_loss: weight 0.5, near_goal_boost 10×
+27 cells per ckpt, evaluated at `image_size=512` (matches training).
 
-### Keypoint head (frozen SigLIP + tiny MLP)
-- 입력: tool_camera 256×256 LANCZOS
-- `uv_only`: trocar_uv 2D, real_val_2k median **4.4 px**
-- `dist_only`: tip→entry 1D (norm by 50mm), median **1.03 mm**
-- 학습: `cotrain_30k.h5` (sim 15k + real 15k), 8k step, lr 1e-4
-- Domain offset: real GT (-5,+10)px → `--kp-domain` 자동 보정
-
-### Sensor handoff (`scripts/sensor_handoff.py`)
-| Stage | dim | trial | step | window |
-|---|---|---|---|---|
-| KP iterative servo | u-v | ≤3 | α=0.7 | ±8mm/step |
-| Coarse sweep | u-v ⊥ axis | 49 | 1.0mm | ±3mm |
-| Angle sweep | rx/ry | 49 | — | ±15° |
-| Fine sweep | u-v | 49 | 0.3mm | ±0.9mm |
-| Polish (angle + fine) | both | 1× retry | — | — |
-| Insert push | axis | 3 | 2.7mm | — |
-
-- ALIGNED 기준: `sensor ≥ 25mm (through-hole) AND lateral < 1.5mm`
-- ALIGN_SUCCESS_HOLD_STEPS=20
-
-### Inline KP trigger
-VLA loop 중 KP lateral norm < trigger_mm(=12) → VLA 중단 → handoff sweep.
-
----
-
-## 🚀 Contribution
-
-1. **C1 (Enabler) — Calibration-free vision pipeline**: KP head가 픽셀→world delta 회귀, scene-specific extrinsic registration 불필요.
-2. **C2 (Core) — Vision→Tactile modality handoff**: VLA가 safe zone(8–12mm) 진입 → 1D sensor grid sweep 위임. Hard grid에서 VLA-only 0%인 케이스 살림.
-3. **C3 (Consequence) — Hardware consolidation**: C1+C2 결과로 4-DoF macro + 5-DoF guidance 이중 setup → 단일 6-DoF arm.
-
----
-
-## 📦 자산
-
-| 자산 | 경로 |
+| Axis | Values |
 |---|---|
-| **VLA best** ⭐ | `checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain/checkpoint_1000.pt` |
-| HOLDv2 prior (lateral anchor) | `b24_ft10mm_HOLD_focus_v2/checkpoint_3000.pt` |
-| NEW_finetune prior (angle robust, hard grid) | `b24_ft10mm_NEW_finetune/checkpoint_10000.pt` |
-| KP heads | `keypoint_trocar/{uv_only,dist_only}/head_best.pt` |
-| KP 학습 데이터 | `dataset/keypoint/cotrain_30k.h5` |
-| Sensor handoff | `scripts/sensor_handoff.py` |
-| Eval bridge | `scripts/sim_eval_align_only.py` |
-| Plot generator | `scripts/_paper_summary_plot.py` → `docs/paper_summary.png` |
+| x perturbation | −10, 0, +10 mm |
+| y perturbation | −25, 0, +25 mm |
+| z perturbation | 0 (fixed) |
+| phantom angle | −5°, 0°, +5° (paper main) / ±10° (stress) |
+| repeats | 1 |
 
----
+**Success criterion**: `dist(tip→goal_tip) ≤ 5mm AND |angle| ≤ 10° AND sensor > 20mm AND hold 20 steps`.
 
-## 📋 재현 명령
-
+**Run**:
 ```bash
-# Train VLA (champion)
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python -m scripts.train --config config/sim_train_align_siglip2_b24_ft10mm_HARD_cotrain_config.yaml
-
-# Train KP heads (parallel)
-CUDA_VISIBLE_DEVICES=0 python -u -m scripts.train_keypoint_uv_only \
-  --train-h5 dataset/keypoint/cotrain_30k.h5 --val-h5 dataset/keypoint/real_val_2k.h5 \
-  --out checkpoints/keypoint_trocar/uv_only --steps 8000 --batch-size 64 --lr 1e-4
-CUDA_VISIBLE_DEVICES=1 python -u -m scripts.train_keypoint_dist_only \
-  --train-h5 dataset/keypoint/cotrain_30k.h5 --val-h5 dataset/keypoint/real_val_2k.h5 \
-  --out checkpoints/keypoint_trocar/dist_only --steps 8000 --batch-size 64 --lr 1e-4
-
-# Eval (realistic, max=400 ← +8pp gain over 250)
-CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=egl \
-  __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
-  python -u -m scripts.sim_eval_align_only \
-    --checkpoint checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain/checkpoint_1000.pt \
-    --train-config config/sim_train_align_siglip2_b24_ft10mm_HARD_cotrain_config.yaml \
-    --uv-ckpt checkpoints/keypoint_trocar/uv_only/head_best.pt \
-    --dist-ckpt checkpoints/keypoint_trocar/dist_only/head_best.pt \
-    --kp-domain sim --kp-track-iters 3 --handoff --handoff-trigger-mm 12.0 \
-    --perturb-xy-mm 10 --perturb-y-min-mm -10 --perturb-y-max-mm 20 \
-    --perturb-z-min-mm 0 --perturb-z-max-mm 10 --perturb-angle-deg 10 \
-    --max-steps 400 --perturb-mode grid --xy-steps 2 --z-steps 1 --angle-steps 3 --repeats 1 \
-    --eval-seed 2026
-
-# Sweep video visualization (handoff 발동 episode에 sweep frame 캡처)
-HANDOFF_VIDEO_SWEEP=1 HANDOFF_VIDEO_SWEEP_HOLD=4  python -u -m scripts.sim_eval_align_only ...
-
-# Paper plot
-python -m scripts._paper_summary_plot
+TRAIN_CONFIG_OVERRIDE=config/sim_train_align_siglip2_b24_ft10mm_HARD_cotrain_lr_low_EVAL512_VIDEO_config.yaml \
+  GPUS=0,1 MUJOCO_GL=egl bash Run_Eval_Parallel.sh align <ckpt> \
+  --max-steps 250 --eval-seed 2026 --perturb-mode grid \
+  --xy-steps 3 --z-steps 1 --angle-steps 3 --repeats 1 \
+  --perturb-xy-mm 10 --perturb-y-min-mm -25 --perturb-y-max-mm 25 \
+  --perturb-angle-deg 5 --perturb-z-min-mm 0 --perturb-z-max-mm 0
 ```
 
-### Eval grid 정의
-
-| Grid | xy×z×angle×rep | 실제 | XY | Z | Angle |
-|---|---|---|---|---|---|
-| Realistic 12ep | 2×1×3×1 | 12 | ±10mm | 0–10mm | ±10° |
-| Realistic 24ep | 2×2×3×1 | 24 | ±10mm | 0–10mm | ±10° |
-| Realistic 90ep | 3×2×5×1 (expand) | 90 | ±10mm | 0–10mm | ±10° |
-| Hard 20ep | 2×1×5×1 | 20 | ±25mm | 0–25mm | ±25° |
+**Distance metric (important)**:
+- `min_dist_mm` (csv) = tip → trocar **entry point**
+- `dist` (check_success) = tip → **goal_tip** = entry − 10mm × axis (retreat hold position)
+- Success ⇒ `min_dist_mm ≈ 10mm` (intended retreat, NOT alignment error)
+- **True alignment error** = `|min_dist_mm − 10|`. Heatmap panel 3 = this.
 
 ---
 
-## ✅ 성공 기준
+## 4. Champion Results
 
-**SUCCESS**: 다음 동시 만족
-- `lateral < 5mm` AND `angle < 10°` AND **20 step hold**
-- 또는 sensor ≥ 25mm (through-hole) + lateral < 1.5mm
+🏆 **NEW CHAMPION (2026-05-20)**: `b24_ft10mm_aux_strong_v3/checkpoint_1000.pt` — **SR 88.9% (24/27)** on ang±5° grid.
+🏆 Previous: `b24_ft10mm_aux_strong/checkpoint_10000.pt` — SR 85.19% (23/27).
 
-종료 타입:
-- `SUCCESS[dist]` — VLA loop이 자체로 기준 만족 (handoff 미발동)
-- `SUCCESS[handoff]` — handoff sweep 거친 후 기준 만족 (rescue)
-- `SUCCESS[sensor_stop]` — needle이 hole 관통 신호 (sensor 5↓→15↑ spike)
-- `FAIL` — max_steps 도달
+### 27-cell ang±5° SR comparison
 
-Realistic 12ep에서 모든 success가 `[dist]` — VLA criterion이 5mm/10°로 비교적 관대해 handoff 발동 전 끝남. Hard grid에선 VLA-only 0%로 handoff/KP servo가 결정적.
+| Run | Steps | SR | Δ vs champion | y=−25 row recovery |
+|---|---:|---:|---:|---|
+| **v3/1000 (NEW)** | 1000 (finetune) | **88.9%** (24/27) | **+3.7pp** | 2/4 failed cells recovered |
+| aux_strong/10000 (prev champ) | 10000 | 85.19% (23/27) | baseline | 0/4 (all y=−25 fail) |
+| v3/2000-final | 2000-5000 | 85.2% (23/27) | +0pp | drifted back |
+| v2/1000-3000 (failed) | 1000-3000 | 44-52% | −33pp | regressed |
+| HARD_cotrain_lr_low/3000 (older) | 3000 | 70.37% @ ang±10 | — | — |
+
+**v3/1000 per-cell failures (3 total, all y=−25)**:
+- (0, −25, −5°): dist=19.6mm — overshot
+- (+10, −25, −5°): lateral=8.6mm — laterally off
+- (+10, −25, 0°): lateral=7.1mm — laterally off
+
+→ Improved from champion's 4 failures (all y=−25) to 3 failures. Cells (0, −25, 0°) and (0, −25, +5°) **recovered**. Remaining failures all at the −5° corner of y=−25, suggesting yaw alignment in negative-y direction is the residual bottleneck.
+
+### v3 winning recipe (Plan B — finetune from champion)
+**Config**: `config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v3_config.yaml`
+- **pretrained_checkpoint**: `aux_strong/checkpoint_10000.pt` (champion weights)
+- **reset_optimizer_scheduler**: true (fresh optimizer for new data adaptation)
+- **lr**: 5e-6 (champion's 1e-5 → halved, preserves champion knowledge)
+- **data mix** (4 sources):
+  - `approach_00` (full, ~5000 ep)
+  - `tip2` (full, ~50 ep)
+  - `approach_eval_range_v1` (NEW, **capped 1000 ep**)
+  - `align_phantom_range_v1` (NEW, **capped 200 ep**)
+- 5000 steps, best at **step 1000**.
+
+### v2 lesson learned (do not repeat)
+v2 used **uncapped** new data (5010 + 510 ep, ~50% of mix) + lr 1e-5 → SR dropped to 51.9% at step 1000-2000, then 44.4% at step 3000. Champion knowledge swamped by new distribution.
+**Key insight**: new data must be **down-sampled** for finetune, otherwise distribution shift causes catastrophic forgetting. v3's 1000+200 ep cap (~15% of mix) preserves champion behavior while exposing new boundary cells.
+
+### Baselines (in-house, no lerobot)
+
+| Run | params | SR @ retreat=10 | SR @ retreat=2 | Notes |
+|---|---:|---:|---:|---|
+| **VLANeXt v3/1000 (NEW champion)** | 1043M | **88.9%** (24/27) | **74.1%** (20/27) | SigLIP2-so400m frozen + diffusion |
+| VLANeXt champion (prev) | 1043M | 85.19% (23/27) | 66.7% (18/27) | same arch |
+| ACT (in-house) | 62M | 22.2% (best, ckpt_5k) | (not re-eval'd — baseline ceiling) | ResNet18 + CVAE + Transformer, scratch, 30k step |
+| DP (in-house) | 89M | 22.2% (best, ckpt_15k) | (not re-eval'd) | ResNet18 + ConditionalUnet1D, scratch, 30k step |
+
+**Retreat의 의미**: goal_tip이 trocar entry로부터 뒤로 빠진 거리. 데이터 생성은 retreat=1mm (tip이 거의 entry까지)이지만 champion 학습 데이터(approach_00/tip2)는 retreat=10mm로 만들어짐. retreat=2 평가는 데이터 생성 컨벤션과 일치, **진짜 mm-level fine alignment** 평가.
+
+- v3는 retreat 두 값 모두에서 champion 우위 (+3.7pp at r=10, +7.4pp at r=2)
+- ACT/DP 모두 retreat=10에서 22% 천장 → ResNet18 baseline은 정밀도 부족 확인. **재평가 불필요** (낮은 ceiling이라 retreat 줄이면 더 떨어짐)
+- ACT train loss 0.03까지 매끄럽게 수렴, DP loss 0.018 — train converge 정상이나 inference 정렬은 안 됨. Vision encoder scale이 load-bearing 결정 요소
+
+**Inference**: 226.6 ms/step (champion architecture, RTX 3090, bf16, 1043M params) ≈ 4.4 Hz. Action chunk 8, execute 1.
+ACT inference: ~10 ms/step (62M, fast forward). DP inference: ~150 ms/step (89M + 16-step DDIM).
 
 ---
 
-## 📊 전체 ablation (realistic 12ep, max=250 기준)
+## 5. Discarded experiments (do not retry)
 
-| ckpt | SR | lat<5 | lat<3 | ang<10° | lat_med | 결론 |
-|---|---|---|---|---|---|---|
-| **HARD_cotrain/1k** ⭐ | **67%** | **83%** | **58%** | **92%** | **2.65** | DECISIVE WINNER |
-| HARD_cotrain/1k (max=400) | **75%** | - | - | - | - | step bump +8pp free gain |
-| HARD_cotrain/2k | 67% | 75% | 42% | 83% | 3.30 | overfit 시작 |
-| HARD_cotrain/3k~4k | 50–58% | 67% | 50% | 75–83% | 2.85–3.10 | monotonic ↓ |
-| HARD_continue/1500 | 75% (12ep) | 75% | - | 92% | 2.90 | 24ep에선 62.5% — cotrain이 더 robust |
-| HARD_continue_v2/+1500 | 67% | 67% | 33% | 83% | 3.35 | continue ceiling = 1500step |
-| HARD_only/1k | 33% | 33% | - | 67% | 11.70 | tip/tip2 없으면 사망 |
-| HARD_lr_low/1k~3k | 50–67% | 58–83% | - | 58–75% | 2.95–3.15 | lr 2.5e-6, angle 못 잡음 |
-| HARD_cotrain_v3 (part3 y+20) | 58% | - | - | - | - | distribution shift, -9pp |
-| HARD_cotrain_v4 (+ random phantom) | **25%** | - | - | - | - | random phantom 결정타, -42pp |
-| HARD_from_NEW/1k~2k | 25–33% | 50% | - | 50–67% | 10–12 | HOLDv2 anchor 필수 확인 |
-| AUX_extreme/2k | 42% | 58% | 33% | **83%** | 3.55 | angle +8pp ↔ SR -17pp trade |
-| AUX_extreme/3k~4k | 25–33% | 33–42% | - | 50–67% | 8.6–11.4 | aux 너무 강함 destabilize |
-| HOLDv2_polish (baseline) | 58% | 67% | 42% | 75% | 3.15 | HARD cotrain의 +9pp 기준선 |
-| HOLDv2/3k (24ep baseline) | 54% (24ep) | 67% | 67% | 3.20 | - | HARD cotrain 24ep +21pp |
-| NEW_finetune/10k | 25% | 25% | 0% | 50% | 28.35 | realistic에선 lateral 사망 |
+### Dead-end models / training recipes
+| What | Why |
+|---|---|
+| **HARD_targeted data** (phantom corner shift + re-IK) | sensor/IK distribution drifts from baseline; cotrain mix hurts knowledge. targeted_mix and targeted_from_b100 ckpts all SR 3-30% ≪ champion. |
+| **NEW_finetune/10000** | superseded by aux_strong, SR 9% on 54-cell stress grid. |
+| **HARD_cotrain_lr_ultra_low** | reported 70-83% SR was `--sensor-stop` artifact (banned). True precision unknown. |
+| **unfreeze SigLIP last-N** | seed lottery (n=4 mean 34%, σ 23pp). Cannot stand as paper claim. |
+| **sensor proprio fusion** | 1D sensor as proprio dim diverges by step 3000 even at lr 5e-5. |
+| **DDL (direction-decoupled loss)** | gnorm spike + zero effect in fine-align cotrain. |
+| **b100 ext ckpt + large-lr cotrain ft** | 5× champion's lr drifts away from baseline knowledge. |
 
-### Eval-time hack ablations (HARD_cotrain/1k, 12ep)
+### Banned / non-options
+- `--sensor-stop` eval flag (counts sensor touch as success; precision invalid)
+- multi-view (wrist + tool). single tool_camera only
+- 3D / depth policy. RGB + 1D sensor only
+- lr > 1e-5 (gnorm explodes)
+- vision token > 1500 with lr 1e-4 (SigLIP2 frozen diverges)
 
-| Eval flag | SR | 결론 |
+---
+
+## 6. Key findings
+
+### 6.1 Hold is the bottleneck, not localization
+A-mode analysis on `HARD_cotrain_lr_low/3000` (50ep random perturb): SR 12% strict, but **55% near-miss** (tip ≤4mm), **50% oscillate** with avg min_dist 1.5mm. Model finds the trocar; it can't hold for 20 steps. → future: explicit hold loss / output stabilization.
+
+### 6.2 Training-eval resolution matters less than expected
+Training: SigLIP processor → 512×512 native. Eval default 256 → 512 upscale wastes info, but champion delta is marginal (~18% vs 18.5% on 54-cell). Resolution is **not** the bottleneck.
+
+### 6.3 OOD phantom positions
+- Training perturb y range: ±15mm
+- y=+50/+75 cells: 0% SR
+- Paper main grid restricted to y∈{−25, 0, +25} (in-distribution)
+
+### 6.4 Projector is not a contribution
+3-layer MLP (Linear-LN-SiLU) ported from llama branch (LLaVA recipe). Contribution = removing LLM + scaling frozen vision encoder.
+
+---
+
+## 7. Real robot status
+
+⚠️ Not yet executed. Plan: champion ckpt sim-to-real dry-run after paper main number frozen.
+
+---
+
+## 8. Open ablations (paper completion)
+
+| # | Ablation | Status |
 |---|---|---|
-| baseline (max=250) | 67% | — |
-| `--max-steps 400` | **75%** | **+8pp free**, close-then-bounce 재진입 시간 |
-| `--max-steps 400` + ACTION_SCALE_NEAR | 67% | scale이 step-bump 이득 상쇄 → 폐기 |
-| ANGLE_Z_GATE | 66.7% | Z-drift 가설 무효 |
-| `--kp-track-iters 1` (servo off) | 66.7% | realistic에선 servo 효과 미미 (sensor sweep이 압도) |
+| a | libero baseline (Qwen + SigLIP-base@256) | ❌ TODO — needs full original-VLANeXt retrain |
+| b | SigLIP base@256, no Qwen | ❌ TODO — isolates encoder scale vs language removal |
+| c | SigLIP base@512 | ❌ TODO — isolates resolution effect |
+| d | **In-house ACT baseline** (vision-only ResNet18 + CVAE + Transformer decoder) | ▶︎ training (`src/models/act_policy.py`, config `sim_train_act_baseline_config.yaml`). 62M params, batch 64, lr 1e-4, 30k step |
+| e | **In-house Diffusion Policy baseline** (ResNet18 + ConditionalUnet1D) | 📦 ready (`src/models/diffusion_policy.py`, config `sim_train_dp_baseline_config.yaml`). 89M params. Queue after ACT done |
+| f | aux distance loss off | partial — `ablation_aux_off` trained, eval pending |
+| g | cotrain off (HARD only) | dead-end — angle not learned |
+| h | DCT loss off | ❌ TODO — trivial config edit + retrain |
 
-### KP servo hyperparam (7ep sweep)
+**lerobot 우회**: ACT/DP를 별도 lerobot env 대신 현재 VLANeXt train.py + sim_eval.py에 직접 통합. 같은 dataloader (`src/datasets/sim_act_align.py`) 같은 eval bridge (`scripts/sim_eval_align_only.py`) 그대로 재사용. model_type dispatch만 `train.py:528-573`, `sim_eval.py:141-198`에 추가.
 
-| Config | ang<10° | lat<3 | lat_med | 결정 |
+---
+
+## 9. Infra / GPU notes
+
+- **GPU 0 (PCI 24:00.0) dead** (driver/NVML errors). Available: GPU 1, 2.
+- With `CUDA_DEVICE_ORDER=PCI_BUS_ID` + GPU0 dead, CUDA indices shift: pass `GPUS=0,1` to `Run_Eval_Parallel.sh` (maps to nvidia-smi GPU 1, 2).
+- **MuJoCo render**: NVIDIA EGL이 `nvkms_open_common`에서 hang (GPU 0 dead가 EGL device enumeration 망가뜨림). **Mesa software EGL 강제 필요**:
+  ```bash
+  export MUJOCO_GL=egl
+  export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+  ```
+  Mesa software render 속도: **54 fps @ 480x640** (충분), 15 worker × ~17s/ep. 이전 5월 메모의 "NVIDIA EGL 정상" claim은 transient 였음. `Sim/5_multi_align.sh` 상단에 export 추가됨.
+- Eval video saving: `save_video: true` must be in **base** `config/sim_eval_align_config.yaml` (eval-section override in train config doesn't propagate).
+
+## 9.5. Train resume 노하우 (2026-05-19)
+
+| Field | 의미 |
+|---|---|
+| `train.resume_path` | **Full resume**: weights + optimizer + lr scheduler + step counter 복원. 같은 task 이어서 학습 |
+| `train.pretrained_checkpoint` | **Weights only**: model weights만 가져옴, optimizer/step counter fresh. 다른 task로 finetune |
+| `train.reset_optimizer_scheduler: true` | resume_path 사용 시에도 optimizer 만 fresh로 강제 (lr 변경/data 변경 시 권장) |
+
+예: champion `aux_strong/10000` → v2 finetune (새 데이터 추가)
+```yaml
+train:
+  resume_path: ""
+  pretrained_checkpoint: "checkpoints/.../aux_strong/checkpoint_10000.pt"
+  reset_optimizer_scheduler: true
+  learning_rate: 1.0e-5
+  max_steps: 5000  # 이건 0부터 시작 (counter fresh)
+```
+config: `config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v2_config.yaml`
+
+---
+
+## 9.6. 2026-05-19 진행 (autonomous overnight)
+
+**데이터 재수집** (`5_multi_align.sh`)
+- Track 1 NEW approach: phantom random in x±12mm, y±29mm, z=0, angle±12° (eval+15% margin), hold 30
+- Track 2 NEW align (phantom-moving + ±5mm robot perturb)
+- 15 worker × 334/34 ep → ~5010/510 total ep
+- Mesa software EGL (~17s/ep). Track 1 ~1.5h, Track 2 ~10min
+- 경로: `dataset/approach/approach_eval_range_v1/`, `dataset/fine_align/align_phantom_range_v1/`
+
+**학습 run (in flight)**
+| Run | Model | GPU | Config | Status |
 |---|---|---|---|---|
-| **v5_track3 (α=0.7, iter=3)** ⭐ | 50% | 13% | 9.2 | 채택 |
-| α=0.7, iter=4 | 29% | 14% | 8.3 | iter↑ → angle↓ |
-| α=0.5, iter=3 | 29% | 0% | 10.2 | gentler 안 좋음 |
-| v5_track5 (α=0.7, iter=5) | 38% | 0% | 8.8 | overcorrect |
+| ACT_baseline_align | ACT 62M | nvidia-smi 2 (CUDA 1) | sim_train_act_baseline_config.yaml | training, loss 93→2.08 @ step 319, 8h ETA |
+| (queued) aux_strong_v2 | VLANeXt 1043M | nvidia-smi 1 (CUDA 0) | sim_train_align_siglip2_b24_ft10mm_aux_strong_v2_config.yaml | watcher 대기, 데이터 끝나면 자동 launch |
+| (queued) DP_baseline | DP 89M | (after ACT done) | sim_train_dp_baseline_config.yaml | 미launch |
 
-### Hard 20-ep (이전 트랙, paper challenge)
-
-| VLA | Handoff | SR | lat<5 | ang<10° | lat_med |
-|---|---|---|---|---|---|
-| **NEW_finetune ckpt10000 (v5_track3)** | iter=3 servo | **35%** | 50% | 65% | 4.75 |
-| NEW_finetune ckpt10000 | iter=1 (seed) | 30% | 45% | 60% | 6.85 |
-| HOLD_focus_v2 | iter=3 servo | 20% | 60% | 50% | 4.15 |
-| HARD_cotrain (OOD ang±25°) | iter=3 servo | 0% | — | — | — |
-
-→ Hard grid는 NEW_finetune (approach data 포함)이 우세, HARD_cotrain은 ang±15° training이라 OOD.
+**평가 워크플로**
+- `scripts/eval_multi_ckpt.sh <train_config> <ckpt1> [...]` — 27-cell ang±5° grid 한 번에 여러 ckpt
+- `scripts/_eval_metric_summary.py <log1> [...]` — multi-metric (SR, lat<5/3, md<5/8, ang<10, medians) 한 줄 비교
+- ACT/DP eval: `sim_eval.py:141-198`에 model_type dispatch 추가됨 — 기존 `Run_Eval_Parallel.sh align` 그대로 사용 가능
 
 ---
 
-## 🔍 HARD_cotrain/1k 실패 분석 (4/12 fail @ baseline)
+## 10. Repo housekeeping (2026-05-19)
 
-| Ep | 모드 | min_dist | final lat | final ang | handoff |
-|---|---|---|---|---|---|
-| 4 | reach-then-drift | 1.1mm | 12.7 | 8.2° | 발동 (dist 1.05mm) → lat 12.7 (실패) |
-| 7 | hold 못 채움 | 3.4mm | 2.2 | 9.4° | 발동 → lat 2.16 (hold 안 됨) |
-| 10 | handoff 폭주 | 6.7mm | 22.0 | 8.2° | 발동 → lat 22 (catastrophic) ※ max=400에선 rescue 성공 |
-| 11 | hard angle | 10.6mm | 4.1 | 17.8° | 발동 → ang 17.8 (못 회복) |
-
-핵심: 실패 모두 handoff 발동했으나 **realistic max=250에선 rescue 0/4**. max=400 으로 늘리면 1/4 rescue (Ep10). step 부족 + handoff/VLA 후속 drift가 진짜 원인. close-then-bounce는 eval-time hack(scale, Z-gate)으로 못 잡힘 — **데이터/학습 분포 손대지 않고 max_steps만 올리는 게 최적**.
+- 70 → 18 active configs. Dead-ends → `config/archive/`.
+- 35 → 18 active scripts. KP (demoted per `project_kp_role_brake`), libero benches, sensor_handoff → `scripts/attic/`.
+- EXPERIMENTS backups → `attic/`.
+- Background orphans (until-loop polling abandoned HARD_targeted datagen) killed.
+- Untouched: `checkpoints/`, `dataset/`, `aTrained_model/`, `lerobot/`, `Sim/`, `logs/`, `outputs/`, `wandb/`.
 
 ---
 
-## 📚 폐기/실패 기록
-
-| 시기 | 트랙 | 결과 |
-|---|---|---|
-| 05-12 | DINOv3/DINOv2 encoder swap | min_dist 30+mm |
-| 05-12 | LoRA / last-4 unfreeze | loss 정체 |
-| 05-12 | Sensor proprio in VLA | mean approach ↓ |
-| 05-12 | ResNet50 backbone | Mode D collapse |
-| 05-13 | hold-aware aux (hard/soft) | 학습 약화 |
-| 05-14 | Qwen3.5-VL zero-shot VQA spatial grounding | pixel err 100+px |
-| 05-15 | NEW_kp_proprio (KP in VLA proprio) | oracle 줘도 lat<5 12% |
-| 05-15 | direction_decoupled_loss + HARD_cotrain | gnorm 30–170 폭주 |
-| 05-15 | HARD_only (tip/tip2 제외) | SR 33%, anchor 필수 확인 |
-| 05-15 | HARD_from_NEW (NEW base + HARD) | SR 25–33%, HOLDv2 anchor 필수 |
-| 05-15 | HARD_cotrain_v3 (part3 y+20) | -9pp, distribution shift |
-| 05-15 | HARD_cotrain_v4 (+ random_phantom) | -42pp, HARD mix 확장 dead end |
-| 05-15 | ANGLE_Z_GATE eval-time | Z-drift 가설 무효 |
-| 05-15 | ACTION_SCALE_NEAR (close-slowdown) | step-bump 이득 상쇄 |
-| 05-15 | AUX_extreme (aux 0.8 + boost 20×) | angle +8pp ↔ SR -17pp |
-| 05-15 | HARD_lr_low (lr 2.5e-6) | angle 못 잡음 |
-| 05-15 | HARD_continue_v2 (+1500 step) | overfit, lat<3 58→33% |
-
----
-
-## ⚠️ 운영 노트
-
-- **GPU 0 dead** (PCI 0000:24:00.0): `CUDA_VISIBLE_DEVICES=0`→smi-1, `=1`→smi-2. nvidia-smi 인덱스와 어긋남.
-- **MuJoCo eval**: `MUJOCO_GL=egl` + Mesa EGL vendor 필수 (없으면 Renderer hang).
-- **lr 한도**: frozen SigLIP에서 1e-5 천장, fine-tune은 5e-6 안전. vision token >1500이면 5e-5 이하.
-- **proprio**: 6-D ee_pose만. sensor/KP 직접 주입하면 성능 저하.
-- **KP inference 입력**: 256×256 LANCZOS resize 필수. raw 640×480 직접 통과 시 5–40× err.
-- **데이터 생성**: eval 중 workers 10 max (CPU 충돌). 자식 청소 `pgrep -f _temp_worker_ | xargs kill -9`.
-- **HDF5 키**: `observations/{ee_pose, images/tool_camera, keypoints_wrist, needle_tip_pos, trocar_entry_pos, sensor_dist, qpos}`, top-level `action`. position **mm** (×1000 X).
-- **Eval-time env vars**:
-  - `ANGLE_Z_GATE=1`, `ACTION_SCALE_NEAR=1` — 폐기됨, default off
-  - `HANDOFF_VIDEO_SWEEP=1` + `HANDOFF_VIDEO_SWEEP_HOLD=4` — sweep 시각화
+## 11. 2026-05-20 1mm-Precision Program (Stage 1 + Stage 2)
+
+### Motivation
+Champion v3 caps at 5.46mm mean min_dist (retreat=2 SR 74.1%). User asked: 어떻게 mm-precision까지 갈 수 있을까?
 
----
+Researched 5 surgical/precision VLA papers:
+- **SutureBot** (NeurIPS 2025, arXiv:2510.20965) — goal-pixel overlay → ACT 3.2→1.3mm, π0 3.9→**1.0mm**. Only paper with mm-scale gain on architecturally similar VLA stack. **→ adopt**
+- **DSP** (ICLR 2025) — noise self-filter, easy. Defer (real-data integration round)
+- **DP4AuSu** (2025 Wiley) — DTW LWR demo preprocess, unverified 1mm claim, no code. Skip
+- **SutureAgent** (2026 arXiv) — predicts pixels, not actions. Wrong layer
+- **Dreamer v3 microrobot** (Nature MI 2025) — different physics, RL infra rewrite. Skip
 
-## 📌 NEW_finetune vs HARD_cotrain (2026-05-15)
+### Precision diagnosis (3 bottlenecks)
+1. **Primary**: inference `num_inference_timesteps=10` (`VLANeXt.py:1623`) — 8-step action chunk × 10 denoising = sub-mm refinement 불가
+2. **Secondary**: 학습엔 GT trocar_entry_pos 입력, **inference엔 명시적 goal signal 없음** — wrist 카메라만으로 trocar 위치 추론 (정확히 SutureBot이 해결하는 문제)
+3. **Tertiary**: 256×256 + patch16 = 패치당 ~2-3mm. Stage 1/2 후 별도 axis
 
-| Grid | HARD_cotrain/1k | NEW_finetune/10k | Δ |
-|---|---|---|---|
-| Realistic 12ep (ckpt10000) | **75.0%** | 25.0% (3/12) | -50pp |
-| Realistic 12ep (ckpt7500) | - | 25.0% (3/12) | (ckpt-invariant) |
-| Realistic 12ep (ckpt2500) | - | 25.0% (3/12) | (ckpt-invariant) |
-| Realistic 24ep | 75.0% | 25.0% (6/24) | -50pp |
-
-**ckpt 비교 (realistic12 / hard20, %)**
-| ckpt | Realistic 12ep | Hard 20ep |
-|---|---|---|
-| HARD_cotrain/1k | **75** 🏆 | 0 |
-| HARD_from_NEW/2k | 33 | 20 |
-| NEW_finetune/10k | 25 | **25** 🏆 |
-| HARD_only/2k | 17 | 5 |
-| HARD_continue/1.2k | 58 | 0 |
-| **HARD_cotrain_lr_low/2k** ⭐ | **75** | **10** |
+### Stage 1 — Inference sweep (in flight, ETA ~1.5h)
+- `scripts/sweep_diff_exec.sh` — diff_steps × exec_steps grid on v3/1000 @ retreat=2
+- 8 cells: (diff, exec) ∈ {(10,1), (25,1), (50,1), (100,1), (25,2), (50,2), (25,4), (50,4)}
+- Added `--num-inference-timesteps`, `--num-steps-execute` CLI to `sim_eval_align_only.py`
+- Added `close_once_1mm_pct`, `close_once_2mm_pct`, `time_near_1mm`, `time_near_2mm`, `p50/p90 dist` to `analyze_trajectory.py`
+- Results: `/tmp/sweep_diff_exec_results.md`
 
-**lr_low (lr=2.5e-6) ckpt curve, hard20**:
-| ckpt | 1k | 1.5k | **2k** | 2.5k | 3k |
-|---|---|---|---|---|---|
-| SR | 0 | 0 | **10** ⭐ | 5 | 5 |
+### Stage 2 — SutureBot goal-overlay (pipeline ready, waits for Stage 1)
+**Key discovery during impl**: HDF5 already has GT UV in `observations/keypoints_wrist[:, 2:4]` (normalized [0,1]) + `keypoints_visibility[:, 1]`. **No projection code needed** — Save_dataset_*.py:project_to_2d already ran offline during collection.
 
-→ Sweet spot at 2k. lr_ultra_low (1e-6, max_steps=3000) 학습 중 (bf8nbeklh).
-| Hard 20ep (xy±25 / ang±25), KP-on | 0% | **25.0%** (5/20) | **+25pp** |
-| Hard 20ep, KP-off | 0% | 25.0% (5/20) | 0pp |
-| Hard 20ep, trigger=20mm max=600 | 0.0% (0/20) | - | (eval-time hack 무효) |
+**Files**:
+- `src/utils/overlay_utils.py` — `draw_overlay()` + `apply_overlay_batch()` (cv2.circle, supports dropout/jitter)
+- `src/datasets/sim_act_align.py` — overlay_enabled/color/radius/dropout/jitter params, applied BEFORE local crop/resize
+- `scripts/train.py` — dataset wiring for overlay options
+- `scripts/sim_eval_align_only.py` — `--overlay-source {gt,predicted,off}` CLI + apply on `frames["tool_camera"]` before preprocess
+- `config/sim_train_align_siglip2_overlay_v1_config.yaml` — finetune from v3/1000, lr 5e-6, max_steps 3000, save 500, overlay red dot radius 3 + dropout 0.1
 
-**Hard20 finding**: NEW_finetune fail 대부분 lat 20–70mm (handoff trigger 12mm 도달 불가) → KP servo on=off 동일. hard 영역 성공 5건 모두 vision policy 단독. 따라서 **handoff = realistic grid에서만 기여**, hard에서는 vision generalization이 본질적 contribution.
+**Sanity (read-only)**:
+- Color collision: 0 pure red px in all sampled tool_camera frames (any of red/blue/green safe)
+- Dataloader smoke: 39-frame ep, mean 29.6 red px/frame (radius 3 disk area ≈28), 35/39 frames have overlay (10% dropout exact)
+- Visual: red dot lands on trocar entry hole — see `/tmp/overlay_preview_zoom.png`
 
-**Regime-dependent winner**: HARD_cotrain은 realistic에서 ckpt 1k로 75% 도달하지만 hard20에서는 0% (in-distribution training). NEW_finetune은 hard20에서 25%이지만 realistic 12ep에서 25%로 폭락 (catastrophic wander, lat>80mm 다수). 두 ckpt가 정반대 regime에서 우세 — **ensemble or per-cell switcher가 paper 자료로 의미있을 듯**.
+**Eval cells (after train)**:
+1. v3/1000 baseline (no overlay) — reference
+2. overlay_v1 + GT UV (oracle ceiling)
+3. overlay_v1 + predicted UV (실전 시나리오, kp head 4.4px err)
+4. overlay_v1 + no overlay (ablation: dependence on overlay)
 
----
+**Targets**:
+- Cell 3 (predicted): mean min_dist ≤ 3mm, SR(close_once_2mm) ≥ 60% (~3-4x precision gain expected per SutureBot)
+- Cell 2 (GT oracle): mean min_dist ≤ 1.5mm → tertiary 천장 (vision resolution) 진짜 다음 axis 확정
 
-## 2026-05-16/17 lr_ultra_low (lr=1e-6) + fair comparison (sensor_stop 노이즈 발견)
+### Autonomous orchestration
+- Watcher 1 (`/tmp/launch_stage2_after_sweep.sh`): sweep PID 1090065 wait → overlay_v1 smoke train (200 steps) on GPU 1
+- Watcher 2 (`/tmp/launch_overlay_full_then_eval.sh`): smoke log success → full 3000-step train → 4-cell eval (`scripts/eval_overlay_4cell.sh`)
 
-**Train**: HARD_cotrain_lr_ultra_low (lr=1e-6, max_steps=3000, HOLD_focus_v2/3000 base, tip+tip2+HARD_ang15_part2)
+### 11.1 Run-time bug fixes (2026-05-20 08:00-08:25)
 
-**Realistic24 fair comparison (동일 flags: xy±10/z=5/ang±10, kp-track 3, handoff trig 12, sensor-stop ON)**:
+1. **UnboundLocalError**: `from src.utils.overlay_utils import draw_overlay` inside conditional block shadowed module-level `draw_overlay` (sim_eval's replay overlay). → renamed to `_draw_goal_overlay` alias.
+2. **CLI override silent fail**: `if "key" not in DictConfig` raises TypeError → removed guard since cfg.model/eval always exist.
+3. **Pipe truncation**: sweep v1 used `2>&1 | tail -20` losing real errors and making `set -e` blind. v2/v3 save full per-cell logs to `/tmp/sweep_v3_logs/`.
+4. **Stale npz contamination**: v1 cell 1 showed SR 3% because prior session's eval dirs (retreat=10) mixed with new (retreat=2). v3 sweep `rm -rf` each target dir before run.
+5. **ckpt path mismatch**: project name `VLANeXt_SigLIP2_overlay_v1` → train saved to `VLANeXt_SigLIP2_overlay/v1/`. Watcher had wrong path; bash variable cached too early to fix in-flight.
+6. **KP head ckpt naming**: actual is `head_best.pt` not `best.pt`. Smart eval fixed.
 
-| ckpt | Raw SR | SUCCESS[dist] (진짜) | median final_lat | lat<5mm | lat<2mm | lat<1mm |
-|---|---|---|---|---|---|---|
-| HARD_cotrain_lr_low/2k | 79.2% (19/24) | 33% (8/24) | 6.54mm | 8/24 | 5/24 | **3/24** |
-| HARD_cotrain_lr_ultra_low/2k | 83.3% (20/24) | **46%** (11/24) | **3.60mm** ⭐ | **13/24** | **8/24** | 2/24 |
+### 11.2 Smart eval design (per user 2026-05-20 ranking guidance)
 
-**핵심 발견**:
-1. **sensor_stop이 hard regime에서 false positive 다발**: lr_ultra hard40 sensor-stop ON raw 75%(30/40)중 12개가 dist>100mm 거짓양성. SUCCESS[dist]만 보면 4/40=10% (lr_low와 동급)
-2. **continuous metric 봐야 의미 있음**: lr_ultra가 median lat 6.5→3.6mm 으로 typical case 정밀도 크게 향상
-3. **lat<5mm bucket lr_ultra 우세** (13/24 vs 8/24), 단 **sub-mm (<1mm)은 lr_low 약간 우** (3 vs 2)
-4. **catastrophic fail (lat 200+mm) lr_ultra 약간 더 잦음** (mean lat 23.85mm) → variance 더 큼, 안전성 risk
-5. **다음 eval부터 sensor-stop OFF 또는 dist-only criterion으로 봐야 fair**
+User feedback: "SR지표가 비정확할 수 있으니 목표 지점에 정확하게 도달하는 다른 지표들이 많았는데 그걸 기준으로 종합적으로 판단해서 모델 좋은걸 찾아줘"
 
-**Eval output dir collision 주의**: ckpt + step + exec + diff가 같은 두 eval이 동시 실행되면 `_shard0/metrics_summary.csv`가 덮어써짐. 다른 ckpt(다른 디렉토리)이면 OK.
+- **`scripts/rank_models.py`**: 9-metric rank-sum (close_once_2mm, close_once_1mm, time_near_2mm, handoff_ok, min_dist_mean, p90_dist, lateral_when_near, angle_when_near, retreat). Lower Σrank = better.
+- **`scripts/eval_overlay_smart.sh`**: 2-stage
+  - Stage A: sparse ckpt sweep (1000/2000/3000) with `--overlay-source predicted` (realistic) + v3 baseline reference
+  - Stage B: ablation on winner with `gt` + `off` (oracle ceiling + dependency check)
+- Output: `/tmp/overlay_smart_stageA.md`, `/tmp/overlay_smart_final.md`
 
----
+### 11.3 Status snapshot (08:25)
 
-## 🔜 다음 axis 후보
-
-| 방향 | 비고 |
-|---|---|
-| Real domain eval | KP head는 real cotrain됨, VLA가 real에서 동작하는지 확인 |
-| Stricter success criterion (lat<1mm) | handoff effect 분리 측정 가능 |
-| Inference smoothing / action chunking | close-then-bounce 마진 |
-| Hold mass dataloader 가중치 | close-frame upweight |
-| KP 입력 해상도 256→384/512 | pixel 정밀도 push |
-| 2-step VLA (coarse + fine policy) | distribution split |
-| Real cotrain VLA | real demos 5mm 이내 + sim 1:1 (frame offset 주의) |
-| Insertion-aware success metric | "정렬까지"가 아니라 "삽입 후 z=0까지" 측정 |
+- Sweep v3 cell 1 in progress (Episode 9/27, 66.7% SR ← real baseline, not v1's bogus 3%)
+- Smart eval Stage A cell 1 (overlay_v1 step 1000 + predicted UV) started
+- GPU 1 + 2 fully utilized
 
----
+### 11.4 ⚠️ v1 overlay 진단: radius=3 px가 invisible (1.8% of SigLIP patch token)
 
-## 2026-05-17 HARD_v4 (y+75 OOD 데이터) 완전 실패 — 학습 axis dead end
+Smart eval Stage A 중간 결과 (n=27 each):
 
-**가설**: WIDE eval sample y∈(-25,+75), 학습은 y∈(-15,+15). dy=+25/+50/+75 cell이 OOD라 0/18 fail. → y∈(-25,+75) 데이터 1305ep 생성하면 OOD coverage 회복.
+| label | n | 2mm% | 1mm% | t≤2mm | handoff | mean_min | p90 | lat<5 | ang<5 | retreat | Σrank |
+|-------|---|------|------|-------|---------|----------|-----|-------|-------|---------|-------|
+| v3_baseline (sweep v3 cell 1) | 17 | 5.9 | 0.0 | 0.00 | 0.0 | 4.96 | 30.74 | 1.47 | 3.26 | 0.00 | 16 |
+| ovlPred_step1000 | 27 | 7.4 | 0.0 | 0.00 | 0.0 | 5.29 | 30.02 | 1.49 | 3.98 | 0.00 | 18 |
+| ovlPred_step2000 | 27 | 0.0 | 0.0 | 0.00 | 0.0 | 5.34 | 29.96 | 1.51 | 3.68 | 0.00 | 20 |
 
-**Data**: HARD_v4_y75 10 worker × 130ep avg, asymmetric Y grid [-25,-5,15,35,55,75], ang±15. cwd fix(`Sim/`) + grid cell ×repeat 우회로 정상 생성.
+⚠️ overlay 모델이 v3 baseline 대비 모든 정밀도 지표에서 동일/나쁨.
 
-**Cotrain A** (lr_low/3k base, lr=1.0e-6, max=3000): 5 ckpt 모두 MINI(y=+25) **2/6** — baseline lr_low/3k 4/6 대비 **regression**. lr_low base 자체가 fragile, +HARD_v4 → catastrophic forgetting.
+**근본 원인 (math)**:
+- v1 config: `radius_px: 3` @ 640×480 raw render
+- → resize 256×256 = 1.2px disk (= 2.4px diameter)
+- → SigLIP2 **patch16 (16×16=256 px²)** 1.8%만 차지 → patch token avg color에 0.018%만 기여 → **invisible**
 
-**Cotrain B = HARD_v4_fresh** (HOLD_focus_v2/3k base, lr=2.5e-6, max=3000): 4 ckpt(1k/2k/3k/final) MINI(y=+25) **0/6 전부**. 더 심각. final_dist ≥30mm 다수, lateral 10-15mm — HARD_v4 분포가 학습을 망가뜨림.
+**Stage 1 sweep v3 결과** (denoising count 비교, 진행 중 cell 1-2):
 
-**원인 추정**: HARD_v4의 randomize_phantom_pos=True가 ee_pose/action 분포를 크게 바꿔서 sim_act_align loader의 정규화 stat이 깨졌거나, 또는 단순히 y∈[+35,+75] cell이 trocar 가시성/action 크기에서 본질적으로 다른 regime이라 transfer가 안 됨.
+| diff | exec | n | SR5mm | mean_min |
+|------|------|---|-------|----------|
+| 10 | 1 | 17 | 58.8 | 4.96 |
+| 25 | 1 | 27 | 48.1 | 5.65 |
 
-**결론**: HARD_v4 데이터 추가는 axis 폐기. Paper number는 **lr_low/3k**로 고정.
-- r=0 WIDE strict 53.7% (paper headline)
-- r=0.5 WIDE handoff 48.1% / VLA-only 37.0%
+→ 더 많은 denoising step이 도움 안 됨. Diagnosis #1 (denoising quantization) **부정**. Real bottleneck은 #2 (no goal signal) confirmed. Sweep v3 killed (cells 3-8 skipped).
 
-**다음 axis 후보 (training 안 늘리는 방향)**:
-- Inference temporal ensemble (#54) — 비용 0, paper 자료
-- Multi-checkpoint ensemble (lr_low/2k+3k, NEW10k average)
-- Best ckpt 위에 augmentation-only fine-tune (lr 1e-7, 1000 step)
+### 11.5 v2 overlay 재학습 (radius=20, in-flight 09:34)
 
----
+- `config/sim_train_align_siglip2_overlay_v2_config.yaml`: `radius_px: 20` (40px diameter @ 640×480 → 16px @ 256×256 = 1 full SigLIP patch token, **visible**)
+- 나머지 v1과 동일 (lr 5e-6, max_steps 3000, dropout 0.1)
+- GPU 2에서 학습, watcher가 자동 eval 발사
+- v1 smart eval GPU 1에서 계속 (Stage B GT/off ablation으로 v1 진단 종결)
 
-## 2026-05-17 🚨 SigLIP last2 unfreeze — OOD MINI breakthrough
+### 11.6 v2 (radius=20) + v3 (radius=30) 동시 진행 (10:35)
 
-**Hypothesis**: SigLIP frozen이 mm 정밀도 천장. last 2/27 vision layer만 풀어도 OOD 성능 점프 가능 ([[feedback_vision_token_scaling_lr.md]] lr ≤5e-5).
+v1 Stage B 결과로 v2 단독으론 부족할 가능성 높아, radius ablation 위해 v3 (radius=30) 추가:
 
-**Train**: backbone_mode=last_n_unfreeze, n=2, lr=2e-5, batch=12, max=2000, base=HOLD_focus_v2/3k, 같은 3 dataset (tip+tip2+HARD_part2). 22:26 wall (1.48 it/s). Final loss 0.14, gnorm 16.93.
+- `config/sim_train_align_siglip2_overlay_v3_config.yaml`: `radius_px: 30` (60px diameter @ 640×480 → 24px @ 256×256 = 1.5 SigLIP patch token)
+- Watcher chain: v1 smart eval 종료 → v3 train on GPU 1 → v3 smart eval on GPU 1 (GPU 2는 v2 eval 진행중)
 
-**MINI (y=+25, OOD cell)**:
-| ckpt | SR |
-|---|---|
-| lr_low/3k (baseline) | 4/6 (67%) |
-| unfreeze_n2/500 | **6/6 (100%)** ⭐ |
-| unfreeze_n2/1000 | 5/6 (83%) |
-| unfreeze_n2/1500 | **6/6 (100%)** ⭐ |
-| unfreeze_n2/2000 | **6/6 (100%)** ⭐ |
+**v2 step1000 + predicted 중간 결과 (n=20/27)**:
+- SR(close_5mm) = 40%, SR(close_2mm) = 0%, mean_min = 6.45mm
+- v3 baseline (66.7% at ep18)보다 약간 낮으나 진행 중
 
-→ 500step만에 saturate, OOD y=+25에서 baseline 못잡던 cases 완전 해결.
+**비교 결과 (10:34)**:
+- v1 step3000 + off (overlay 없이): SR(close_5) 66.7% @ ep18 ≈ v3 baseline
+- v1 step3000 + predicted: similar
+- v1 step3000 + GT: similar
+- → v1 radius=3 모델은 overlay 입력 완전히 무시 (radius bug 확정)
 
-**다음**: WIDE 54ep로 generalization 검증 (n2/500, n2/2000) + n=4 (last_n=4, lr=1e-5, batch=8) sweep.
+**예상 결과 (v2/v3 학습이 의미있다면)**:
+- v2 (radius=20)부터 overlay 사용 학습 시작 가능
+- v3 (radius=30)에서 명확한 SR2 향상 보여야 함
+- 두 모델 모두 v3 baseline에 못 미치면 → overlay 접근 자체 폐기, 다른 방향 (e.g., proprio goal, hierarchical) 모색
 
-**n=4 train** (parallel, lr 1e-5 더 보수적): 17:13 wall, loss 0.37, gnorm 44.59 → n=2보다 불안정. eval로 우열 판정.
+### 11.7 v1 Stage B 최종 결론 (10:42)
 
-**r=1.0 WIDE strict baseline 추가**: lr_low/3k r=1.0 = 50.0% (27/54). r=0=53.7%, r=0.5=48.1%, r=1.0=50.0% (retreat 무관, ±3%pt noise).
-
----
-
-## 2026-05-17 🏆 SigLIP last4 unfreeze — PAPER HEADLINE 갱신 (+29.7%pt)
-
-**WIDE 54ep r=0.5 (same flags as baseline)**:
-| ckpt | SR | vs baseline |
-|---|---|---|
-| lr_low/3k (baseline) | 48.1% (26/54) | — |
-| unfreeze_n2/500 | 35.2% (19/54) | -12.9pp (undertrained generalize fail) |
-| unfreeze_n2/2000 | ~27% (15/54 partial) | -21pp (n=2 catastrophic on far cells) |
-| **unfreeze_n4/2000** | **77.78% (42/54)** ⭐⭐ | **+29.7pp** |
-
-**해석**:
-1. n=2 (lr 2e-5): MINI y=+25 cell만 100% — 가까운 OOD에서만 도움, 멀리 갈수록 손해 (overshoot, lat>40mm 다발). gnorm 16.93은 ok 보였으나 narrow generalization.
-2. n=4 (lr 1e-5, batch=8): 모든 cell 균일 향상. **gnorm 44.59가 더 높았는데 오히려 better generalize** — train loss(0.37 vs 0.14) 높지만 BC 학습이 saturate 안 한 게 OOD에 유리.
-3. **vision encoder 정밀도 천장이 진짜 bottleneck이었음** ([[project_sim_align_ceiling_0514.md]] 가설 검증)
-4. lr 1e-5 + batch 8 + warmup 300이 n=4 sweet spot
-
-**다음 검증 axis**:
-- n4/1000 WIDE 진행 중 (early ckpt도 도움인지)
-- n4/2000 r=0 strict WIDE (paper headline strict version)
-- n=6, n=8 unfreeze 추가 (더 향상되는지)
-- n=4 + augmentation enabled (color jitter) — 추가 + 가능성
-- HARD_v4 데이터 + n=4 (frozen에서 망가지던 데이터가 unfrozen에선 도움이 될 수도)
-
----
-
-## 2026-05-18 unfreeze dose-response 결론 + paper strict 확정
-
-**Paper-strict numbers (r=0, no retreat, sensor_stop ON, kp=sim)**:
-| ckpt | r=0 strict | r=0.5 | r=1.0 |
-|---|---|---|---|
-| lr_low/3k (frozen baseline) | 53.7% | 48.1% | 50.0% |
-| **unfreeze_n4/2000** | **75.93% (41/54)** | **77.78% (42/54)** | TBD |
-
-**Dose-response (WIDE r=0.5)**:
-| n | SR | 비고 |
-|---|---|---|
-| 0 (frozen) | 48.1% | baseline |
-| 2 (500step) | 35.2% | undertrained |
-| 2 (2000step) | 48.1% | baseline 동급, 효과 없음 |
-| **4 (2000step)** | **77.8%** ⭐ | **sweet spot** |
-| 4 (1000step) | 68.5% | 1k도 ok |
-| 6 (2000step) | ~46% (48/54 진행 중) | over-unfreeze, generalization 손해 |
-
-**해석**:
-- n=2 (last 2/27): vision layer 풀어도 학습에 의미있는 변화 거의 없음 — bottleneck이 좀 더 깊은 곳
-- n=4 (last 4/27): **최적**. perceptual feature 미세조정 가능 + base knowledge 보존
-- n=6 (last 6/27): trainable params 폭증 (705M) → overfit train loss 0.18+, gnorm 25.7 — generalization 손해
-
-**n4+HARDv4 학습 done** (17:25, loss 0.45 (높음), gnorm 77.04 (매우 높음)) — 평가 진행 중. frozen에서 망가지던 HARD_v4가 unfrozen + n=4로 회복하는지 결정.
-
----
-
-## 2026-05-18 🚀 NEW SOTA: n4 + HARD_v4 데이터 = WIDE 84%+
-
-**Setup**: backbone_mode=last_n_unfreeze n=4, lr=1e-5, batch=8, max=2000, base=HOLD_focus_v2/3k, **데이터 13 paths (tip+tip2+HARD_part2 + HARD_v4_y75 worker_0..9)**. Train: 17:25 wall, loss 0.45 (높음), gnorm 77 (매우 높음 — 평소 발산 신호지만 여기선 OOD 학습이라 OK).
-
-**WIDE r=0.5 (38/54 진행 중, expected ≥84%)**:
-| ckpt | SR | vs baseline | vs n4 alone |
-|---|---|---|---|
-| lr_low/3k (frozen baseline) | 48.1% | — | -29.7pp |
-| unfreeze_n4/2000 (tip+tip2+HARD_part2 only) | 77.8% | +29.7pp | — |
-| **unfreeze_n4 + HARD_v4 / 2000** | **84.2%** (38/54 진행) | **+36.1pp** | +6.4pp |
-
-**핵심 발견**:
-- **HARD_v4 데이터가 frozen에선 망가뜨리고 unfrozen n=4에선 +6%pt** — vision encoder unfreeze가 OOD 데이터 활용 가능하게 만듦
-- High gnorm 77 + high train loss 0.45 = "high-energy fit" — over-fit 신호가 아니라 OOD 분포 학습 신호 (eval이 입증)
-- ([[project_unfreeze_breakthrough.md]] 갱신 필요)
-
-**n6 sweep 정리 (n=6 inferior 최종 확정)**:
-- WIDE r=0.5: 46.3% (vs n4=77.8%)
-- MINI y=+25: 4/6 → 2/6 → 2/6 (500→1500step degrade)
-- 결론: dose-response n=4가 sweet spot. n=6는 over-unfreeze.
-
-**다음**: n4+HARDv4 r=0 strict (paper headline 최종), MINI sweep ckpt 500/1500, lerobot ACT baseline 시작.
-
----
-
-## 2026-05-18 정정 + 정책 변경 (중요 — 반복 금지)
-
-**HARD_v4 + n4 unfreeze 최종 결과 (정정)**:
-- WIDE r=0.5 mid-eval 38/54에서 84% 보였으나 **최종 42/54 = 77.78%** (n4 단독과 정확히 tie)
-- WIDE r=0 strict도 동일 77.78%
-- 결론: **HARD_v4 데이터 추가는 unfrozen 환경에서도 효과 없음**. HARD_v4 axis 전체 dead-end 확정.
-
-**sensor_stop success criterion 폐기 (2026-05-18)**:
-- `SUCCESS[sensor_stop]` 케이스가 dist=20mm여도 sensor만 닿으면 success 처리 → 5mm 정밀도 평가 왜곡
-- 모든 future eval에서 `--sensor-stop` flag 제거
-- 과거 sensor_stop 포함 SR 수치 (77.78% 등)는 새 기준과 직접 비교 불가, baseline 재측정 필요
-- ([[feedback_no_sensor_stop.md]] 등록)
-
-**image_size mismatch (검증중)**:
-- 학습 입력 512×512 (SigLIP processor native) vs eval 입력 256→512 (preprocess_image LANCZOS + upscale) — 정보 손실
-- `cfg.eval.image_size: 256→512` 변경, n4/2000 WIDE r=0.5로 검증 중 (2026-05-18 02:00)
-- KP head는 256 유지 (분리됨)
-
-**inference cost 변경 안 함**:
-- `num_inference_timesteps=10` 유지 (5mm 정밀도에 timesteps 줄이기 위험)
-- `--sensor-stop` 폐기로 인한 절감만 활용
-
-**반복하지 말 것 (dead-end 목록)**:
-| Axis | 시도 | 결과 |
-|---|---|---|
-| Data | HARD_v4 (y+75 OOD) 학습 추가 (frozen 또는 unfreeze) | n4 단독과 tie, 학습 시간만 낭비 |
-| Encoder | unfreeze_last2 (n=2) | MINI 100% / WIDE 35-48% narrow overfit |
-| Encoder | unfreeze_last6 (n=6) | WIDE 46.3% over-unfreeze |
-| Encoder | DINOv3/DINOv2 swap, ResNet50 | 30+mm err |
-| Loss | direction_decoupled_loss | gnorm 폭주 |
-| Loss | aux extreme (0.8+20×) | angle↑ SR↓ |
-| Data | HARD_only, HARD_from_NEW, HARD_v3, HARD_v4_random_phantom | -25~-42pp |
-| Proprio | sensor/KP를 VLA proprio에 직접 주입 | 성능 저하 |
-| Eval | sensor_stop success criterion | 알고리즘 의심 (위 항목) |
-| Eval | ANGLE_Z_GATE, ACTION_SCALE_NEAR | 효과 없음 / 상쇄 |
-| LR | HARD_lr_low 2.5e-6 | angle 못 잡음 |
-
-**현 SOTA (2026-05-18)**: unfreeze_n4/2000, base=HOLD_focus_v2/3k, lr=1e-5 batch=8, sensor_stop 제외 시 baseline 재측정 필요. config 보존: `unfreeze_last4_config.yaml`, `unfreeze_last4_HARDv4_config.yaml` (HARDv4는 tie지만 검증 가치로 보존).
-
----
-
-## 2026-05-18 ⚠️ sensor_stop OFF 재측정 — SOTA 거품 발각
-
-기존 77.78% 두 ckpt는 **sensor_stop success criterion이 가짜 success 만들어내고 있었음**.
-
-| ckpt | with sensor_stop (이전 SOTA) | **no_sensor_stop + img512** | 거품 |
-|---|---|---|---|
-| n4/2000 | 77.78% | **55.56%** (30/54) | -22pp |
-| n4_HARDv4/2000 | 77.78% | **33.33%** (18/54) | -44pp |
-
-**핵심 발견**:
-1. **HARDv4 ckpt이 last4보다 sensor_stop 의존도 2배** — HARDv4 데이터 학습은 정밀 정렬 안 늘리고 sensor 트리거에 더 의존하는 행동 패턴 학습. **재확정 dead-end**, 절대 다시 시도 금지
-2. **last4/2000 진짜 SR 55.56%** — 이전 paper headline 77.78%는 inflated
-3. last4 < HARDv4의 sensor_stop 거품 차이가 두 ckpt가 tied로 보인 원인
-
-**img_size 효과 확정 (control 완료)**:
-| ckpt | img256+nss | img512+nss | Δ |
-|---|---|---|---|
-| n4/2000 | 48.15% (26/54) | **55.56%** (30/54) | **+7.41pp** |
-| n4/1500 | 46.30% (25/54) | 진행 중 | — |
-
-**해결**: train-eval resolution mismatch (학습 512 native, eval 256→512 upscale)가 진짜 +7.4pp 손실. `cfg.eval.image_size: 512` 영구 적용. save_video=false 필수 (KP 256 vs VLA 512 프레임 사이즈 충돌).
-
-**진짜 SOTA (2026-05-18)**: **n4/2000 + img512 + no_sensor_stop = 55.56%** (이전 77.78% 헤드라인은 sensor_stop 거품 22pp + img_size 7pp 합산으로 inflated)
-
-**n4 ckpt sweep (img512+nss, seed=2031)**:
-| ckpt | SR | 
-|---|---|
-| n4/500 | 42.59% (23/54) |
-| **n4/1000** | **61.11%** (33/54) ← peak |
-| n4/1500 | 57.41% (31/54) |
-| n4/2000 | 55.56% (30/54) |
-
-**핵심**: bell curve, **1000 step이 peak**. 500, 1500, 2000 모두 lower.
-
-**finegrain run (seed=2034, save_interval=200, max=1600) 결과**:
-- ckpt 1000 (mid-eval ep19): 31.6% ← 같은 step인데 -30pp! seed 영향 매우 큼
-- 800 (진행 중)
-
-**🚨 PAPER HEADLINE 무효화 — seed lottery 확정 (2026-05-18)**:
-
-n4 unfreeze, lr=1e-5, ckpt 1000, img512+nss, 4 seeds:
-| seed | SR |
-|---|---|
-| 2031 | 61.11% (원본 "SOTA") |
-| 2034 | 25.93% |
-| 2035 | 7.41% |
-| 2036 | 42.59% |
-| **mean** | **34.26%** |
-| **σ** | **~23pp** |
-
-**결정적 결과**: 
-- Frozen baseline (lr_low/3k) = 48.1% > mean 34%
-- 4 seeds 중 단 1개만 baseline 초과
-- **unfreeze 방법은 평균적으로 frozen보다 나쁘다**
-- 원본 61% = seed 2031의 **lucky strike**, 재현 불가능
-
-**결론**: unfreeze SigLIP last4 = paper contribution으로 부적합. 
-- Mean-of-seeds ≤ frozen, σ 너무 큼
-- 단일 seed cherry-pick은 academic integrity 위반
-
-**다음 axis 후보** (안정성 우선):
-1. lr=5e-6 unfreeze (안정성 개선 가설, 진행 중)
-2. frozen baseline 자체 개선 (lr/batch sweep)
-3. KP head 학습 quality (mm 정밀도 향상)
-4. lerobot ACT/DP baseline 비교
-
----
-
-## 2026-05-18 SR 이외 지표 정리 (multi-metric audit)
-
-**Why**: SR(handoff + sensor_stop 보정)만 보면 sensor_stop 거품을 못 잡는다. close_5mm + median(min_dist) + lateral을 같이 봐야 진짜 mm 정밀도 평가 가능.
-
-### KP head 자체 능력 (offline, end-to-end와 분리)
-
-| 지표 | 값 |
-|---|---|
-| uv pixel error (median) | **4.4 px** @ 256×256 |
-| dist regression error (median) | **1.03 mm** |
-| projection bias (real) | (-5, +10) px systematic offset vs visual center |
-| projection bias (sim) | (0, 0) px |
-
-→ KP head는 mm-level intrinsic accuracy. **천장 원인이 KP에 없음**. 정렬 구간 진입(VLA)과 handoff 타이밍에 천장 존재.
-
-### End-to-end multi-metric (WIDE 54ep, img512, no_sensor_stop, handoff ON, retreat=0.5)
-
-| 구성 | SR | **close_5mm** | close_3mm | angle≤10°+min≤10mm | **med(min_dist)** | med(final_dist) | med(lat) | med_steps(succ) |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **unfreeze_n4/1000** (seed2031, peak) | 61.1% | **66.7%** | **27.8%** | 61.1% | **3.7mm** | 3.7mm | 3.0mm | 169 |
-| unfreeze_n4/1500 | 57.4% | 61.1% | 27.8% | 57.4% | 4.3mm | 4.5mm | 3.1mm | 161 |
-| unfreeze_n4/2000 | 55.6% | 64.8% | 27.8% | 55.6% | 4.1mm | 4.2mm | 2.8mm | 158 |
-| unfreeze_n4/500 | 43.4% | 54.7% | 15.1% | 52.8% | 4.2mm | 19.7mm | 11.2mm | 209 |
-| **lr_low/3k (frozen baseline, retreat=1)** | 50.0% | 46.3% | 14.8% | 44.4% | 5.6mm | 10.0mm | 4.2mm | 184 |
-| seed2036/1000 (n4 reroll) | 42.6% | 51.9% | 11.1% | 46.3% | 5.0mm | 6.8mm | 4.0mm | 152 |
-| seed2034/1000 (finegrain) | 25.9% | 25.9% | 11.1% | 44.4% | 6.5mm | 12.6mm | 4.2mm | 152 |
-| seed2035/1000 (n4 reroll) | 7.8% | 17.6% | 3.9% | 9.8% | 21.0mm | 22.7mm | 12.0mm | 240 |
-| n4_HARDv4/2000 (nss) | 34.0% | 35.8% | 24.5% | 35.8% | 8.7mm | 8.7mm | 3.4mm | 99 |
-| unfreeze_n2/2000 | 48.1% | 20.4% | 1.9% | 46.3% | 10.6mm | 15.6mm | 14.5mm | 188 |
-| unfreeze_n6/2000 | 46.3% | 38.9% | 22.2% | 48.1% | 6.4mm | 12.3mm | 8.6mm | 203 |
-
-### sensor_stop 거품 정량화 (same ckpt, sensor_stop ON vs OFF)
-
-| ckpt | SR (ON) | SR (OFF) | close_5mm (ON) | close_5mm (OFF) | med(min_dist) ON | med(min_dist) OFF |
-|---|---:|---:|---:|---:|---:|---:|
-| **unfreeze_n4_HARDv4/2000** | **77.8%** | 34.0% | **33.3%** | 35.8% | **17.7mm** | 8.7mm |
-| unfreeze_n4_HARDv4/2000_r0 | 79.6% | – | 33.3% | – | 18.2mm | – |
-| unfreeze_n4/2000 | 79.2% | 55.6% | 50.9% | 64.8% | 5.0mm | 4.1mm |
-
-**해석**:
-- **HARDv4 ckpt: SR 77.8%인데 close_5mm 33.3%, median min_dist 17.7mm**. SR과 정밀도가 완전 분리. sensor가 trocar 옆면만 찍어 success로 카운트된 케이스가 약 44pp 거품.
-- last4(non-HARDv4)도 SR 22pp 거품이지만 close_5mm는 오히려 OFF가 더 높음(64.8% > 50.9%) — sensor_stop이 너무 일찍 멈춰 5mm 안으로 못 들어가던 케이스도 존재.
-- **HARDv4는 sensor 트리거 의존하도록 학습됨** → 정밀 정렬 실력은 안 올라감. dead-end 재확정.
-
-### img_size mismatch (control 완료, multi-metric)
-
-| ckpt | img256+nss SR | img512+nss SR | close_5mm 256 | close_5mm 512 | Δ close_5mm |
-|---|---:|---:|---:|---:|---:|
-| n4/2000 | 50.0% | 55.6% | 57.7% | 64.8% | +7.1pp |
-| n4/1500 | 48.1% | 57.4% | 53.8% | 61.1% | +7.3pp |
-
-→ resolution mismatch 단독으로 close_5mm +7pp. eval default 512 확정.
-
-### Key takeaways (multi-metric 기준)
-
-1. **진짜 best**: unfreeze_n4/1000 seed2031 close_5mm 66.7%, med(min_dist) 3.7mm — 단 **재현 불가** (seed lottery).
-2. **신뢰 가능 baseline**: lr_low/3k frozen close_5mm 46.3%, med(min_dist) 5.6mm.
-3. **SR-only 보지 말 것**: HARDv4 SR 78%인데 med(min_dist) 18mm → 18mm는 phantom으로 들어갈 거리 아님. SR이 평가 task를 잘못 표현했음.
-4. **handoff (KP head)는 정당한 컴포넌트**: 자체 intrinsic mm-level. handoff disable한 VLA-only ablation은 task #56 pending.
-5. **lateral 지표 유용**: lateral 작은데 (≤3mm) min_dist 크면(>15mm) → axial(Z) 부족. 반대면 → 회전/측면 정렬 부족. 천장의 성격 진단 가능.
-
-### 권장 metric set (이후 모든 eval에 적용)
-
-| 1차 지표 | 보조 |
-|---|---|
-| **close_5mm (%)** | close_3mm, close_10mm |
-| **median(min_dist) mm** | median(final_dist) |
-| **median(lateral) mm** | (axial = sqrt(min_dist² − lat²) 별도 계산 가능) |
-| angle ≤ 10° + min_dist ≤ 10mm % | hold-time 유지 (현재 미수집) |
-| median(steps) on success | early-stop 효율성 |
-
-SR은 **참고용**으로만, 헤드라인 metric에서 제외. paper figure도 close_5mm + min_dist scatter로 가야 함.
-
----
-
-## 2026-05-18 실배포용 최종 정리 + 두 가지 surprise
-
-### Surprise 1: VLA-only가 handoff 포함과 **완전 동일**
-unfreeze_last4/checkpoint_1000 (seed 2031) on WIDE 54ep, img512, no sensor_stop, retreat=0.5:
-
-| 구성 | SUCCESS | FAIL | SR | close_5mm | med(min_dist) |
-|---|---:|---:|---:|---:|---:|
-| handoff ON | 33 | 21 | 61.11% | 66.7% | 3.7mm |
-| **handoff OFF (VLA-only)** | **33** | **21** | **61.11%** | **66.7%** | **3.7mm** |
-
-→ **이 ckpt는 handoff 없어도 동일**. VLA가 이미 5mm 안에 들어감, handoff 12mm trigger가 실제로 보정 안 함.
-→ **real 배포 시 handoff/KP 미구현 무관**. VLA-only 그대로 가도 sim 성능 그대로.
-
-### Surprise 2: HOLD_focus_v2/3000 baseline은 약함
-HOLD_focus_v2/checkpoint_3000.pt (frozen, 3000 step fresh) WIDE img512+nss+handoff r=0.5:
-- **SR 25.93% (14/54)** ← 예상보다 낮음
-- 이전 lr_low/3k frozen 50%은 다른 ckpt (HARD_cotrain_lr_low, lr=1e-6 cotrain on HOLD_focus_v2 base, retreat=1)
-
-→ "frozen baseline 50%"이라는 표현은 **HOLD_focus_v2 단독 학습이 아니라 HARD_cotrain_lr_low**의 수치. paper baseline 후보 재정리 필요.
-
-### 실배포 최종 추천 (2026-05-18 확정)
-
-**A. 추천 1순위 — unfreeze_last4/checkpoint_1000**
-- 경로: `checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_unfreeze_last4/checkpoint_1000.pt`
-- train-config: `config/sim_train_align_siglip2_b24_ft10mm_unfreeze_last4_config.yaml`
-- sim 성능: SR 61.11%, close_5mm 66.7%, med(min_dist) 3.7mm
-- 특기: **VLA-only로도 동일 성능** → real_eval_align.py 그대로 사용 가능
-- 단점: seed 2031 lucky strike (재학습 못 함), 하지만 weight는 진짜 잘함
-
-**B. fallback — HARD_cotrain_lr_low/checkpoint_3000** (검증 필요)
-- 경로: `checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain_lr_low/checkpoint_3000.pt`
-- 이전 r=1.0 eval: SR 50%, close_5mm 46.3% (config 삭제됐으니 train-config 재현 어려움)
-
-**C. 향후 진행 중 — HOLD_focus_v2 multi-seed (seed 2027, 2028)**
-- train 진행 중 (~75분). 결과 보고 paper headline 안정 후보 확정 시도.
-
-### Real 배포 명령 (확정)
-```bash
-bash Run_Real_Eval_Align.sh \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_unfreeze_last4/checkpoint_1000.pt \
-  --train-config config/sim_train_align_siglip2_b24_ft10mm_unfreeze_last4_config.yaml \
-  --skip-home --dry-run --max-steps 20      # smoke test
-# 정상이면 --dry-run 빼고 --max-steps 100~150
 ```
+| label                    | n  | 2mm% | mean_min | Σrank |
+|--------------------------|----|------|----------|-------|
+| v3_baseline              | 27 | 3.7  | 5.04     | 16 🏆 |
+| ovlPred_step3000(gt)     | 27 | 3.7  | 5.42     | 19    |
+| ovlPred_step3000(off)    | 27 | 0.0  | 5.45     | 20    |
+```
+
+- **GT oracle UV도 v3 baseline에 패배** → v1 모델은 overlay signal을 완전히 무시
+- off (no overlay) ≈ GT ≈ predicted → 모델이 overlay 픽셀을 noise로 취급
+- **radius=3 invisible 가설 (1.8% patch token area) 확정**
+
+### 11.8 v2 (radius=20) 중간 결과 (11:05)
+
+```
+| label                  | n  | 2mm% | mean_min | Σrank |
+|------------------------|----|------|----------|-------|
+| v3_baseline            | 27 | 3.7  | 5.04     | 16 🏆 |
+| v2_step1000_predicted  | 27 | 3.7  | 5.42     | 18    |
+| v1_step3000_off        | 27 | 0.0  | 5.45     | 21    |
+```
+
+- v2 step1000은 v3 baseline 거의 동등 (mean_min 5.42 vs 5.04)
+- step2000 partial (n=24): mean_min=6.15mm — 오히려 악화 추세
+- step3000 + GT/off 필요
+
+### 11.9 가설 재평가
+
+v2 (radius=20)이 v1 (radius=3)와 유사하면 → "overlay 자체가 성능 boost 어려움":
+1. **v3 baseline이 이미 vision으로 trocar 잘 localize 함** — 추가 goal signal 정보 가치 낮음
+2. **Action precision bottleneck** (diffusion noise floor ~5mm) — vision improvement만으로 못 뚫음
+3. **SutureBot 결과 vs ours**: 그쪽은 π0 3.9→1.0mm. 우리는 5.0mm fixed.
+   - 가능한 이유: 우리 task 더 어려움? 우리 vision 이미 더 좋음? 데이터 적음?
+
+**다음 방향 후보** (v2/v3 도 baseline 못 이기는 경우):
+1. **Proprio goal**: trocar_world_mm을 proprio에 concat (overlay 대신 명시적 좌표 입력)
+2. **Goal-conditioned diffusion**: trocar UV/dist를 action diffusion condition에 추가
+3. **Multi-step refinement**: near-goal에서 별도 fine-tune된 작은 모델로 zoom-in
+4. **Action representation 변경**: bin-quantized vs continuous diffusion
+
+### 11.10 ⚠️ v2 (radius=20) 결과 — overlay 자체가 visual feature 손상
+
+```
+Model                  | close_2 | close_3 | close_5 | mean_min
+-----------------------|---------|---------|---------|----------
+v1 step3000 predicted  | 3.7%    | 25.9%   | 59.3%   | 5.04mm
+v1 step3000 GT         | 0.0%    | 22.2%   | 55.6%   | 5.45mm
+v1 step3000 off        | 3.7%    | 25.9%   | 59.3%   | 5.04mm  ← v1 무시
+v2 step1000 predicted  | 0.0%    | 3.7%    | 51.9%   | 5.90mm  ← v2 손상
+v2 step2000 predicted  | 0.0%    | 3.7%    | 55.6%   | 5.89mm
+v2 step3000 predicted  | 0.0%    | 3.7%    | 51.9%   | 5.78mm
+```
+
+**중요 관찰**:
+1. v1 predicted ≡ v1 off → 모델이 radius=3 overlay를 픽셀 노이즈로 무시 (radius invisible 확정)
+2. v2 (visible radius=20)는 v1보다 **더 나쁨** (mean_min 5.78-5.90 > 5.04)
+3. **새 가설**: visible overlay가 **trocar entry hole의 visual feature를 가림** (40px disk가 hole 위에 그려짐 → 모델이 hole pixel을 못 봄)
+
+**구조적 결론**: SutureBot의 "opaque pixel marker" 접근은 우리 환경에서 부적합. 우리 trocar는 이미 카메라에 명확히 보이므로 marker가 redundant + 가림.
+
+### 11.11 다음 방향: keypoint proprio injection
+
+- 기존 코드 `use_keypoint_proprio=True` (proprio_dim=9 = ee_pose 6 + troc_uv 2 + dist_norm 1)
+- Overlay 대신 **명시적 trocar UV/dist 좌표**를 proprio에 concat
+- visual feature 가림 없이 goal signal 주입
+- `project_keypoint_pipeline_0514` 학습된 head 그대로 사용 가능
+
+대안:
+- v3 (radius=30) 결과 확인 후 결정 (radius=30이 더 나으면 overlay 자체 가능성 재검토)
+- v3도 v2와 유사하게 못 이기면 keypoint proprio로 pivot
+
+### 11.12 v3 (radius=30) 초기 결과 + Pivot 결정
+
+```
+v3 (radius=30) step1000 predicted:
+  close_once 1/2/3/5/8/10 mm: 0.0 / 0.0 / 0.0 / 51.9 / 81.5 / 88.9 %
+  mean_min = 5.75mm
+```
+
+vs.
+- v3 baseline: 5.04mm
+- v1 step3000 pred: 5.04mm (overlay 무시)
+- v2 step1000 pred: 5.90mm
+- v3 step1000 pred: 5.75mm
+
+→ **radius 클수록 더 나빠짐 (occlusion 가설 확정)**. SutureBot 접근법 우리 task에 부적합.
+
+### 11.13 v4 keypoint proprio injection (12:10 launch)
+
+- `config/sim_train_align_siglip2_kp_proprio_v4_config.yaml`
+- `proprio_dim: 9`, `use_keypoint_proprio: true` (overlay 폐기)
+- 명시적 `[troc_u, troc_v, dist_norm]` 3차원을 ee_pose(6)에 concat
+- Visual feature 가림 없이 goal signal 주입
+- pretrained_checkpoint: v3 SigLIP2_repro/b24_ft10mm_aux_strong/checkpoint_10000.pt (proprio_proj 6→9 random init)
+- lr 5e-6 (v3 recipe), max_steps 3000, save 500
+- 학습 후 auto-eval (watcher armed, GPU 2)
+
+**예상**:
+- Best case: proprio에 정확한 좌표 있으니 모델이 fine alignment 학습 쉬워짐, mean_min 4mm 이하 가능
+- Worst case: proprio 신호도 무시 (champion 이미 vision만으로 잘하니 추가 signal 무의미) → 5mm 영역 정체
+- Either case: overlay vs proprio 두 가설 결판
+
+### 11.14 v3 (radius=30) 전체 ckpt 결과 — overlay 폐기 확정
+
+```
+v3 step1000 (radius=30, predicted):
+  close 1/2/3/5/8/10mm: 0.0 / 0.0 / 0.0 / 51.9 / 81.5 / 88.9 %  | mean_min=5.75mm
+v3 step2000:
+  close 1/2/3/5/8/10mm: 0.0 / 0.0 / 0.0 / 55.6 / 81.5 / 88.9 %  | mean_min=5.62mm
+v3 step3000:
+  close 1/2/3/5/8/10mm: 0.0 / 0.0 / 0.0 / 48.1 / 81.5 / 88.9 %  | mean_min=5.66mm
+```
+
+vs v3 baseline (5.04mm, close_2mm=3.7%) — 모든 ckpt에서 baseline에 패배. 더 큰 overlay = 더 큰 occlusion. **overlay 접근법 결정적 폐기**.
+
+### 11.15 Architecture 재검토 (user prompt 12:30)
+
+User raised 3 questions:
+
+1. **Proprio 묻힘 (1 / 289 tokens = 0.35%)**: 단일 proprio token이 256 vision token과 attention 경쟁 → 묻힐 가능성 높음
+2. **Meta queries (32) — vision-only에서 무용**: VLM에서 cross-attend summarization 역할인데 우리는 LM 없음 → 그냥 32개 learnable register, 큰 도움 안 됨
+3. **Vision encoder 거대 + 해상도 낮음**: SigLIP2-so400m native 512 vs 우리 256 입력 (encoder 능력 절반 활용). patch16 @ 256 = ~1.6mm/token (1mm precision 불가)
+
+**HDF5 raw frames 640x480 검증됨** — `project_input_resolution_ceiling` 메모리 일부 오류 (HDF5 재생성 불필요, dataloader resize만 변경하면 됨)
+
+### 11.16 v5 design plan (v4 oracle 결과 후 launch)
+
+**v4 oracle test 추가**: `--oracle-kp` flag로 GT trocar 좌표 직접 주입 → proprio signal이 본질적으로 유효한지 확인. v4 watcher에 oracle eval 추가됨.
+
+**v5 (v4 결과에 따라)**:
+- v4 oracle >> predicted → proprio 효과 있음, KP head quality 개선 필요
+- v4 oracle ≈ v3 baseline → proprio 1 token 흡수 안 됨 → 강화 필요 (multi-token, FiLM, replicated tokens)
+
+**v5 후보 구성**:
+| 변경 | 효과 |
+|---|---|
+| input_image_size 256→384 | tokens 256→576, 패치당 1.6→1.1mm |
+| Multi-token proprio (ee_pose+goal_uv+goal_dist 분리) | proprio 토큰 1→3, attention 표면 3x |
+| Remove meta_queries (or condition_type="tight") | 깔끔, vision token이 더 강조 |
+| FiLM modulation (옵션) | goal coords로 vision feature 자체 변조 |
+| smaller encoder (옵션, 효과 검증 후) | SigLIP-base or DINOv2-base 시 메모리 ↓ |
+
+### 11.17 사용자 hard-won feedback (12:30)
+
+| 시도 | 결과 |
+|---|---|
+| Sensor handoff | ❌ 효능 없음 (1D 신호 부족) — safety brake로만 |
+| Proprio (ee_pose 6) | ✅ 효과 있음 |
+| Proprio + sensor/KP | ❌ 떨어짐 |
+| aux_distance_loss ↑ | ✅ **올릴수록 좋아짐** (v5a 1st-axis) |
+| CNN encoder | ✅ but **unfreeze 필수** |
+
+### 11.18 v4 (kp proprio) catastrophic failure (13:10 confirm)
+- 24/27 eps ALL FAIL, dist 9~20mm
+- 사용자 prediction 정확. proprio injection path 폐기.
+
+### 11.19 v5 launches (13:25-)
+
+**v5a (GPU 1)**: champion v3 base + aux_distance_loss boost (weight 0.5→1.0, max_boost 10→50). 1500 step finetune, lr 5e-6. 사용자 추천 1st-axis.
+
+**v5b (GPU 2)**: ConvNeXtV2-base-384 + backbone_mode=finetune (full unfreeze). lr 1e-6 (보수적). 3000 step from-scratch effectively (pretrained=ImageNet only). 사용자 직관: CNN 쓸 거면 unfreeze 필수.
+
+Watcher 자동 eval (v5a: ckpts 500/1000/1500, v5b: ckpts 1500/3000) on completion.
+
+### 11.20 v5b (ConvNeXt unfreeze) 실패 (14:00)
+
+- gnorm 11-42 throughout, loss never <1.5 (early start at 2.5+)
+- eval 7/27 all FAIL, dist 19-21mm
+- lr 1e-6 도 너무 높음 OR ConvNeXt full unfreeze 우리 데이터 size에 over-parameterized
+- v5b.2 retry 보류 — v5a (frozen SigLIP2 + aux boost) 결과 우선
+
+### 11.21 v5a.2 launch (14:00) — aux boost stress test
+
+GPU 2 free → v5a.2 시작:
+- weight 1.0 → **2.0**, max_boost 50 → **100** (사용자 "올릴수록 좋아짐" stress)
+- 나머지 v5a 동일 (lr 5e-6, 1500 step, champion v3 base)
+- GPU 1: v5a 3-ckpt eval 진행중 (ckpt 1500 ep 1/27)
+- GPU 2: v5a.2 train 시작
+
+만약 v5a > baseline AND v5a.2 > v5a → "올릴수록 좋아짐" confirmed, sweep aux weight 더 올려서 한계점 찾기 (v5a.3 weight 4.0?)
+
+### 11.22 사용자 feedback: ckpt eval sparse (14:00)
+
+"Eval을 그렇게 많이 할 필요없긴하거든? 지금 그런식이면 final이랑 중반 초반만 봐도 될 것 같기도"
+
+→ memory `feedback_eval_workflow.md` 보강. watcher 작성 시:
+- final 우선 (1500 step)
+- final이 좋으면 mid 추가 (500 또는 1000)
+- early 일반적으로 안 봄
+
+**즉시 적용**:
+- v5a.2 watcher: final 1500만 eval (500/1000 skip)
+- v5a 현재 eval은 1500 진행중 → 끝나면 결과 보고 500/1000 cancel 검토
+
+### 11.23 v5a (aux boost 1.0/50) 결과 + outlier 분석 (14:15)
+
+**Raw distribution comparison (27 ep)**:
+
+```
+                       n  mean  median  p25   p10  best5  <2mm  <1mm
+v3_baseline           27  5.42  5.33   2.96  2.41  2.26    1     0
+v5a (boost 1.0/50)    27  5.44  5.10   3.17  2.82  2.56    1     0
+                                ↑                          
+                            median 0.23 ↑       best 0.30 ↓
+```
+
+**해석** (user outlier insight 적용):
+- Mean 동등 → 평균만 보면 "별 효과 없음"
+- Median 0.23mm 개선 (v5a 살짝 ↑)
+- **하지만 best 10/5 cells 모두 후퇴** (best5 2.26→2.56) — fine alignment 손해!
+- 결론: aux_boost는 **모든 cell을 5mm 영역으로 수렴**시키는 효과. outlier는 약간 개선, best cells는 후퇴 → fine precision 측면 net 손해
+
+→ 사용자 가설 "올릴수록 좋아짐"이 이 config에서 confirm 안 됨. v5a.2 (2.0/100) 더 강화하면 더 안 좋을 가능성 큼.
+
+**analyze_trajectory.py 보강**: 분포 metric 추가 (p25, p10, best5_mean, n_under_2mm/1mm).
+
+### 11.24 v5a.2 (w=2.0, b=100) 결과 + aux_boost saturation (14:40)
+
+```
+                       n  mean  med   p25   p10  best5 <2 <1
+v3_baseline           27  5.42  5.33  2.96  2.41  2.26  1  0
+v5a (w=1.0, b=50)     27  5.44  5.10  3.17  2.82  2.56  1  0
+v5a.2 (w=2.0, b=100)  27  5.46  5.05  3.15  2.78  2.59  1  0  ← v5a와 거의 동일
+```
+
+aux_boost weight 2x 차이로도 결과 동일 → **saturation**. 더 강화 의미 없음. axis 종결.
+
+### 11.25 사용자 결정 (14:45)
+
+- **GPU당 2 eval 동시 가능** (`feedback_gpu_concurrency` 신규) — 시간 절약 시 활용
+- **Compact 준비**: 모든 v1~v5a.2 결과 + 사용자 dead-end 결정 + GPU concurrency를 memory에 강하게 저장
+
+### 11.26 현재 진행 (compact 전)
+
+**GPU 1**: v3 baseline + diff_steps=50 redo (Stage 1 sweep 결과 stale npz 오염 의심, 깨끗하게 재확인). ep ~5/27.
+
+**다음 axes** (post-compact 진행 후보):
+1. Action precision 분석 (diffusion noise floor)
+2. Near-goal data 재생성 (HOLD step ↑, 0~5mm trajectory 보강)
+3. CNN partial unfreeze v5b.2 (last 2 stages만, lr 1e-7)
+4. Hierarchical fine-policy (별도 small near-goal model)
+
+---
+
+## 11.27 Action Variance Diagnostic (2026-05-20 post-compact)
+
+**가설**: 5mm 천장 = diffusion sampling noise floor (action precision 한계)
+**방법**: v3 ckpt1000 고정, 같은 obs에서 30 samples (×3 diff_steps × 3 phantom offsets) → per-dim std 측정
+
+**Output**: `logs/action_variance_v3_ckpt1000.json`
+
+| diff_steps | state    | dx     | dy     | dz     | rx     | ry     | rz     |
+|------------|----------|--------|--------|--------|--------|--------|--------|
+| 10         | far_10mm | 0.059  | 0.069  | 0.097  | 0.087  | 0.122  | 0.076  |
+| 10         | mid_5mm  | 0.057  | 0.067  | 0.088  | 0.087  | 0.117  | 0.059  |
+| 10         | near_3mm | 0.078  | 0.073  | 0.106  | 0.089  | 0.097  | 0.090  |
+| 25         | far_10mm | 0.076  | 0.073  | 0.092  | 0.126  | 0.122  | 0.090  |
+| 25         | mid_5mm  | 0.072  | 0.082  | 0.091  | 0.108  | 0.092  | 0.093  |
+| 25         | near_3mm | 0.062  | 0.062  | 0.101  | 0.090  | 0.146  | 0.065  |
+| 50         | far_10mm | 0.079  | 0.067  | 0.086  | 0.102  | 0.132  | 0.072  |
+| 50         | mid_5mm  | 0.060  | 0.066  | 0.093  | 0.116  | 0.079  | 0.087  |
+| 50         | near_3mm | 0.095  | 0.060  | 0.112  | 0.079  | 0.111  | 0.081  |
+
+**해석** (action_max_sim ≈ 1mm/step normalized to [-1,1]):
+- per-step std 0.06~0.13 = **0.06~0.13mm 또는 0.1° uncertainty/step** (sub-mm)
+- closed-loop control, RMS over 100 steps = √100 × 0.1 ≈ 1mm 누적 변동
+- **diff_steps 10 = 25 = 50: 거의 동일** (rx/ry 약간 변동 있으나 평균 차이 없음)
+
+**결론** ⚠️:
+1. ❌ **Action precision은 5mm 천장의 원인 아님**. Sampling noise는 sub-mm.
+2. ❌ Diffusion step 늘리는 것도 효과 없음 (10 = 50). Stage 1 sweep 결과 (모든 cell 5mm 천장)와 일치.
+3. ✓ 진짜 천장: **BC 모델이 near-goal에 정확한 mean action을 학습 못함** (데이터 + 표현력 한계)
+4. ✓ 다음 axis 정당화: **near-goal 데이터 보강 (HOLD=60)** + hierarchical model
+
+**Caveat**: phantom offset 10mm시에도 actual dist 33.7mm로 측정됨 — robot이 home pose. fine-align 영역 (≤5mm) state는 trained model 추론 후의 동적 state. 진단은 "approach far region" variance만 측정. 향후 actual fine-align state에서 측정 필요시 reset에 robot pre-align 추가.
+
+## 11.28 Near-goal Data Regeneration (2026-05-20)
+
+**가설**: 천장은 BC near-goal 데이터 부족. Hold trajectory 2배 보강 → fine alignment frame 학습량 ↑.
+
+**구성**:
+- `Sim/Save_dataset_align_NEARGOAL.py` (Save_dataset_align_HARD_unified copy)
+- HOLD_RECORD_STEPS: 30 → **60** (hold trajectory 2배)
+- ALIGN_HOLD_STEPS: 10 → **20** (성공 인정 더 엄격 — 진짜 정렬된 trajectory만)
+- ALIGN_THRESHOLD_M: 0.002 그대로 (1mm 시도하면 성공률 망함)
+
+**Launch** (GPU 영향 없음, CPU 4 worker):
+```bash
+python -u Sim/run_parallel.py --script align_neargoal \
+  --workers 4 --episodes 250 \
+  --base-dir dataset/fine_align/NEARGOAL_hold60_v1 \
+  --randomize-phantom-pos --no-side-camera --seed 42
+```
+
+**예상**: ~70분 (HARD 30step hold 기준 +10% 시간). 완료 후 champion finetune cotrain mix에 추가.
+
+
+---
+
+## 11.29 v3 diff50 clean retest (2026-05-20)
+
+**가설**: Stage 1 sweep contamination 의심 (stale npz로 모든 cell 5mm 천장). diff_steps=50으로 깨끗하게 retest 시 천장 깨질까?
+
+**구성**: v3 ckpt1000, fresh eval dir (이전 stale dir 삭제), 27-cell @ retreat=2, diff50/exec1
+
+**결과** (vs diff10 baseline):
+| | diff10 baseline | diff50 retest |
+|---|---|---|
+| SR | 88.9% | **70.4% (-18pp)** |
+| close_5mm | 88.9% | **48.1% (-41pp!)** |
+| close_2mm | 3.7% | 0% |
+| close_1mm | 0% | 0% |
+| mean_min | 5.42 | 5.59 |
+| median_min | 5.33 | 5.11 |
+| best5_mean | 2.26 | 2.37 |
+
+**결론**:
+1. ❌ Stage 1 sweep contamination 의혹은 무효. Stage 1 결과대로 diff_steps 변경은 도움 안 됨
+2. ⚠️ **학습-inference diffusion step mismatch는 해로움**. 학습 diff10 + inference diff50 → 48% SR 폭락
+3. 학습 distribution과 inference scheduler 일관성 유지가 중요
+4. action variance diagnostic도 동일 의미: diffusion step 자체는 천장과 무관
+
+## 11.30 v3 final ckpt eval (2026-05-20)
+
+**가설**: champion ckpt1000이 sweet spot인가, training 더 가면 좋아지는가?
+
+**구성**: v3 checkpoint_final (5000 step), 27-cell, diff10/exec1
+
+**결과** (vs ckpt1000):
+| | ckpt1000 (champion) | checkpoint_final (5000) |
+|---|---|---|
+| SR | 88.9% | 74.1% |
+| close_5mm | 88.9% | 47.1% |
+| close_2mm | 3.7% | 2.9% |
+| close_1mm | 0% | 0% |
+| mean_min | 5.42 | 5.89 |
+| median_min | 5.33 | 5.21 |
+| best5_mean | 2.26 | 2.18 |
+
+**결론**:
+- **ckpt1000이 sweet spot 확정**. 5000 step까지 가면 mean/SR/close_5 모두 약간 worse
+- best5는 살짝 better (overfit 가능성) 하지만 일관성 떨어짐
+- v3 학습 schedule (max 5000 step)에서 best ckpt = 1000 stand firm
+
+## 11.31 NEARGOAL Dual Track datagen launch (2026-05-20)
+
+**가설** (사용자 인사이트):
+1. 5mm 이내 정렬/유지 데이터 부족 → Track A
+2. 각도 교정 약함 → Track B (angle-only specialized)
+
+**구성**:
+- Track A: `Save_dataset_align_only` script, phantom ±12/±29/0/±7°, perturb 5mm XY/±5mm Z/5° angle, hold 60, 3000 ep
+- Track B: 동일 phantom, perturb XY=0/Z=0/angle=15° (angle-only), hold 60, 1000 ep
+- 동시 launch (20 worker), CPU only
+
+**코드 변경**:
+- `Sim/run_parallel.py`: `--perturb-xy-mm/-z-min-mm/-z-max-mm/-angle-deg` flag 추가
+- `Sim/6_neargoal_dual_track.sh`: dual-track 동시 launch
+
+**진행 상황**:
+- Track A worker 0: ~30 sec/ep (perturb 복잡) → 100 ep × 10 worker ~5h
+- Track B worker 0: ~10 sec/ep (angle만이라 빠름) → 100 ep × 10 worker ~1.5h
+- System load: 60/96 cores (24 worker total: Track A 10 + Track B 10 + 기존 NEARGOAL_v1 4). 정상
+
+**Next** (~1.5h 후):
+- Track B 완료 → sanity check (HDF5 ≥800, perturb metadata 검증)
+- Track A 진행 중 (~5h)
+- 둘 다 완료 → champion v3 finetune cotrain mix (lr 2.5e-6, max 2000 step)
+

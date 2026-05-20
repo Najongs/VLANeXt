@@ -81,37 +81,30 @@ FINE_ALIGN_SPEED = 0.0025    # 미세 정렬 속도 (m/s) — 녹화 중
 # 0.1 = sharper trapezoid. Lower = more time at constant velocity, less "stop-near-goal" bias.
 FINE_ALIGN_ACCEL_FRAC = 0.15
 
-# --- Perturbation 설정 (미세 정렬 시작 전 흐트러뜨리는 범위) ---
-PERTURB_POS_XY_MM = 5.0    # XY 평면 perturbation 범위 (±mm)
-PERTURB_POS_Z_MIN_MM = -5.0 # Z축 하한 (mm) — 음수 시 occlusion check로 가려진 케이스 자동 폐기
-PERTURB_POS_Z_MAX_MM = 5.0  # Z축 상한 (mm)
-PERTURB_ANGLE_DEG = 5.0    # 각도 perturbation 범위 (±deg)
-ALLOW_OCCLUDED = False      # True 시 tool_camera에서 needle tip이 가려져도 폐기하지 않음
+# --- Perturbation 설정 (HARD variant: eval realistic ±10° + 여유) ---
+PERTURB_POS_XY_MM = 15.0   # 5 → 15
+PERTURB_POS_Z_MIN_MM = -10.0  # ±5 → ±10
+PERTURB_POS_Z_MAX_MM = 10.0
+PERTURB_ANGLE_DEG = 15.0   # 5 → 15 (★ 가장 중요)
+ALLOW_OCCLUDED = True  # unified: occluded ep도 그냥 저장
 
 # --- 성공 조건 ---
 ALIGN_THRESHOLD_M = 0.002   # needle tip - trocar entry 거리 (m)
-ALIGN_HOLD_STEPS = 10       # threshold 이내 연속 유지 횟수
+ALIGN_HOLD_STEPS = 20       # NEARGOAL: 10 → 20 (더 엄격한 정렬 인정, 진짜 정밀 데이터만)
 
 # --- Task Instruction ---
 TASK_INSTRUCTION = "Align the needle tip to the small grey circular trocar port on the eye model, next to the larger lens opening"
 
-# --- Holding (정렬 완료 후 자세 유지 녹화) ---
-HOLD_RECORD_STEPS = 10           # 정렬 완료 후 녹화 control steps
+# --- Holding (HARD: hold mass 3× — time_near 학습) ---
+HOLD_RECORD_STEPS = 60           # NEARGOAL: 30 → 60 (near-goal trajectory 2배 보강)
 
 # --- 기타 ---
 ACTION_CLIP_MM = 1.0        # IK spike 방지용 delta position 클리핑 (mm)
-TIMEOUT_SEC = 30.0          # 에피소드 전체 타임아웃 (초)
-MAX_CTRL_STEPS = 250        # 녹화 control step 상한 (초과 시 에피소드 폐기)
+TIMEOUT_SEC = 40.0          # 30 → 40 (어려운 케이스 시간 여유)
+MAX_CTRL_STEPS = 350        # 250 → 350
 
 # --- Retreat (goal_tip을 trocar entry에서 뒤로 빼는 거리) ---
 RETREAT_MM = 1.0           # insertion axis 반대 방향 retreat (mm)
-
-# --- Phantom randomization range (meters / degrees) ---
-# run_parallel.py가 patch함. 기존 bimodal(Y에 따라 angle 0°/-90° 고정) 폐기.
-PHANTOM_X_RANGE_M = (-0.025, 0.025)
-PHANTOM_Y_RANGE_M = (-0.025, 0.075)
-PHANTOM_Z_RANGE_M = (0.0, 0.0)
-PHANTOM_ANGLE_RANGE_DEG = (-25.0, 25.0)
 
 # --- Bias collection (set via CLI --bias) ---
 BIAS_DIRECTION = None       # e.g. "x_neg", "y_pos"
@@ -300,30 +293,48 @@ def trapezoid_step(t, accel_frac=0.2):
     return 1.0 - v_max * ta * (u**3 - 0.5 * u**4)
 
 
-def randomize_phantom_pos(model, data, phantom_id, rot_id, combo_counts=None):
-    """팬텀 위치/회전 랜덤화 (uniform random in configured range).
+_TROCAR_BASE_POS = None    # trocar_assembly base (XY 변경)
+_PHANTOM_ASM_BASE_POS = None  # phantom_assembly base (Z 변경)
 
-    combo_counts: 호환용 인자 (사용 안 함). 이전 bimodal 로직 폐기 후
-                  PHANTOM_*_RANGE_* 모듈 변수 기반 uniform sampling으로 단순화.
+def randomize_phantom_pos(model, data, trocar_id, phantom_asm_id, rot_id, combo_counts=None):
+    """팬텀 targeted bimodal — 실패 cell 두 곳에 집중.
+    Cell A: (x∈±15, y=+50)  ← y=+50 corner row 보완
+    Cell B: (x=+15, y=-25)  ← yn25_xp15 corner 보완
+    각 cell ±5mm 산포로 jitter. z, angle은 eval 범위 cover.
+
+    ★ eval(sim_eval_align_only.py:427-428) 매칭: XY→trocar_assembly, Z→phantom_assembly.
     """
-    offset_x = np.random.uniform(*PHANTOM_X_RANGE_M)
-    offset_y = np.random.uniform(*PHANTOM_Y_RANGE_M)
-    offset_z = np.random.uniform(*PHANTOM_Z_RANGE_M)
-    random_angle_deg = float(np.random.uniform(*PHANTOM_ANGLE_RANGE_DEG))
+    global _TROCAR_BASE_POS, _PHANTOM_ASM_BASE_POS
+    if _TROCAR_BASE_POS is None:
+        _TROCAR_BASE_POS = model.body_pos[trocar_id].copy()
+    if _PHANTOM_ASM_BASE_POS is None:
+        _PHANTOM_ASM_BASE_POS = model.body_pos[phantom_asm_id].copy()
 
-    model.body_pos[phantom_id] = np.array([offset_x, offset_y, offset_z])
+    if np.random.random() < 0.5:
+        # Cell A: y=+50 row
+        dx = np.random.uniform(-0.015, +0.015)
+        dy = np.random.uniform(+0.045, +0.055)
+    else:
+        # Cell B: y=-25, x=+15
+        dx = np.random.uniform(+0.010, +0.020)
+        dy = np.random.uniform(-0.030, -0.020)
+    dz = np.random.uniform(-0.005, +0.005)
+    random_angle_deg = float(np.random.uniform(-15.0, +15.0))  # ±15°
+
+    model.body_pos[trocar_id] = _TROCAR_BASE_POS + np.array([dx, dy, 0.0])
+    model.body_pos[phantom_asm_id] = _PHANTOM_ASM_BASE_POS + np.array([0.0, 0.0, dz])
 
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
     model.body_quat[rot_id] = new_quat
-    print(f">>> Randomize: Pos=({offset_x:.3f}, {offset_y:.3f}, {offset_z:.3f}), Angle={random_angle_deg:.1f} deg")
+    print(f">>> Randomize(grid): dPos=({dx*1000:+.1f}, {dy*1000:+.1f}, {dz*1000:+.1f})mm Angle={random_angle_deg:+.1f}° [trocar+phantom_z]")
     mujoco.mj_forward(model, data)
-    return np.array([offset_x, offset_y, offset_z], dtype=np.float32), new_quat.astype(np.float32), np.float32(random_angle_deg)
+    return np.array([dx, dy, dz], dtype=np.float32), new_quat.astype(np.float32), np.float32(random_angle_deg)
 
 
 RANDOM_SEED = None
-RANDOMIZE_PHANTOM = False
-PHANTOM_POS = None  # (x, y) 고정 위치, e.g. (0.0, -0.2)
+RANDOMIZE_PHANTOM = True   # ★ unified: phantom grid 랜덤화 활성
+PHANTOM_POS = None         # 고정 위치 미사용
 
 def main():
     if RANDOM_SEED is not None:
@@ -342,7 +353,8 @@ def main():
     n_motors = model.nu
     dof = model.nv
 
-    # Phantom body IDs (for randomization)
+    # Phantom body IDs (for randomization) — eval과 매칭: XY는 trocar_assembly, Z는 phantom_assembly
+    trocar_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trocar_assembly")
     phantom_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "phantom_assembly")
     rotating_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rotating_assembly")
 
@@ -508,10 +520,11 @@ def main():
         phantom_offset = np.zeros(3, dtype=np.float32)
         phantom_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         phantom_angle_deg = np.float32(0.0)
-        if PHANTOM_POS is not None and phantom_body_id >= 0:
-            # 고정 위치에 팬텀 배치
+        if PHANTOM_POS is not None and trocar_body_id >= 0:
+            # 고정 위치에 팬텀 배치 (XY는 trocar_assembly)
             px, py = PHANTOM_POS
-            model.body_pos[phantom_body_id] = np.array([px, py, 0.0])
+            _trocar_base = model.body_pos[trocar_body_id].copy()
+            model.body_pos[trocar_body_id] = _trocar_base + np.array([px, py, 0.0])
             # 회전: Y 위치에 따라 고정 각도
             if py >= -0.25:
                 random_angle_deg_val = 0
@@ -525,12 +538,12 @@ def main():
             phantom_quat = new_quat.astype(np.float32)
             phantom_angle_deg = np.float32(random_angle_deg_val)
             print(f">>> Fixed phantom: Pos=({px:.2f}, {py:.2f}), Angle={random_angle_deg_val:.1f} deg")
-        elif RANDOMIZE_PHANTOM and phantom_body_id >= 0:
+        elif RANDOMIZE_PHANTOM and trocar_body_id >= 0 and phantom_body_id >= 0:
             phantom_offset, phantom_quat, phantom_angle_deg = randomize_phantom_pos(
-                model, data, phantom_body_id, rotating_id, combo_counts=combo_counts)
+                model, data, trocar_body_id, phantom_body_id, rotating_id, combo_counts=combo_counts)
 
         # 팬텀이 이동된 경우 재정렬 필요
-        need_realign = (PHANTOM_POS is not None or RANDOMIZE_PHANTOM) and phantom_body_id >= 0
+        need_realign = (PHANTOM_POS is not None or RANDOMIZE_PHANTOM) and trocar_body_id >= 0
         if need_realign:
             # 팬텀 이동 후 재정렬 (trocar 위치가 바뀌었으므로)
             p_entry = data.site_xpos[target_entry_id].copy()

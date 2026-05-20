@@ -270,13 +270,20 @@ def build_perturb_grid(xy_steps, z_steps, angle_steps, repeats,
                        x_range=PERTURB_POS_XY_MM,
                        y_range=(PERTURB_POS_Y_MIN_MM, PERTURB_POS_Y_MAX_MM),
                        z_range=(PERTURB_POS_Z_MIN_MM, PERTURB_POS_Z_MAX_MM),
-                       angle_range=PERTURB_ANGLE_DEG):
-    """Phantom-grid: enumerate phantom (x, y, z, angle) cells × repeats. Values in mm/deg."""
-    if xy_steps >= 2:
-        xs = np.linspace(-x_range, x_range, xy_steps)
-        ys = np.linspace(y_range[0], y_range[1], xy_steps)
+                       angle_range=PERTURB_ANGLE_DEG,
+                       x_steps=None, y_steps=None):
+    """Phantom-grid: enumerate phantom (x, y, z, angle) cells × repeats. Values in mm/deg.
+    x_steps/y_steps override xy_steps when provided (for asymmetric grids)."""
+    xs_n = x_steps if x_steps is not None else xy_steps
+    ys_n = y_steps if y_steps is not None else xy_steps
+    if xs_n >= 2:
+        xs = np.linspace(-x_range, x_range, xs_n)
     else:
-        xs = np.array([0.0]); ys = np.array([0.0])
+        xs = np.array([0.0])
+    if ys_n >= 2:
+        ys = np.linspace(y_range[0], y_range[1], ys_n)
+    else:
+        ys = np.array([(y_range[0] + y_range[1]) / 2.0])
     if z_steps >= 2:
         zs = np.linspace(z_range[0], z_range[1], z_steps)
     elif z_steps == 1:
@@ -900,6 +907,8 @@ def run_eval(cfg):
             angle_steps=getattr(cfg, "angle_steps", 1),
             repeats=getattr(cfg, "repeats", 1),
             x_range=x_rng, y_range=y_rng, z_range=z_rng, angle_range=a_rng,
+            x_steps=getattr(cfg, "x_steps", None),
+            y_steps=getattr(cfg, "y_steps", None),
         )
         num_episodes = len(grid_cells_all)
         print(f"[grid] perturb_mode=grid → {num_episodes} cells "
@@ -989,8 +998,31 @@ def run_eval(cfg):
         kp_dist_history = []  # predicted dist_mm per step
         kp_lateral_history = []  # |troc_uv - tip_uv| in normalized [0,1] space per step
 
+        overlay_source = getattr(cfg, "overlay_source", "off")
+        overlay_color = tuple(getattr(cfg, "overlay_color", (255, 0, 0)))
+        overlay_radius_px = int(getattr(cfg, "overlay_radius_px", 3))
+        # Aliased import to avoid shadowing the module-level `draw_overlay`
+        # (sim_eval.draw_overlay = trajectory replay overlay used later at line ~1125).
+        if overlay_source != "off":
+            from src.utils.overlay_utils import draw_overlay as _draw_goal_overlay
+
         for ctrl_step in range(max_steps):
             frames = env.render_cameras()
+
+            # SutureBot goal-pixel overlay (applied BEFORE resize/preprocess).
+            # Modifies frames["tool_camera"] in place.
+            if overlay_source == "gt":
+                _m = env.get_spatial_metrics()
+                _troc_uv = _m.get("trocar_uv")
+                if _troc_uv is not None:
+                    _draw_goal_overlay(frames["tool_camera"],
+                                       (float(_troc_uv[0]), float(_troc_uv[1])),
+                                       color=overlay_color, radius_px=overlay_radius_px)
+            elif overlay_source == "predicted" and kp_inferencer is not None:
+                _tu, _tv, _ = kp_inferencer.predict(frames["tool_camera"])
+                _draw_goal_overlay(frames["tool_camera"], (_tu, _tv),
+                                   color=overlay_color, radius_px=overlay_radius_px)
+
             img_ext = preprocess_image(frames["side_camera"], (image_size, image_size))
             img_wrist = preprocess_image(frames["tool_camera"], (image_size, image_size))
             img_top = preprocess_image(frames["top_camera"], (image_size, image_size))
@@ -1406,6 +1438,10 @@ if __name__ == "__main__":
                         help="random: legacy uniform sampling; grid: deterministic 4D grid")
     parser.add_argument("--xy-steps", type=int, default=5,
                         help="(grid) XY axis steps per side. Default 5 → 5x5=25 cells")
+    parser.add_argument("--x-steps", type=int, default=None,
+                        help="(grid) Override X axis step count (independent of --xy-steps)")
+    parser.add_argument("--y-steps", type=int, default=None,
+                        help="(grid) Override Y axis step count (independent of --xy-steps)")
     parser.add_argument("--z-steps", type=int, default=2,
                         help="(grid) Z axis steps. Default 2 (near/far)")
     parser.add_argument("--angle-steps", type=int, default=1,
@@ -1448,6 +1484,16 @@ if __name__ == "__main__":
                         help="Iterative KP visual-servo iters BEFORE sensor grid (1=seed only, 3 recommended).")
     parser.add_argument("--handoff-trigger-mm", type=float, default=15.0,
                         help="Only run handoff if min_dist reached during VLA is ≤ this threshold")
+    parser.add_argument("--num-inference-timesteps", type=int, default=None,
+                        help="Override model.diffusion_steps at eval (e.g. 25/50/100).")
+    parser.add_argument("--num-steps-execute", type=int, default=None,
+                        help="Override eval.num_steps_execute (action chunk slice length).")
+    parser.add_argument("--overlay-source", type=str, default="off",
+                        choices=["gt", "predicted", "off"],
+                        help="SutureBot goal-pixel overlay source. gt=oracle, predicted=kp head, off=no overlay")
+    parser.add_argument("--overlay-color", type=int, nargs=3, default=[255, 0, 0],
+                        metavar=("R", "G", "B"))
+    parser.add_argument("--overlay-radius-px", type=int, default=3)
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -1469,6 +1515,8 @@ if __name__ == "__main__":
     cfg.eval_seed = args.eval_seed
     cfg.perturb_mode = args.perturb_mode
     cfg.xy_steps = args.xy_steps
+    cfg.x_steps = args.x_steps
+    cfg.y_steps = args.y_steps
     cfg.z_steps = args.z_steps
     cfg.angle_steps = args.angle_steps
     cfg.repeats = args.repeats
@@ -1492,5 +1540,12 @@ if __name__ == "__main__":
     cfg.dump_vqa_out = args.dump_vqa_out
     cfg.vqa_band_lo = args.vqa_band_lo
     cfg.vqa_band_hi = args.vqa_band_hi
+    if args.num_inference_timesteps is not None:
+        cfg.model.diffusion_steps = args.num_inference_timesteps
+    if args.num_steps_execute is not None:
+        cfg.eval.num_steps_execute = args.num_steps_execute
+    cfg.overlay_source = args.overlay_source
+    cfg.overlay_color = tuple(args.overlay_color)
+    cfg.overlay_radius_px = args.overlay_radius_px
 
     run_eval(cfg)

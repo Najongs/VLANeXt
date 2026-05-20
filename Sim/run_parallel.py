@@ -40,6 +40,10 @@ import numpy as np
 SCRIPT_MAP = {
     "align": "Save_dataset_align_only",
     "align_hard": "Save_dataset_align_HARD",
+    "align_hard_y50": "Save_dataset_align_HARD_y50",
+    "align_hard_yn25_xp15": "Save_dataset_align_HARD_yn25_xp15",
+    "align_hard_unified": "Save_dataset_align_HARD_unified",
+    "align_neargoal": "Save_dataset_align_NEARGOAL",
     "approach": "Save_dataset_approach_only",
     "insertion": "Save_dataset_insertion_only",
     "basic": "Save_dataset_basic_motion",
@@ -103,6 +107,28 @@ def main():
                         help="(insertion only) Perturbation duration in control frames")
     parser.add_argument("--hold-steps", type=int, default=None,
                         help="(approach only) Hold frames after reaching target")
+    parser.add_argument("--hold-record-steps", type=int, default=None,
+                        help="(align) HOLD_RECORD_STEPS override (hold frames recorded after alignment)")
+    parser.add_argument("--phantom-x-mm", type=float, nargs=2, default=None,
+                        metavar=("MIN", "MAX"),
+                        help="(approach/align) Phantom X range in mm. e.g. --phantom-x-mm -12 12")
+    parser.add_argument("--phantom-y-mm", type=float, nargs=2, default=None,
+                        metavar=("MIN", "MAX"),
+                        help="(approach/align) Phantom Y range in mm. e.g. --phantom-y-mm -29 29")
+    parser.add_argument("--phantom-z-mm", type=float, nargs=2, default=None,
+                        metavar=("MIN", "MAX"),
+                        help="(approach/align) Phantom Z range in mm. e.g. --phantom-z-mm 0 0")
+    parser.add_argument("--phantom-angle-deg", type=float, nargs=2, default=None,
+                        metavar=("MIN", "MAX"),
+                        help="(approach/align) Phantom angle range in degrees. e.g. --phantom-angle-deg -12 12")
+    parser.add_argument("--perturb-xy-mm", type=float, default=None,
+                        help="(align) Robot perturbation XY range (±mm). Override PERTURB_POS_XY_MM. Default 5")
+    parser.add_argument("--perturb-z-min-mm", type=float, default=None,
+                        help="(align) Robot perturbation Z min (mm). Override PERTURB_POS_Z_MIN_MM. Default -5")
+    parser.add_argument("--perturb-z-max-mm", type=float, default=None,
+                        help="(align) Robot perturbation Z max (mm). Override PERTURB_POS_Z_MAX_MM. Default 5")
+    parser.add_argument("--perturb-angle-deg", type=float, default=None,
+                        help="(align) Robot perturbation angle range (±deg). Override PERTURB_ANGLE_DEG. Default 5")
     parser.add_argument("--cameras", type=str, nargs="+", default=None,
                         help="Camera list to save (e.g. --cameras top_camera tool_camera)")
     parser.add_argument("--allow-occluded", action="store_true",
@@ -246,6 +272,43 @@ def main():
     # Approach: hold steps
     hold_steps_line = f"{module_name}.HOLD_STEPS = {args.hold_steps}" if args.hold_steps is not None and args.script == "approach" else ""
 
+    # Align: hold record steps (frames recorded after alignment success)
+    hold_record_line = (
+        f"{module_name}.HOLD_RECORD_STEPS = {args.hold_record_steps}"
+        if args.hold_record_steps is not None and args.script in ("align", "align_hard", "align_hard_unified")
+        else ""
+    )
+
+    # Phantom range overrides (approach + align scripts; module variables in meters/degrees)
+    range_parts = []
+    if args.script in ("approach", "align", "align_hard", "align_hard_unified"):
+        if args.phantom_x_mm is not None:
+            a, b = args.phantom_x_mm
+            range_parts.append(f"{module_name}.PHANTOM_X_RANGE_M = ({a/1000.0}, {b/1000.0})")
+        if args.phantom_y_mm is not None:
+            a, b = args.phantom_y_mm
+            range_parts.append(f"{module_name}.PHANTOM_Y_RANGE_M = ({a/1000.0}, {b/1000.0})")
+        if args.phantom_z_mm is not None:
+            a, b = args.phantom_z_mm
+            range_parts.append(f"{module_name}.PHANTOM_Z_RANGE_M = ({a/1000.0}, {b/1000.0})")
+        if args.phantom_angle_deg is not None:
+            a, b = args.phantom_angle_deg
+            range_parts.append(f"{module_name}.PHANTOM_ANGLE_RANGE_DEG = ({a}, {b})")
+    phantom_range_lines = "\n".join(range_parts)
+
+    # Robot perturbation overrides (align scripts)
+    perturb_parts = []
+    if args.script in ("align", "align_hard", "align_hard_unified"):
+        if args.perturb_xy_mm is not None:
+            perturb_parts.append(f"{module_name}.PERTURB_POS_XY_MM = {args.perturb_xy_mm}")
+        if args.perturb_z_min_mm is not None:
+            perturb_parts.append(f"{module_name}.PERTURB_POS_Z_MIN_MM = {args.perturb_z_min_mm}")
+        if args.perturb_z_max_mm is not None:
+            perturb_parts.append(f"{module_name}.PERTURB_POS_Z_MAX_MM = {args.perturb_z_max_mm}")
+        if args.perturb_angle_deg is not None:
+            perturb_parts.append(f"{module_name}.PERTURB_ANGLE_DEG = {args.perturb_angle_deg}")
+    perturb_lines = "\n".join(perturb_parts)
+
     # Insertion overrides
     insertion_lines = ""
     if args.script == "insertion":
@@ -293,10 +356,13 @@ with open(r'{grid_json}', 'r') as _f:
 {module_name}.MAX_EPISODES = len({module_name}.GRID_CELLS)
 {seed_line}
 {phantom_line}
+{phantom_range_lines}
+{perturb_lines}
 {no_insertion_line}
 {no_side_cam_line}
 {cameras_line}
 {allow_occluded_line}
+{hold_record_line}
 {insertion_lines}
 
 if __name__ == "__main__":
@@ -323,6 +389,8 @@ import {module_name}
 {bias_lines}
 {seed_line}
 {phantom_line}
+{phantom_range_lines}
+{perturb_lines}
 {no_insertion_line}
 {no_side_cam_line}
 {cameras_line}
@@ -330,6 +398,7 @@ import {module_name}
 {basic_steps_line}
 {basic_dir_line}
 {hold_steps_line}
+{hold_record_line}
 {insertion_lines}
 
 if __name__ == "__main__":

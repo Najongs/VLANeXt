@@ -138,6 +138,65 @@ def load_model(checkpoint_path: str, diffusion_steps: int = 10, scheduler_type: 
     num_inference_timesteps = diffusion_steps if diffusion_steps > 0 else ckpt_inf_steps
     sched = scheduler_type or mc.get("scheduler_type", "flow_match")
 
+    # === ACT / DP baseline dispatch ===
+    model_type = mc.get("model_type", "vlanext")
+    if model_type == "act":
+        from src.models.act_policy import ACTPolicy
+        act_cfg = mc.get("act", {})
+        model = ACTPolicy(
+            action_dim=mc["action_dim"],
+            num_actions=dc["future_len"],
+            num_history=dc["history_len"],
+            hidden_dim=act_cfg.get("hidden_dim", 512),
+            num_encoder_layers=act_cfg.get("num_encoder_layers", 4),
+            num_decoder_layers=act_cfg.get("num_decoder_layers", 6),
+            num_heads=act_cfg.get("num_heads", 8),
+            feedforward_dim=act_cfg.get("feedforward_dim", 2048),
+            dropout=act_cfg.get("dropout", 0.1),
+            latent_dim=act_cfg.get("latent_dim", 32),
+            kl_weight=act_cfg.get("kl_weight", 10.0),
+            vision_pretrained=act_cfg.get("vision_pretrained", True),
+            vision_encoder_path=mc.get("vision_encoder_path", "google/siglip2-so400m-patch16-512"),
+            use_proprio_input_vlm=mc.get("use_proprio_input_vlm", True),
+        )
+        if list(state_dict.keys())[0].startswith("module."):
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"[ACT] State dict loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device, dtype=torch.bfloat16); model.eval()
+        model.train_config = train_config
+        return model
+    elif model_type == "dp":
+        from src.models.diffusion_policy import DiffusionPolicy
+        dp_cfg = mc.get("dp", {})
+        model = DiffusionPolicy(
+            action_dim=mc["action_dim"],
+            num_actions=dc["future_len"],
+            num_history=dc["history_len"],
+            vision_feat_dim=dp_cfg.get("vision_feat_dim", 512),
+            proprio_emb_dim=dp_cfg.get("proprio_emb_dim", 64),
+            diffusion_step_embed_dim=dp_cfg.get("diffusion_step_embed_dim", 128),
+            unet_down_dims=tuple(dp_cfg.get("unet_down_dims", [256, 512, 1024])),
+            unet_kernel_size=dp_cfg.get("unet_kernel_size", 5),
+            n_groups=dp_cfg.get("n_groups", 8),
+            num_train_timesteps=dp_cfg.get("num_train_timesteps", 100),
+            num_inference_timesteps=dp_cfg.get("num_inference_timesteps", 16),
+            beta_schedule=dp_cfg.get("beta_schedule", "squaredcos_cap_v2"),
+            prediction_type=dp_cfg.get("prediction_type", "epsilon"),
+            vision_pretrained=dp_cfg.get("vision_pretrained", True),
+            vision_encoder_path=mc.get("vision_encoder_path", "google/siglip2-so400m-patch16-512"),
+            use_proprio_input_vlm=mc.get("use_proprio_input_vlm", True),
+        )
+        if list(state_dict.keys())[0].startswith("module."):
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"[DP] State dict loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device, dtype=torch.bfloat16); model.eval()
+        model.train_config = train_config
+        return model
+
     model = VLANeXt(
         lmm_path=mc["lmm_path"],
         vision_encoder_path=mc.get("vision_encoder_path", "google/siglip2-base-patch16-256"),

@@ -30,6 +30,9 @@ HANDOFF_NEAR_MM = 5.0
 HANDOFF_TIME_FRAC = 0.20
 HANDOFF_RETREAT_MM = 3.0
 
+CLOSE_2MM_THRESH = 2.0
+CLOSE_1MM_THRESH = 1.0
+
 
 def analyze_episode(npz_path: Path) -> dict | None:
     z = np.load(npz_path)
@@ -52,8 +55,15 @@ def analyze_episode(npz_path: Path) -> dict | None:
 
     near5 = dist <= 5.0
     near8 = dist <= 8.0
+    near2 = dist <= CLOSE_2MM_THRESH
+    near1 = dist <= CLOSE_1MM_THRESH
     time_near_5 = float(near5.mean())
     time_near_8 = float(near8.mean())
+    time_near_2 = float(near2.mean())
+    time_near_1 = float(near1.mean())
+    # Tail percentiles for distance distribution
+    p50_dist = float(np.percentile(dist, 50))
+    p90_dist = float(np.percentile(dist, 90))
 
     angle_when_near = float(ang[valid][near5].mean()) if (ang is not None and near5.any()) else float("nan")
     lat_when_near = float(lat[valid][near5].mean()) if (lat is not None and near5.any()) else float("nan")
@@ -77,6 +87,10 @@ def analyze_episode(npz_path: Path) -> dict | None:
         retreat_mm=retreat,
         time_near_5mm=time_near_5,
         time_near_8mm=time_near_8,
+        time_near_2mm=time_near_2,
+        time_near_1mm=time_near_1,
+        p50_dist_mm=p50_dist,
+        p90_dist_mm=p90_dist,
         angle_when_near_deg=angle_when_near,
         lateral_when_near_mm=lat_when_near,
         approaching_frac=float(approaching),
@@ -99,15 +113,27 @@ def summarize(rows: list[dict], label: str = "") -> dict:
         "n_episodes": n,
         "close_once_5mm_pct": (col("min_dist_mm") <= 5).mean() * 100,
         "close_once_3mm_pct": (col("min_dist_mm") <= 3).mean() * 100,
+        "close_once_2mm_pct": (col("min_dist_mm") <= CLOSE_2MM_THRESH).mean() * 100,
+        "close_once_1mm_pct": (col("min_dist_mm") <= CLOSE_1MM_THRESH).mean() * 100,
         "close_once_8mm_pct": (col("min_dist_mm") <= 8).mean() * 100,
         "close_once_10mm_pct": (col("min_dist_mm") <= 10).mean() * 100,
         "handoff_ok_pct": (col("handoff_ok") > 0.5).mean() * 100,
         "min_dist_median_mm": float(np.median(col("min_dist_mm"))),
         "min_dist_mean_mm": float(np.mean(col("min_dist_mm"))),
+        # Distribution-aware metrics (outlier-resistant — y=−25 corners drag mean)
+        "min_dist_p25_mm": float(np.percentile(col("min_dist_mm"), 25)),
+        "min_dist_p10_mm": float(np.percentile(col("min_dist_mm"), 10)),
+        "min_dist_best5_mean_mm": float(np.sort(col("min_dist_mm"))[:5].mean()) if len(rows) >= 5 else float("nan"),
+        "n_under_2mm": int((col("min_dist_mm") <= 2.0).sum()),
+        "n_under_1mm": int((col("min_dist_mm") <= 1.0).sum()),
         "final_dist_median_mm": float(np.median(col("final_dist_mm"))),
         "retreat_median_mm": float(np.median(col("retreat_mm"))),
         "time_near_5mm_median": float(np.median(col("time_near_5mm"))),
         "time_near_8mm_median": float(np.median(col("time_near_8mm"))),
+        "time_near_2mm_median": float(np.median(col("time_near_2mm"))),
+        "time_near_1mm_median": float(np.median(col("time_near_1mm"))),
+        "p50_dist_median_mm": float(np.median(col("p50_dist_mm"))),
+        "p90_dist_median_mm": float(np.median(col("p90_dist_mm"))),
         "approach_signal_median": float(np.median(col("approach_signal"))),
         "approaching_frac_mean": float(np.mean(col("approaching_frac"))),
         "fleeing_frac_mean": float(np.mean(col("fleeing_frac"))),
@@ -120,11 +146,14 @@ def print_summary(s: dict):
     print(f"\n=== {s.get('label','')}  ({s['n_episodes']} ep) ===")
     print(f"  SR (strict):              {s['sr_pct']:5.1f}%")
     print(f"  Handoff OK (5mm+20%+r≤3): {s['handoff_ok_pct']:5.1f}%   ← VLA handoff readiness")
-    print(f"  close_once 3 / 5 / 8 / 10 mm: {s['close_once_3mm_pct']:.1f} / {s['close_once_5mm_pct']:.1f} / {s['close_once_8mm_pct']:.1f} / {s['close_once_10mm_pct']:.1f} %")
+    print(f"  close_once 1 / 2 / 3 / 5 / 8 / 10 mm: {s['close_once_1mm_pct']:.1f} / {s['close_once_2mm_pct']:.1f} / {s['close_once_3mm_pct']:.1f} / {s['close_once_5mm_pct']:.1f} / {s['close_once_8mm_pct']:.1f} / {s['close_once_10mm_pct']:.1f} %")
     print(f"  min_dist  median / mean:  {s['min_dist_median_mm']:.2f} / {s['min_dist_mean_mm']:.2f} mm")
+    print(f"  min_dist  p25 / p10 / best5 mean:  {s.get('min_dist_p25_mm', float('nan')):.2f} / {s.get('min_dist_p10_mm', float('nan')):.2f} / {s.get('min_dist_best5_mean_mm', float('nan')):.2f} mm  ← precision tail (outlier-resistant)")
+    print(f"  n <2mm / <1mm:            {s.get('n_under_2mm', 0)} / {s.get('n_under_1mm', 0)}  (of {s['n_episodes']} ep)")
+    print(f"  per-ep p50 / p90 dist med:{s['p50_dist_median_mm']:.2f} / {s['p90_dist_median_mm']:.2f} mm")
     print(f"  final_dist median:        {s['final_dist_median_mm']:.2f} mm")
     print(f"  retreat   median:         {s['retreat_median_mm']:.2f} mm  (lower = stays near target)")
-    print(f"  time_near 5mm / 8mm med:  {s['time_near_5mm_median']:.2%} / {s['time_near_8mm_median']:.2%}")
+    print(f"  time_near 1 / 2 / 5 / 8 mm med: {s['time_near_1mm_median']:.2%} / {s['time_near_2mm_median']:.2%} / {s['time_near_5mm_median']:.2%} / {s['time_near_8mm_median']:.2%}")
     print(f"  approach_signal median:   {s['approach_signal_median']:+.3f}  (+ = drifts toward, − = flees)")
     print(f"    approaching/fleeing:    {s['approaching_frac_mean']:.2%}  /  {s['fleeing_frac_mean']:.2%}")
 

@@ -47,6 +47,8 @@ fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # MuJoCo rendering: NVIDIA EGL driver가 nvkms_open_common에서 hang → Mesa software EGL 강제.
 export MUJOCO_GL=${MUJOCO_GL:-egl}
+# 2026-05-19: NVIDIA EGL이 다시 hang (GPU 0 dead가 EGL device enumeration 망가뜨림).
+# Mesa 벤더 JSON만 노출해서 NVIDIA EGL 건너뜀. Software 렌더 → 54 fps @ 480x640 (충분).
 export __EGL_VENDOR_LIBRARY_FILENAMES=${__EGL_VENDOR_LIBRARY_FILENAMES:-/usr/share/glvnd/egl_vendor.d/50_mesa.json}
 IFS=',' read -r -a GPU_LIST <<< "${GPUS:-0,1}"
 NUM_SHARDS=${#GPU_LIST[@]}

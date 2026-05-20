@@ -83,6 +83,11 @@ class SimActAlign(IterableDataset):
         local_crop_enabled=False,    # 추가 center-crop view (wrist 슬롯) 생성 — tool_camera가 wrist-mounted이라 center crop ≈ needle ROI
         local_crop_size=320,         # 640×480 원본에서 중앙 정사각형 crop 크기 (px). 320 = 50%
         use_keypoint_proprio=False,  # HDF5 keypoints_wrist (tip_uv, trocar_uv) 4-dim을 proprio에 concat
+        overlay_enabled=False,       # SutureBot-style goal-pixel overlay on cam_exterior
+        overlay_color=(255, 0, 0),
+        overlay_radius_px=3,
+        overlay_dropout_prob=0.0,    # per-frame chance to skip overlay even when visible
+        overlay_jitter_std_px=0.0,   # gaussian px-jitter on UV (sim-to-real robustness)
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -108,6 +113,11 @@ class SimActAlign(IterableDataset):
         self.local_crop_enabled = bool(local_crop_enabled)
         self.local_crop_size = int(local_crop_size)
         self.use_keypoint_proprio = bool(use_keypoint_proprio)
+        self.overlay_enabled = bool(overlay_enabled)
+        self.overlay_color = tuple(int(c) for c in overlay_color)
+        self.overlay_radius_px = int(overlay_radius_px)
+        self.overlay_dropout_prob = float(overlay_dropout_prob)
+        self.overlay_jitter_std_px = float(overlay_jitter_std_px)
 
         # Action normalization to [-1, 1]
         self.action_min = np.array(action_min_sim_align, dtype=np.float32)
@@ -261,6 +271,31 @@ class SimActAlign(IterableDataset):
                 [self._decode_jpeg(img_grp[self.cam_exterior][i]) for i in range(traj_len)],
                 axis=0,
             )
+
+            # --- Trocar goal-pixel overlay (SutureBot-style) ---
+            # Apply BEFORE local crop / model resize so the disk gets resized too.
+            # Uses GT UV from HDF5 keypoints_wrist[:, 2:4] + visibility[:, 1].
+            if self.overlay_enabled:
+                from src.utils.overlay_utils import apply_overlay_batch
+                if "keypoints_wrist" not in f["observations"]:
+                    raise KeyError(
+                        f"overlay_enabled=True but episode {os.path.basename(h5_path)} "
+                        f"missing observations/keypoints_wrist"
+                    )
+                kp_w = f["observations"]["keypoints_wrist"][:].astype(np.float32)
+                troc_uv_all = kp_w[:, 2:4]
+                kp_v = f["observations"]["keypoints_visibility"][:].astype(np.float32)
+                troc_vis = kp_v[:, 1] if kp_v.ndim == 2 and kp_v.shape[1] >= 2 else np.ones(traj_len, dtype=np.float32)
+                # Deterministic-but-episode-unique RNG so dropout/jitter is varied across episodes
+                ep_seed = (hash(os.path.basename(h5_path)) & 0xFFFFFFFF)
+                rng = np.random.default_rng(ep_seed)
+                images_np = apply_overlay_batch(
+                    images_np, troc_uv_all, visibility=troc_vis,
+                    color=self.overlay_color, radius_px=self.overlay_radius_px,
+                    dropout_prob=self.overlay_dropout_prob,
+                    jitter_std_px=self.overlay_jitter_std_px,
+                    rng=rng,
+                )
 
             wrist_np = None
             top_np = None

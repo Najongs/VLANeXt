@@ -74,6 +74,12 @@ HOLD_STEPS = 10             # 도달 후 hold 프레임 수 (control steps, acti
 RETREAT_MM = 1.0           # goal_tip을 trocar entry에서 뒤로 빼는 거리 (mm) — align과 동일
 WARMUP_STEPS = 500          # 녹화 전 J6 settling 대기 (sim steps, 67 control step ≈ 7 control frames)
 
+# Phantom randomization range (meters / degrees). run_parallel.py patches these for new datasets.
+PHANTOM_X_RANGE_M = (-0.025, 0.025)
+PHANTOM_Y_RANGE_M = (-0.025, 0.075)
+PHANTOM_Z_RANGE_M = (0.0, 0.05)
+PHANTOM_ANGLE_RANGE_DEG = (-25.0, 25.0)
+
 # === Recorder Class (수정됨: sensor_dist 저장 로직 추가) ===
 class SimRecorder:
     def __init__(self, output_dir):
@@ -250,15 +256,15 @@ def trapezoid_step(t, accel_frac=0.2):
 def randomize_phantom_pos(model, data, phantom_id, rot_id, base_pos=np.zeros(3),
                            assembly_id=-1, assembly_base_pos=np.zeros(3)):
     # 1. 위치 이동 (Translation) — plate 영역 내 제약
-    offset_x = np.random.uniform(-0.025, 0.025)
-    offset_y = np.random.uniform(-0.025, 0.075)
-    offset_z = np.random.uniform(0.0, 0.05)  # optical_plate + trocar 통째로 상승
+    offset_x = np.random.uniform(*PHANTOM_X_RANGE_M)
+    offset_y = np.random.uniform(*PHANTOM_Y_RANGE_M)
+    offset_z = np.random.uniform(*PHANTOM_Z_RANGE_M)  # optical_plate + trocar 통째로 상승
 
     model.body_pos[phantom_id] = base_pos + np.array([offset_x, offset_y, 0.0])
     if assembly_id >= 0:
         model.body_pos[assembly_id] = assembly_base_pos + np.array([0.0, 0.0, offset_z])
 
-    random_angle_deg = float(np.random.uniform(-25, 25))
+    random_angle_deg = float(np.random.uniform(*PHANTOM_ANGLE_RANGE_DEG))
 
     new_quat = np.zeros(4)
     mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(random_angle_deg)], "xyz")
@@ -393,7 +399,7 @@ def main():
         if PHANTOM_POS is not None and phantom_body_id >= 0:
             px, py = PHANTOM_POS
             model.body_pos[phantom_body_id] = phantom_base_pos + np.array([px, py, 0.0])
-            rand_angle = float(np.random.uniform(-25, 25))
+            rand_angle = float(np.random.uniform(*PHANTOM_ANGLE_RANGE_DEG))
             new_quat = np.zeros(4)
             mujoco.mju_euler2Quat(new_quat, [0, 0, np.deg2rad(rand_angle)], "xyz")
             model.body_quat[rotating_id] = new_quat

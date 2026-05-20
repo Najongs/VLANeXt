@@ -17,5 +17,5 @@ eval:
   seed: 42
   image_size: 512
   sim_steps_per_control: 67
-  save_video: false
+  save_video: true
   video_fps: 15
