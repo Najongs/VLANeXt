@@ -867,6 +867,32 @@ def run_eval(cfg):
     model = load_model(checkpoint_path, diffusion_steps=diff_steps, scheduler_type=sched_type, train_config_path=train_config_path)
     processor = load_processor(checkpoint_path, train_config_path=train_config_path)
 
+    # --- Crop & Zoom-in around trocar (eval mirror of dataset flag) ---
+    # If train_config has any data path with crop_around_trocar=True, apply same crop to
+    # tool_camera frames at inference. Uses GT trocar UV from env.get_spatial_metrics().
+    eval_crop_around_trocar = False
+    eval_crop_window_px = 256
+    eval_crop_target_size_px = 512
+    eval_crop_mode = "center"
+    if train_config_path is not None and os.path.exists(train_config_path):
+        import yaml as _yaml
+        try:
+            with open(train_config_path, "r") as _f:
+                _tcfg = _yaml.safe_load(_f)
+            _data_cfg = _tcfg.get("data", {}) or {}
+            _roots = _data_cfg.get("data_root", []) or []
+            for _r in _roots:
+                if isinstance(_r, dict) and bool(_r.get("crop_around_trocar", False)):
+                    eval_crop_around_trocar = True
+                    break
+            eval_crop_window_px = int(_data_cfg.get("crop_window_px", 256))
+            eval_crop_target_size_px = int(_data_cfg.get("crop_target_size_px", 512))
+            eval_crop_mode = str(_data_cfg.get("crop_mode", "center"))
+        except Exception as _e:
+            print(f"[crop] failed to parse train_config for crop flag: {_e}")
+    if eval_crop_around_trocar:
+        print(f"[crop] eval-time crop active (mode={eval_crop_mode}, window={eval_crop_window_px}, target={eval_crop_target_size_px})")
+
     # Keypoint inferencer — provides per-step (troc_u, troc_v, dist_norm).
     # Used for: (a) VLA proprio when proprio_dim=9, (b) keypoint-based handoff trigger.
     kp_inferencer = None
@@ -1022,6 +1048,38 @@ def run_eval(cfg):
                 _tu, _tv, _ = kp_inferencer.predict(frames["tool_camera"])
                 _draw_goal_overlay(frames["tool_camera"], (_tu, _tv),
                                    color=overlay_color, radius_px=overlay_radius_px)
+
+            # --- Crop & Zoom-in (eval) — phase-conditional matching ---
+            # Train data:
+            #   - approach (cropped=False): home_pose far from trocar (>10mm) → uncropped view
+            #   - alignment (cropped=True): near trocar (~5mm) → cropped view
+            # Eval mirror: dist > threshold → uncropped, ≤ threshold → cropped
+            # threshold default 10mm matches alignment data starting range
+            if eval_crop_around_trocar:
+                import cv2 as _cv2
+                _m = env.get_spatial_metrics()
+                _cur_dist_mm = float(_m.get("dist_mm", 999))
+                _phase_threshold_mm = 10.0  # alignment-phase trigger
+                if _cur_dist_mm <= _phase_threshold_mm:
+                    _tool = frames["tool_camera"]
+                    _H, _W = _tool.shape[:2]
+                    if eval_crop_mode == "trocar_uv":
+                        _troc_uv = _m.get("trocar_uv")
+                        if _troc_uv is not None:
+                            _u_px = int(np.clip(float(_troc_uv[0]) * _W, 0, _W - 1))
+                            _v_px = int(np.clip(float(_troc_uv[1]) * _H, 0, _H - 1))
+                        else:
+                            _u_px, _v_px = _W // 2, _H // 2
+                        _half = eval_crop_window_px // 2
+                        _x0 = int(np.clip(_u_px - _half, 0, _W - eval_crop_window_px))
+                        _y0 = int(np.clip(_v_px - _half, 0, _H - eval_crop_window_px))
+                    else:
+                        # center crop
+                        _x0 = (_W - eval_crop_window_px) // 2
+                        _y0 = (_H - eval_crop_window_px) // 2
+                    _patch = _tool[_y0:_y0 + eval_crop_window_px, _x0:_x0 + eval_crop_window_px, :]
+                    frames["tool_camera"] = _cv2.resize(_patch,
+                        (eval_crop_target_size_px, eval_crop_target_size_px), interpolation=_cv2.INTER_LINEAR)
 
             img_ext = preprocess_image(frames["side_camera"], (image_size, image_size))
             img_wrist = preprocess_image(frames["tool_camera"], (image_size, image_size))
@@ -1193,10 +1251,13 @@ def run_eval(cfg):
                     sensor_spike_count = 0
 
             if env.check_success():
-                success = True
-                success_reason = "dist"
-                metrics_history.append(env.get_spatial_metrics())
-                break
+                # Record first success time / position but do NOT break if no_early_term flag set.
+                if not success:
+                    success = True
+                    success_reason = "dist"
+                    metrics_history.append(env.get_spatial_metrics())
+                if not getattr(cfg, "no_early_term", False):
+                    break
 
             # === Mid-trajectory keypoint-based handoff trigger ===
             # If KP-handoff enabled AND current predicted dist < threshold AND lateral OK:
@@ -1431,6 +1492,9 @@ if __name__ == "__main__":
                               f">= {SENSOR_STOP_HOLE_MM:.1f}mm for "
                               f"{SENSOR_STOP_HOLD_STEPS} consecutive steps "
                               f"(needle staring through hole = aligned)"))
+    parser.add_argument("--no-early-term", action="store_true",
+                        help="Run full max_steps per episode regardless of success criterion. "
+                             "Needed for honest holdSR / settled_lat measurement.")
     parser.add_argument("--eval-seed", type=int, default=None,
                         help="Override eval.seed for reproducibility (random mode)")
     parser.add_argument("--perturb-mode", type=str, default="random",
@@ -1510,6 +1574,7 @@ if __name__ == "__main__":
     cfg.phantom_pos = tuple(args.phantom_pos) if args.phantom_pos is not None else None
     cfg.use_sensor_success = args.sensor_success
     cfg.use_sensor_stop = args.sensor_stop
+    cfg.no_early_term = args.no_early_term
     cfg.retreat_mm = args.retreat_mm
     cfg.max_steps = args.max_steps
     cfg.eval_seed = args.eval_seed

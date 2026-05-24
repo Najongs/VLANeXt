@@ -88,6 +88,10 @@ class SimActAlign(IterableDataset):
         overlay_radius_px=3,
         overlay_dropout_prob=0.0,    # per-frame chance to skip overlay even when visible
         overlay_jitter_std_px=0.0,   # gaussian px-jitter on UV (sim-to-real robustness)
+        crop_around_trocar=False,    # global default — per-path override via dict entry "crop_around_trocar": true
+        crop_window_px=256,          # crop window 한 변 px (raw frame 기준). 256 in 640x480 → 2.5× zoom of center
+        crop_target_size_px=512,     # resize 후 출력 한 변 (SigLIP2 native 512)
+        crop_mode="center",          # "center" (고정 center crop, default) or "trocar_uv" (HDF5 UV 의존, 구버전)
     ):
         super().__init__()
         self.data_dir = data_dir
@@ -112,6 +116,12 @@ class SimActAlign(IterableDataset):
         self.near_goal_threshold_mm = float(near_goal_threshold_mm)
         self.local_crop_enabled = bool(local_crop_enabled)
         self.local_crop_size = int(local_crop_size)
+        self.crop_around_trocar_default = bool(crop_around_trocar)
+        self.crop_window_px = int(crop_window_px)
+        self.crop_target_size_px = int(crop_target_size_px)
+        self.crop_mode = str(crop_mode)
+        # per-path override (dict["crop_around_trocar"]): if set, overrides global default for that path
+        self._path_to_crop_trocar = {}
         self.use_keypoint_proprio = bool(use_keypoint_proprio)
         self.overlay_enabled = bool(overlay_enabled)
         self.overlay_color = tuple(int(c) for c in overlay_color)
@@ -140,17 +150,21 @@ class SimActAlign(IterableDataset):
                     p = d["path"]
                     max_ep = d.get("max_episodes", None)
                     conv = d.get("convention", None)
+                    crop_troc = d.get("crop_around_trocar", None)
                 else:
                     p = d
                     max_ep = None
                     conv = None
+                    crop_troc = None
                 eps = sorted(glob.glob(os.path.join(p, "**", "*.h5"), recursive=True))
                 if max_ep is not None and len(eps) > max_ep:
                     rng = np.random.RandomState(42)
                     eps = sorted(rng.choice(eps, size=max_ep, replace=False).tolist())
                 use_conv = conv if conv is not None else infer_convention(p)
+                use_crop = bool(crop_troc) if crop_troc is not None else self.crop_around_trocar_default
                 for ep in eps:
                     self._path_to_conv[ep] = use_conv
+                    self._path_to_crop_trocar[ep] = use_crop
                 self.episode_paths.extend(eps)
             self.episode_paths = sorted(self.episode_paths)
             if not self.episode_paths:
@@ -162,6 +176,7 @@ class SimActAlign(IterableDataset):
             conv = infer_convention(data_dir)
             for ep in self.episode_paths:
                 self._path_to_conv[ep] = conv
+                self._path_to_crop_trocar[ep] = self.crop_around_trocar_default
 
     @staticmethod
     def _decode_jpeg(jpeg_data):
@@ -245,9 +260,16 @@ class SimActAlign(IterableDataset):
             spatial_targets_np = None
             needle_tip_np = None
             trocar_entry_np = None
+            trocar_depth_np = None
             if "needle_tip_pos" in f["observations"]:
                 needle_tip_np = f["observations"]["needle_tip_pos"][:].astype(np.float32)
                 trocar_entry_np = f["observations"]["trocar_entry_pos"][:].astype(np.float32)
+                # trocar_depth (axis direction): metadata stored in m → convert mm to match entry
+                if "metadata" in f and "target_depth_world" in f["metadata"]:
+                    depth_m = f["metadata"]["target_depth_world"][()].astype(np.float32)
+                    depth_mm = depth_m * 1000.0
+                    # broadcast to (traj_len, 3) — trocar pose constant per episode
+                    trocar_depth_np = np.broadcast_to(depth_mm, (traj_len, 3)).copy()
             if "keypoints_wrist" in f["observations"]:
                 kp_wrist = f["observations"]["keypoints_wrist"][:].astype(np.float32)
                 kp_vis = f["observations"]["keypoints_visibility"][:].astype(np.float32)
@@ -297,6 +319,53 @@ class SimActAlign(IterableDataset):
                     rng=rng,
                 )
 
+            # --- Crop & Zoom-in (per-path flag) ---
+            # SigLIP2 patch16-512 + 512x512 입력에서 trocar는 5mm 거리에서 ~2-3 pixel.
+            # 256x256 (raw 640x480) crop → 512x512 resize → 2× zoom 효과.
+            # tool_camera는 wrist-mounted이라 needle tip이 항상 (0.488, 0.326) ≈ center.
+            # Alignment phase에서 trocar는 tip 근처라 center crop으로 충분.
+            #
+            # crop_mode:
+            #   "center" (default): 고정 center crop — UV 의존 없음, train/eval 일관성 안전
+            #   "trocar_uv": HDF5 trocar UV 주변 동적 crop (구버전, train/eval UV consistency 위험)
+            if self._path_to_crop_trocar.get(h5_path, False):
+                H, W = images_np.shape[1], images_np.shape[2]
+                half = self.crop_window_px // 2
+                tgt = self.crop_target_size_px
+                cropped = np.empty((traj_len, tgt, tgt, 3), dtype=np.uint8)
+
+                if self.crop_mode == "trocar_uv":
+                    if "keypoints_wrist" not in f["observations"]:
+                        raise KeyError(
+                            f"crop_mode='trocar_uv' but episode {os.path.basename(h5_path)} "
+                            f"missing observations/keypoints_wrist"
+                        )
+                    kp_w_all = f["observations"]["keypoints_wrist"][:].astype(np.float32)
+                    troc_uv_all = kp_w_all[:, 2:4]
+                    kp_v_all = f["observations"]["keypoints_visibility"][:].astype(np.float32)
+                    troc_vis_all = (
+                        kp_v_all[:, 1] if kp_v_all.ndim == 2 and kp_v_all.shape[1] >= 2
+                        else np.ones(traj_len, dtype=np.float32)
+                    )
+                    for i in range(traj_len):
+                        if troc_vis_all[i] > 0.5:
+                            u_px = int(np.clip(troc_uv_all[i, 0] * W, 0, W - 1))
+                            v_px = int(np.clip(troc_uv_all[i, 1] * H, 0, H - 1))
+                        else:
+                            u_px, v_px = W // 2, H // 2
+                        x0 = int(np.clip(u_px - half, 0, W - self.crop_window_px))
+                        y0 = int(np.clip(v_px - half, 0, H - self.crop_window_px))
+                        patch = images_np[i, y0:y0 + self.crop_window_px, x0:x0 + self.crop_window_px, :]
+                        cropped[i] = cv2.resize(patch, (tgt, tgt), interpolation=cv2.INTER_LINEAR)
+                else:
+                    # crop_mode == "center" — 고정 center crop
+                    x0 = (W - self.crop_window_px) // 2
+                    y0 = (H - self.crop_window_px) // 2
+                    for i in range(traj_len):
+                        patch = images_np[i, y0:y0 + self.crop_window_px, x0:x0 + self.crop_window_px, :]
+                        cropped[i] = cv2.resize(patch, (tgt, tgt), interpolation=cv2.INTER_LINEAR)
+                images_np = cropped
+
             wrist_np = None
             top_np = None
             if self.view_mode == "multi":
@@ -321,7 +390,8 @@ class SimActAlign(IterableDataset):
                 wrist_np = images_np[:, y0:y0 + s, x0:x0 + s, :].copy()
 
         return (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
-                spatial_targets_np, action_weight_np, needle_tip_np, trocar_entry_np)
+                spatial_targets_np, action_weight_np, needle_tip_np, trocar_entry_np,
+                trocar_depth_np)
 
     def __iter__(self):
         # --- Shard by rank and worker ---
@@ -357,7 +427,8 @@ class SimActAlign(IterableDataset):
                 try:
                     (traj_len, actions_np, proprio_np, images_np, wrist_np, top_np,
                      spatial_targets_np, action_weight_np,
-                     needle_tip_np, trocar_entry_np) = self._load_episode(ep_path)
+                     needle_tip_np, trocar_entry_np,
+                     trocar_depth_np) = self._load_episode(ep_path)
                 except Exception as e:
                     print(f"[Warn] Skipping {ep_path}: {e}")
                     continue
@@ -443,10 +514,12 @@ class SimActAlign(IterableDataset):
                     else:
                         sample["spatial_target"] = None
 
-                    # Raw 3D positions (mm) for aux distance loss; None for real datasets.
+                    # Raw 3D positions (mm) for aux distance/lateral loss; None for real datasets.
                     if needle_tip_np is not None:
                         sample["needle_tip_pos"] = torch.from_numpy(needle_tip_np[t].copy())
                         sample["trocar_entry_pos"] = torch.from_numpy(trocar_entry_np[t].copy())
+                        if trocar_depth_np is not None:
+                            sample["trocar_depth_pos"] = torch.from_numpy(trocar_depth_np[t].copy())
 
                     # Action loss weight
                     sample["action_weight"] = torch.tensor(action_weight_np[t], dtype=torch.float32)

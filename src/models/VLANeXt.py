@@ -271,6 +271,8 @@ class VLANeXt(nn.Module):
         spatial_loss_weight=0.0,
         proprio_dim=None,
         aux_distance_loss=None,
+        aux_lateral_loss=None,   # lateral 정렬 정밀도 강화 (trocar axis 수직 평면 오차)
+        aux_hold_loss=None,      # near-goal hold 안정성 (position + rotation 변동 억제)
         direction_decoupled_loss=None,
         input_image_size=None,   # vision_only 경로에서 image_processor size 강제 (예: DINOv3 512).
     ):
@@ -297,6 +299,26 @@ class VLANeXt(nn.Module):
         # Without this, aux_dist penalizes hold-state samples forever with a +margin floor.
         # 0 = disabled (legacy 동작).
         self.aux_dist_hold_threshold_mm = float(adl.get("hold_threshold_mm", 0.0))
+
+        # === Aux LATERAL loss (trocar axis 수직 평면 오차) ===
+        # Penalize predicted lateral distance increase. Lateral = || (pred_tip - entry) - dot * axis_dir ||
+        # axis_dir = normalize(trocar_depth - trocar_entry). Needs trocar_depth_pos in forward.
+        all_ = aux_lateral_loss or {}
+        self.aux_lat_enabled = bool(all_.get("enabled", False))
+        self.aux_lat_weight = float(all_.get("weight", 0.0))
+        self.aux_lat_margin_mm = float(all_.get("margin_mm", 0.05))
+        self.aux_lat_near_goal_scale_mm = float(all_.get("near_goal_scale_mm", 0.0))
+        self.aux_lat_near_goal_max_boost = float(all_.get("near_goal_max_boost", 4.0))
+
+        # === Aux HOLD loss (near-goal action norm 억제 — spin/jitter 방지) ===
+        # When cur_dist_mm < hold_threshold_mm, penalize ||pred_action|| (pos and rot separately).
+        # Encourages "stay still" once aligned.
+        ahl = aux_hold_loss or {}
+        self.aux_hold_enabled = bool(ahl.get("enabled", False))
+        self.aux_hold_pos_weight = float(ahl.get("pos_weight", 0.0))   # weight on ||pred_pos_chunk||
+        self.aux_hold_rot_weight = float(ahl.get("rot_weight", 0.0))   # weight on ||pred_rot_chunk||
+        self.aux_hold_threshold_mm = float(ahl.get("threshold_mm", 2.5))   # hold trigger dist
+        self.aux_hold_soft_scale_mm = float(ahl.get("soft_scale_mm", 1.0)) # smooth ramp width
 
         # Direction-decoupled action loss (replaces plain MSE on main loss).
         # Splits position-channel target into magnitude and unit-direction supervisions:
@@ -1201,7 +1223,7 @@ class VLANeXt(nn.Module):
             raise ValueError(f"Unknown dct_similarity_type: {sim_type!r}. "
                              f"Options are: 'mse', 'mae', 'cosine'.")
 
-    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None, task=None):
+    def forward(self, input_ids=None, attention_mask=None, actions=None, proprioception=None, history_actions=None, proprio_attention_mask=None, pixel_values=None, pixel_values_videos=None, image_grid_thw=None, video_grid_thw=None, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None, trocar_depth_pos=None, task=None):
         if task == "action_vqvae_pretrain":
             return self.forward_action_vqvae_pretrain(actions), {}
 
@@ -1222,6 +1244,7 @@ class VLANeXt(nn.Module):
                 action_weights=action_weights,
                 needle_tip_pos=needle_tip_pos,
                 trocar_entry_pos=trocar_entry_pos,
+                trocar_depth_pos=trocar_depth_pos,
             )
 
     def _forward_classification(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None):
@@ -1354,7 +1377,7 @@ class VLANeXt(nn.Module):
             loss = loss + self.spatial_loss_weight * spatial_loss
         return loss, loss_dict
 
-    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None):
+    def _forward_diffusion(self, input_ids, attention_mask, actions, proprioception, history_actions, proprio_attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw, future_images=None, spatial_targets=None, action_weights=None, needle_tip_pos=None, trocar_entry_pos=None, trocar_depth_pos=None):
         connector_out, hidden_states = self.get_vlm_condition(
             input_ids, attention_mask, proprioception=proprioception, proprio_attention_mask=proprio_attention_mask,
             pixel_values=pixel_values, pixel_values_videos=pixel_values_videos,
@@ -1514,6 +1537,71 @@ class VLANeXt(nn.Module):
                 loss_aux = aux_per_sample.mean()
             loss_dict["loss/aux_dist"] = loss_aux.item()
             loss = loss + self.aux_dist_weight * loss_aux
+
+        # --- Aux LATERAL loss (axis 수직 평면 오차 강화) ---
+        # Needs trocar_depth_pos for axis_dir computation. Skipped if not provided.
+        if (self.aux_lat_enabled and self.aux_lat_weight > 0
+                and needle_tip_pos is not None and trocar_entry_pos is not None
+                and trocar_depth_pos is not None and pred_x_start is not None):
+            pred_pos_norm = pred_x_start[..., :3].float()  # (B, T, 3) in [-1, 1]
+            denorm = self.aux_pos_denorm_mm.to(pred_pos_norm.device).view(1, 1, 3)
+            pred_pos_mm = pred_pos_norm * denorm                                  # (B, T, 3) mm
+            tip = needle_tip_pos.float().unsqueeze(1)                             # (B, 1, 3)
+            trocar = trocar_entry_pos.float().unsqueeze(1)                        # (B, 1, 3)
+            depth = trocar_depth_pos.float().unsqueeze(1)                         # (B, 1, 3)
+            axis = depth - trocar                                                  # (B, 1, 3)
+            axis_dir = axis / (torch.norm(axis, dim=-1, keepdim=True) + 1e-6)      # (B, 1, 3)
+            cum_disp = torch.cumsum(pred_pos_mm, dim=1)                            # (B, T, 3)
+            pred_tip = tip + cum_disp                                              # (B, T, 3)
+            # Lateral component: (pred_tip - entry) - dot(_, axis_dir) * axis_dir
+            rel = pred_tip - trocar                                                # (B, T, 3)
+            axial_len = (rel * axis_dir).sum(dim=-1, keepdim=True)                 # (B, T, 1)
+            lat_vec = rel - axial_len * axis_dir                                   # (B, T, 3)
+            pred_lat_mm = torch.norm(lat_vec, dim=-1)                              # (B, T)
+            # current lateral (per-sample baseline)
+            cur_rel = tip - trocar                                                 # (B, 1, 3)
+            cur_axial = (cur_rel * axis_dir).sum(dim=-1, keepdim=True)             # (B, 1, 1)
+            cur_lat_vec = cur_rel - cur_axial * axis_dir                           # (B, 1, 3)
+            cur_lat_mm = torch.norm(cur_lat_vec, dim=-1)                           # (B, 1)
+            # Penalty: lat 증가 막기 (margin allowed)
+            aux_lat_per_sample = F.relu(pred_lat_mm - cur_lat_mm + self.aux_lat_margin_mm).mean(dim=-1)  # (B,)
+            # Near-goal lateral boost (1mm 이내일 때 더 강하게)
+            if self.aux_lat_near_goal_scale_mm > 0:
+                lat_boost = self.aux_lat_near_goal_scale_mm / (cur_lat_mm.squeeze(-1) + 1.0)
+                lat_w = (1.0 + lat_boost).clamp(max=1.0 + self.aux_lat_near_goal_max_boost)
+                loss_aux_lat = (lat_w * aux_lat_per_sample).mean()
+            else:
+                loss_aux_lat = aux_lat_per_sample.mean()
+            loss_dict["loss/aux_lateral"] = loss_aux_lat.item()
+            loss = loss + self.aux_lat_weight * loss_aux_lat
+
+        # --- Aux HOLD loss (near-goal action norm 억제 — spin/jitter 방지) ---
+        if (self.aux_hold_enabled
+                and needle_tip_pos is not None and trocar_entry_pos is not None
+                and pred_x_start is not None
+                and (self.aux_hold_pos_weight > 0 or self.aux_hold_rot_weight > 0)):
+            tip = needle_tip_pos.float()                                           # (B, 3)
+            trocar = trocar_entry_pos.float()                                      # (B, 3)
+            cur_dist_mm_h = torch.norm(tip - trocar, dim=-1)                       # (B,)
+            # soft hold weight: 1 when dist=0, 0 when dist >= threshold + soft_scale
+            # ramp = clamp((threshold + soft - dist) / soft, 0, 1) → near-goal high, far-goal low
+            hold_w = ((self.aux_hold_threshold_mm + self.aux_hold_soft_scale_mm - cur_dist_mm_h) /
+                      max(self.aux_hold_soft_scale_mm, 1e-3)).clamp(0.0, 1.0)       # (B,)
+            # pred_x_start: (B, T, action_dim). action_dim = 6 (3 pos + 3 rot, no gripper for align).
+            pred_pos_chunk = pred_x_start[..., :3].float()                         # (B, T, 3)
+            pred_rot_chunk = pred_x_start[..., 3:6].float() if pred_x_start.shape[-1] >= 6 else None
+            loss_hold = pred_pos_chunk.new_zeros(())
+            if self.aux_hold_pos_weight > 0:
+                pos_norm = torch.norm(pred_pos_chunk, dim=-1).mean(dim=-1)         # (B,) avg over time
+                loss_hold = loss_hold + self.aux_hold_pos_weight * (hold_w * pos_norm).mean()
+                loss_dict["loss/hold_pos_norm_mean"] = pos_norm.mean().item()
+            if self.aux_hold_rot_weight > 0 and pred_rot_chunk is not None:
+                rot_norm = torch.norm(pred_rot_chunk, dim=-1).mean(dim=-1)         # (B,)
+                loss_hold = loss_hold + self.aux_hold_rot_weight * (hold_w * rot_norm).mean()
+                loss_dict["loss/hold_rot_norm_mean"] = rot_norm.mean().item()
+            loss_dict["loss/aux_hold"] = loss_hold.item()
+            loss_dict["loss/hold_w_mean"] = hold_w.mean().item()
+            loss = loss + loss_hold
 
         if self.future_image_loss_weight > 0:
             loss_dict["loss/future_image"] = loss_img.item() if isinstance(loss_img, torch.Tensor) else loss_img

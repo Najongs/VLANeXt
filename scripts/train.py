@@ -207,6 +207,7 @@ class DataCollatorForVLANeXt:
         action_weight_list = []
         needle_tip_list = []
         trocar_entry_list = []
+        trocar_depth_list = []
         source_info_list = []
 
         is_paligemma = "PaliGemma" in self.processor.__class__.__name__
@@ -311,6 +312,8 @@ class DataCollatorForVLANeXt:
             if "needle_tip_pos" in sample and "trocar_entry_pos" in sample:
                 needle_tip_list.append(sample["needle_tip_pos"])
                 trocar_entry_list.append(sample["trocar_entry_pos"])
+                if "trocar_depth_pos" in sample:
+                    trocar_depth_list.append(sample["trocar_depth_pos"])
 
             if self.load_future_image and "future_image" in sample:
                 f_img = sample["future_image"]
@@ -382,13 +385,17 @@ class DataCollatorForVLANeXt:
         if needle_tip_list and len(needle_tip_list) == len(gt_actions_list):
             needle_tip_pos = torch.stack(needle_tip_list)
             trocar_entry_pos = torch.stack(trocar_entry_list)
+            trocar_depth_pos = (torch.stack(trocar_depth_list)
+                                 if trocar_depth_list and len(trocar_depth_list) == len(gt_actions_list)
+                                 else None)
         else:
             needle_tip_pos = None
             trocar_entry_pos = None
+            trocar_depth_pos = None
 
         return (inputs, gt_actions, proprio, hist_actions, future_images,
                 spatial_targets, action_weights, needle_tip_pos, trocar_entry_pos,
-                source_info_list)
+                trocar_depth_pos, source_info_list)
 
 def _collect_per_module_grad_norm(model_root, mod_names=("meta_queries", "meta_queries_norm", "action_head", "connector", "action_projector", "vision_projector")):
     """Best-effort per-module grad norm. Under ZeRO-2 only the local partition is observed
@@ -627,6 +634,8 @@ def train(config):
             dct_freq_split=config['model'].get('dct_freq_split', 0.125),
             dct_similarity_type=config['model'].get('dct_similarity_type', 'mae'),
             aux_distance_loss=config['model'].get('aux_distance_loss', None),
+            aux_lateral_loss=config['model'].get('aux_lateral_loss', None),
+            aux_hold_loss=config['model'].get('aux_hold_loss', None),
             direction_decoupled_loss=config['model'].get('direction_decoupled_loss', None),
             proprio_dim=config['model'].get('proprio_dim', None),
             input_image_size=config['model'].get('input_image_size', None),
@@ -789,6 +798,10 @@ def train(config):
                 overlay_radius_px=config['data'].get('overlay', {}).get('radius_px', 3),
                 overlay_dropout_prob=config['data'].get('overlay', {}).get('dropout_prob', 0.0),
                 overlay_jitter_std_px=config['data'].get('overlay', {}).get('jitter_std_px', 0.0),
+                crop_around_trocar=config['data'].get('crop_around_trocar', False),
+                crop_window_px=config['data'].get('crop_window_px', 256),
+                crop_target_size_px=config['data'].get('crop_target_size_px', 512),
+                crop_mode=config['data'].get('crop_mode', 'center'),
             )
         elif dataset_name == "sim_insertion":
             ds = SimActInsertion(
@@ -1113,7 +1126,7 @@ def train(config):
             
         (inputs, gt_actions, proprio, hist_actions, future_images,
          spatial_targets, action_weights, needle_tip_pos, trocar_entry_pos,
-         source_info) = batch
+         trocar_depth_pos, source_info) = batch
         del batch
         model_inputs = {k: v.to(device) for k, v in inputs.items()}
         del inputs
@@ -1135,6 +1148,8 @@ def train(config):
         if needle_tip_pos is not None:
             needle_tip_pos = needle_tip_pos.to(device, dtype=torch.bfloat16)
             trocar_entry_pos = trocar_entry_pos.to(device, dtype=torch.bfloat16)
+            if trocar_depth_pos is not None:
+                trocar_depth_pos = trocar_depth_pos.to(device, dtype=torch.bfloat16)
 
         valid_keys = {"input_ids", "attention_mask", "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"}
         forward_args = {k: v for k, v in model_inputs.items() if k in valid_keys}
@@ -1148,6 +1163,7 @@ def train(config):
                 future_images=future_images,
                 needle_tip_pos=needle_tip_pos,
                 trocar_entry_pos=trocar_entry_pos,
+                trocar_depth_pos=trocar_depth_pos,
                 **forward_args
             )
             loss, loss_dict = (out if isinstance(out, tuple) else (out, {}))

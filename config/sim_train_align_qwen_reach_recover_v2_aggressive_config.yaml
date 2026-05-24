@@ -1,0 +1,164 @@
+# Qwen3.5-2B reach_recover_v1 — Qwen 20k base + champion-style hold/lateral refinement
+# (2026-05-23, EXPERIMENTS Section 30)
+#
+# Hypothesis: Qwen3.5-2B fresh 20k = reach + safety champion (SR 66.7%, close5 100%, safety 3.95mm)
+# BUT hold weak (holdSR 44%, min_lat 1.50mm vs vision-only chain champion 78% / 0.87mm).
+# Vision-only's reach_recover v5_combo recipe (aux_lat + aux_hold + yneg_hold + perfect_strict)
+# 적용해서 Qwen의 reach 강점을 유지하면서 hold 회복.
+#
+# Conservative recipe (Qwen 변형 최소화):
+#   - lr 5e-7 (vision-only champion recipe보다 더 보수, VLM은 fine 변동 민감)
+#   - max_steps 1500 (over-training 피함)
+#   - aux_lat + aux_hold (vision-only ablation에서 marginal +3.7pp이지만 부재 0%니 켜기)
+#   - data: vision-only v5_combo 식 (NEARGOAL_yneg_hold + perfect_strict + yneg_v1 + ypos_v1)
+#   - aug off (vision-only champ recipe)
+
+project:
+  name: "VLANeXt_Qwen35_NEARGOAL_reach_recover_v2_aggressive"
+  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  log_interval: 5
+  save_interval: 500
+  use_wandb: true
+
+data:
+  dataset_name: "sim_align"
+  data_root:
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+    max_episodes: 5000
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_eval_range_v1"
+    max_episodes: 1000
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1/collected_data_merged"
+    max_episodes: 200
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_strict_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_ypos_v1/collected_data_merged"
+
+  task_suite_name: ""
+  full_sequence: true
+  skip_history_padding: true
+
+  history_len: 8
+  future_len: 8
+  buffer_size: 4000
+
+  batch_size: 8
+  max_steps: 1500
+  num_workers: 4
+
+  input_modality: "image"
+  view_mode: "single"
+  cam_exterior: "tool_camera"
+  cam_wrist: ""
+  cam_top: ""
+
+  augmentation:
+    enabled: false
+
+model:
+  model_type: "vlanext"
+  lmm_path: "Qwen/Qwen3.5-2B"
+  backbone_mode: "frozen"
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+
+  action_dim: 6
+  proprio_dim: 6
+  use_sensor: false
+
+  loss_type: "diffusion"
+  num_train_timesteps: 1000
+  num_inference_timesteps: 10
+  scheduler_type: "flow_match"
+  num_bins: 256
+  action_vqvae:
+    enabled: false
+    frozen: true
+    codebook_size: 1024
+    hidden_size: 256
+    depth: 4
+    num_heads: 8
+    steps: 1000
+    learning_rate: 1.0e-3
+
+  condition_type: "soft"
+  num_queries: 32
+  use_transformer_connector: true
+  connector_depth: 2
+  connector_num_heads: 4
+
+  policy_hidden_size: 1152
+  policy_depth: 24
+  policy_num_heads: 16
+  policy_mlp_ratio: 4.0
+
+  future_image_loss_weight: 0.0
+  generator_hidden_size: 768
+  generator_depth: 24
+  generator_num_heads: 12
+  generator_mlp_ratio: 4.0
+  future_image_mode: "horizon"
+
+  dct_loss_weight: 0.1
+  dct_freq_split: 0.125
+  dct_low_freq_weight: 1.0
+  dct_high_freq_weight: 1.0
+  dct_similarity_type: "mae"
+
+  use_proprio_input_vlm: true
+  use_transformer_proprio_projector: false
+  projector_depth: 2
+  projector_num_heads: 4
+  use_action_input_policy: false
+  gradient_checkpointing: true
+
+  aux_distance_loss:
+    enabled: true
+    weight: 0.5
+    margin_mm: 0.1
+    pos_denorm_mm: [0.37, 0.37, 0.37]
+    near_goal_scale_mm: 2.0
+    near_goal_max_boost: 10.0
+    apply_to_main_loss: true
+
+  aux_lateral_loss:
+    enabled: true
+    weight: 0.5
+    margin_mm: 0.05
+    near_goal_scale_mm: 1.0
+    near_goal_max_boost: 10.0
+
+  aux_hold_loss:
+    enabled: true
+    pos_weight: 0.15
+    rot_weight: 0.25
+    threshold_mm: 2.5
+    soft_scale_mm: 1.0
+
+  direction_decoupled_loss:
+    enabled: false
+
+train:
+  seed: 2026
+  resume_path: ""
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/output_dir_v2_dual_finetune_qwen_20000step/checkpoint_20000_for_train.pt"
+  reset_optimizer_scheduler: true
+  learning_rate: 1.0e-6  # v2 aggressive: 2x v1 conservative — lr ablation
+  weight_decay: 0.01
+  warmup_steps: 100
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  device: "cuda"
+  distributed: false
+  dist_backend: "nccl"
+  deepspeed:
+    enabled: false  # GPU 0 dead → multi-GPU NCCL unavailable on this PC, single GPU only
+    zero_stage: 2
+    offload_optimizer_device: "none"
+    offload_param_device: "none"

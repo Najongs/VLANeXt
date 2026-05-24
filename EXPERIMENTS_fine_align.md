@@ -1,7 +1,172 @@
 # Fine-Align Experiments
 
-Needle-trocar mm-level alignment using vision-only VLA. Calibration-free.
-Last reorg: 2026-05-19. Older logs in `attic/EXPERIMENTS_fine_align.md.bak_*`.
+Needle-trocar mm-level alignment using vision-only / Qwen3.5-VL VLA. Calibration-free.
+
+**Last reorganization**: 2026-05-24 — historical daily progress (Sections 10-21, 23-27, old EOD snapshots) moved to `attic/EXPERIMENTS_fine_align_history.md` to keep the main doc focused. Backup of pre-cleanup version: `attic/EXPERIMENTS_fine_align.md.bak_pre_cleanup_20260524`.
+
+**Reading guide**:
+1. **Master Cheatsheet** (immediately below) — paper-ready summary, 권위본
+2. **Sections 28–31** — current SOTA (Qwen3.5-2B + reach_recover), 2026-05-23 final
+3. **Section 22 (Master Table)** — paper Table 1 candidate covering all ablations
+4. **Sections 1–9** — paper backbone (problem, model, eval grid, infra)
+5. **BC Finetune Engineering Knowledge** — empirical training rules
+6. **Archive** — see `attic/EXPERIMENTS_fine_align_history.md` for daily logs
+
+---
+
+## 🎯 Master Cheatsheet (2026-05-23 EOD, 권위본)
+
+> 이 세션 (Section 17-28) + 이전 세션 결과 종합. **paper 작성 시 여기만 참조해도 충분**.
+> 자세한 ablation은 Section 28 (compact-ready), 절차/실험은 Section 17-27.
+
+### 🏆 Champion 선택 가이드 (use-case 별, 2026-05-23 EOD final)
+
+| Use case | Checkpoint | exec | SR | close_2 | min_lat | **holdSR** | **safety** | y=-25 |
+|---|---|---|---|---|---|---|---|---|
+| 🏆 **Balanced SOTA (medical, NEW 2026-05-24)** | `reach_recover_v11_submm_tight/checkpoint_flat_1500.pt` | 2 | **100** | **77.8** | 1.32 | **48.1** | 2.65 | 9/9 |
+| 🏆 **Balanced (이전)** | `reach_recover_v2_aggressive/checkpoint_flat_1500.pt` | 2 | **100** | 70.4 | 1.32 | 48.1 | 2.86 | 9/9 |
+| 🏆 **Best precision peak (min_lat)** | `reach_recover_v8_aux_extreme/checkpoint_flat_500.pt` | 2 | 100 | 77.8 | **1.19** | 37.0 | 2.73 | 9/9 |
+| 🏆 **Best holdSR (Qwen, NEW 2026-05-24)** | `reach_recover_v9_gentle_hold/checkpoint_flat_500.pt` | 2 | 100 | 70.4 | 1.50 | **51.9** | 2.64 | 9/9 |
+| 🏆 **Best safety (worst-case)** | `reach_recover_v8_aux_extreme/checkpoint_flat_1000.pt` | 2 | 100 | 66.7 | 1.40 | 48.1 | **2.47** | 9/9 |
+| Hold (chain, retreat trade-off) | `reach_recover_v5_combo/checkpoint_2000.pt` (vision-only) | 4 | 48 | 55.6 | 1.00 | **81.5** | 10.78 | 0/9 |
+| Sub-mm lateral (chain) | `lat_hold_v4_yneg_hold/checkpoint_1000.pt` (vision-only) | 2 | 44 | 51.9 | **0.87** | 77.8 | 11.48 | 0/9 |
+
+→ **6 deployment regimes** (4 Qwen + 2 chain). v8 ck500 = precision dual champion (close_2 77.8 / min_lat 1.19). v8 ck1000 = safety champion (2.47mm).
+
+**🏆 Section 31 final records (2026-05-23 EOD autonomous sweep, R1-R5)**:
+- **close_2 77.8%** (v8 ck500) — ACT 48.1 +29.7pp, prior champion 70.4 +7.4pp
+- **min_lat 1.19mm** (v8 ck500) — Qwen-family new low, prior 1.24
+- **safety 2.47mm** (v8 ck1000) — ACT 3.78 −35%, prior 2.56 −0.09mm
+- **holdSR 51.9%** (v5 ck500) — Qwen ceiling 깸 (+3.8pp over v2). Chain 78% 미달
+- **v8 extreme aux_hold paradox**: rot 1.0이 hold 약화 (37%) but precision 폭발 (close_2 77.8). ck1000에선 hold 회복
+
+**Remaining axis** (Section 31.7): Ensemble (Qwen+chain action averaging) — holdSR 60%+ 가능 추정.
+
+### 📐 Eval protocol 표준 (paper 모든 결과 동일하게)
+
+```bash
+# 27-cell grid, retreat=2 (paper protocol), exec=2 default
+TRAIN_CONFIG_OVERRIDE="<train_config>" GPUS=0,1 \
+  bash Run_Eval_Parallel.sh align "<ckpt>.pt" \
+    --max-steps 250 --eval-seed 2026 --perturb-mode grid \
+    --xy-steps 3 --z-steps 1 --angle-steps 3 --repeats 1 \
+    --perturb-xy-mm 10 --perturb-y-min-mm -25 --perturb-y-max-mm 25 \
+    --perturb-angle-deg 5 --perturb-z-min-mm 0 --perturb-z-max-mm 0 \
+    --retreat-mm 2 --num-steps-execute 2
+
+# 후처리 (shard 머지 + 분석)
+python scripts/merge_eval_shards.py "<ckpt>.pt" --num-shards 2 --exec-steps 2 --diff-steps 10 --prefix align
+python scripts/analyze_baseline_matrix.py  # 모든 variant 통합 표
+```
+
+### 📊 Paper Table 1 — 7-metric multi-criteria (필수)
+
+`SR_old` 단독은 retreat=2에서 ACT/DP saturated → 의미 없음. 반드시 multi-criteria:
+
+| metric | 정의 | 의미 |
+|---|---|---|
+| SR_old | 3D dist < 5mm at final step | legacy, retreat=2에선 baseline saturated |
+| **close_5** | final_lateral < 5mm | 천장 진단 |
+| **close_2** | final_lateral < 2mm | 정밀 정렬 |
+| **holdSR** | lateral < 2.5mm for ≥20 contig steps | **hold-and-stay vs touch-drift 차별** (paper key) |
+| **min_lat** | per-ep min lateral (median) | peak 정밀도 |
+| **safety** | p99 of final_lateral | medical worst-case bound |
+| per-region SR | y=-25 / 0 / +25 | 분포 비대칭 진단 |
+
+### 🔑 핵심 학습 팁 (반드시 지킬 것)
+
+| 영역 | 규칙 | 근거 |
+|---|---|---|
+| **lr** | ≤ 1e-6 default. >1e-5는 일관 gnorm 폭주. fresh training은 5e-6도 위험 | `feedback_learning_rate_ceiling`, Section 21 DINOv3 fresh gnorm 47 |
+| **finetune chain** | base 50k → finetune cascade (1-2k step씩 점진) 필수. fresh 20k도 못 따라잡음 | Section 21.3c, `feedback_chain_dominant_over_encoder` |
+| **exec inference** | default exec=2. exec=4 = hold champion, exec=1 = close_2 champion. **single ckpt 3 modes** | `feedback_inference_axis_exec2`, Section 26 |
+| **batch size** | 16 frozen | (이전 결정) |
+| **vision encoder** | SigLIP2-so400m-patch16-512 frozen. ConvNeXt/DINOv3와 fresh budget에서 동급 fail. chain 없으면 차별화 X | Section 21 |
+| **proprio** | ee_pose 6-DoF만. sensor/KP 추가 금지 (성능 ↓) | `feedback_fine_alignment_dead_ends` 항목 4 |
+| **aug** | off | (이전 결정) |
+| **view** | single (tool_camera). multi-view 금지 | `feedback_no_multiview` |
+
+### ⚙️ Loss 설정 권장 (champion config 기준)
+
+```yaml
+loss_type: "diffusion"
+scheduler_type: "flow_match"  # not DDPM
+num_train_timesteps: 1000
+num_inference_timesteps: 10
+
+dct_loss_weight: 0.0   # ⚠️ champion config에 0.1 켜져있지만, 효과 ≈ 0 (Section 20)
+                       # 새 학습은 0.0으로. 약간 가벼움.
+
+aux_distance_loss: { enabled: true, weight: 0.5, margin_mm: 0.1, near_goal_scale_mm: 2.0, near_goal_max_boost: 10.0 }
+aux_lateral_loss:  { enabled: true, weight: 0.5, margin_mm: 0.05, near_goal_scale_mm: 1.0, near_goal_max_boost: 10.0 }
+aux_hold_loss:     { enabled: true, pos_weight: 0.3, rot_weight: 0.5, threshold_mm: 2.5, soft_scale_mm: 1.0 }
+# ⚠️ 실험으로 marginal 확인됨 (+3.7pp holdSR, -0.12mm min_lat). 
+# encoder + chain이 진짜 driver. paper에서 "key contribution" 표현 금지.
+
+direction_decoupled_loss: { enabled: false }  # 절대 켜지 마라. 폭주 + 효과 없음
+```
+
+### 🚀 Reach 회복 recipe (champion 약점인 SR 44% → 63% 회복)
+
+champion (`lat_hold_v4_yneg_hold/ck1000`)이 정밀하지만 y=-25/y=0 region 일부 fail. 해결:
+
+```yaml
+# config/sim_train_align_reach_recover_v5_combo_config.yaml 핵심 파라미터
+data:
+  - approach_00 (cap 5000) + fine_align/10mm + range + NEARGOAL_eval_match + angle_only
+  - + NEARGOAL_yneg_hold_v1 (기존 hold-rich)
+  - + NEARGOAL_yneg_v1 (1500ep, y∈[-29,-10])  # 신규 추가
+  - + NEARGOAL_ypos_v1 (1500ep, y∈[+10,+29])  # 신규 추가
+model:
+  aux_hold_loss: { pos_weight: 0.15, rot_weight: 0.25 }  # softhold (champion의 절반)
+train:
+  pretrained_checkpoint: "lat_hold_v4_yneg_hold/checkpoint_1000.pt"
+  learning_rate: 1.0e-6  # 2× from champion's 5e-7
+  max_steps: 3000        # eval ck2000 sweet spot
+```
+
+→ SR_old 44% → 63%, holdSR 77.8% → 74.1% (noise 수준 손실), min_lat 0.87 → 1.00mm (marginal).
+
+### 🚫 폐기된 axes (시도 금지)
+
+| 폐기 | 이유 | reference |
+|---|---|---|
+| **DCT loss weight > 0** | controlled rerun에서 contribution ≈ 0, close_2/SR_old trade-off만 | Section 20, `project_dct_ablation_0522` |
+| **aux_hold weight 2× boost (rot=1.0)** | 도달은 살리되 lateral 손상 (lat_hold_v2_rot1) | Section 17 cycle 2 |
+| **softhold 단독** (lr 보수적, 5e-7) | 무효. 공격적 lr (1e-6)과 결합 시만 효과 | Section 24 v3 vs v5 |
+| **단순 학습량 늘리기 (v4 longer 5000step)** | over-train, SR 후퇴 | Section 25 |
+| **y=-25 region-specific data (yneg25_strict 1500ep)** | 2/9 천장 못 깸. fundamental 한계 (occlusion 의심) | Section 27 |
+| **Vision encoder swap fresh 20k step** | ConvNeXt/DINOv3 모두 SR 0~3.7%. chain 없으면 의미 없음 | Section 21.3c |
+| **SutureBot-style overlay disk** | radius 어떤 값도 trocar visual feature 가림 → 5mm 천장 못 깸 | `feedback_fine_alignment_dead_ends` 1 |
+| **sensor handoff servo** | 1D 신호만으로 fine alignment 불가 | `feedback_fine_alignment_dead_ends` 2 |
+| **proprio에 sensor/KP coord 추가** | 성능 ↓ | `feedback_fine_alignment_dead_ends` 4 |
+| **approach_00 완전 제거** | wide approach 학습 손실 > rebalance 이점 | `feedback_fine_alignment_dead_ends` 5 |
+| **direction_decoupled_loss** | gnorm 폭주 + 효과 없음 | `feedback_ddl_loss` |
+
+### 💡 자주 쓰는 한 줄 (실전 팁)
+
+| 상황 | 한 줄 |
+|---|---|
+| 새 ckpt 처음 평가 | retreat=2, exec=2, exec=4 둘 다 돌리기 (Pareto 후보 둘 다 잡힘) |
+| Eval shard merge 빼먹지 마라 | `python scripts/merge_eval_shards.py <ckpt> --num-shards 2 --exec-steps N --diff-steps 10` |
+| ⚠️ `--sensor-stop` 금지 | sensor만 닿아도 success 처리 → 5mm 정밀도 평가 왜곡 (`feedback_no_sensor_stop`) |
+| ⚠️ GPU 0 dead | `CUDA_VISIBLE_DEVICES`에서 nvidia-smi 인덱스 vs CUDA enum 한 칸 어긋남 (`feedback_gpu_index_mapping`) |
+| ⚠️ NVKMS lock race | 4+ eval 동시 EGL init 금지. 30s stagger (`feedback_nvkms_lock_race`) |
+| ⚠️ MuJoCo render | `export MUJOCO_GL=egl` + Mesa vendor JSON 강제 |
+| 학습 launch 후 발산 조기 신호 | loss > 0.7 또는 min loss ≈ initial → fail. step 1000 안에 발견 가능 (`feedback_finetune_dynamics`) |
+| Composite metric ranking 신뢰 금지 | rank_models.py가 diverge trap. 9-metric 종합 점수 + 개별 표 병행 (`feedback_model_ranking_composite`) |
+
+### 🔬 다음 세션 우선순위
+
+| priority | axis | 비용 | 기대 |
+|---|---|---|---|
+| **1** | y=-25 occlusion 진단 (frame 시각화 + camera fov 확인) | 30min | fundamental 한계 원인 파악 |
+| 2 | Champion + v5 ck2000 ensemble (action averaging at inference) | 1h code | reach + precision 동시 |
+| 3 | Multi-seed eval (champion + v5 ck2000 × 3 seeds) | 1.5h | stochasticity bound |
+| 4 | Input resolution upgrade (256 → 384/512) | 1일 datagen+train | encoder 정밀도 ↑ |
+| 5 | Action space delta scale 조정 (y-방향 reach 강화) | 1일 | y=-25 reach 강화 |
+
+---
 
 ---
 
@@ -276,517 +441,421 @@ config: `config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v2_config.yaml`
 
 ---
 
-## 10. Repo housekeeping (2026-05-19)
+## 🧠 BC Finetune 지식 정리 (경험적 규칙 — 2026-05-21)
 
-- 70 → 18 active configs. Dead-ends → `config/archive/`.
-- 35 → 18 active scripts. KP (demoted per `project_kp_role_brake`), libero benches, sensor_handoff → `scripts/attic/`.
-- EXPERIMENTS backups → `attic/`.
-- Background orphans (until-loop polling abandoned HARD_targeted datagen) killed.
-- Untouched: `checkpoints/`, `dataset/`, `aTrained_model/`, `lerobot/`, `Sim/`, `logs/`, `outputs/`, `wandb/`.
+### 1. Distribution shock 임계치 — 무엇이 finetune로 회복되고 무엇이 안 되는가
 
----
+| 변경 종류 | finetune 회복? | 사례 | 권장 lr/step |
+|---|---|---|---|
+| Data 분포 rebalance (cap, episode mix) | ✅ OK | lr1e6, v2_dual, extreme_rebal | lr 1e-6, 1000-2000 step |
+| Hyperparameter 조정 (aux weight, boost) | ✅ OK | aux_strong v3, v5a | lr 1e-6, 1000 step |
+| **이미지 분포 변경** (crop, aug 추가, 새 camera) | ❌ **2000 step lr1e6 finetune 불가** | **crop_zoom_v1 (close_5 0%)** ⚠️ | lr 1e-5+ 또는 from-scratch |
+| Pretrained vision encoder 자체 변경 | ❌ 거의 from-scratch | ConvNeXt 실험 폐기 | from-scratch only |
 
-## 11. 2026-05-20 1mm-Precision Program (Stage 1 + Stage 2)
+**Why**: SigLIP2 frozen features는 specific visual distribution에 tuned. 픽셀 분포가 통째로 shift되면 features의 semantic mapping이 무효 → diffusion head가 처음부터 다시 학습해야 함.
 
-### Motivation
-Champion v3 caps at 5.46mm mean min_dist (retreat=2 SR 74.1%). User asked: 어떻게 mm-precision까지 갈 수 있을까?
+### 2. 학습 fail 조기 감지 신호 (eval 안 돌려도 알 수 있음)
 
-Researched 5 surgical/precision VLA papers:
-- **SutureBot** (NeurIPS 2025, arXiv:2510.20965) — goal-pixel overlay → ACT 3.2→1.3mm, π0 3.9→**1.0mm**. Only paper with mm-scale gain on architecturally similar VLA stack. **→ adopt**
-- **DSP** (ICLR 2025) — noise self-filter, easy. Defer (real-data integration round)
-- **DP4AuSu** (2025 Wiley) — DTW LWR demo preprocess, unverified 1mm claim, no code. Skip
-- **SutureAgent** (2026 arXiv) — predicts pixels, not actions. Wrong layer
-- **Dreamer v3 microrobot** (Nature MI 2025) — different physics, RL infra rewrite. Skip
+| 신호 | 정상 | 위험 (학습 fail) |
+|---|---|---|
+| Final loss | champion 0.1-0.5 | **>0.7 (e.g., crop_zoom 0.95)** ⚠️ |
+| Loss 곡선 | monotonically ↓ | plateau or oscillation |
+| Gnorm | <10 stable | 30+ spike (crop_zoom final 30.5) |
+| Action sampling std | sub-mm | output near 0 (모델 무동작) |
+| Eval `min_dist / initial_dist` | min << initial (도달) | **min ≈ initial (무동작)** ⚠️ |
+| 다중 ckpt 차이 | sweet spot 존재 | **모든 ckpt 거의 동일 (학습 무효)** ⚠️ |
 
-### Precision diagnosis (3 bottlenecks)
-1. **Primary**: inference `num_inference_timesteps=10` (`VLANeXt.py:1623`) — 8-step action chunk × 10 denoising = sub-mm refinement 불가
-2. **Secondary**: 학습엔 GT trocar_entry_pos 입력, **inference엔 명시적 goal signal 없음** — wrist 카메라만으로 trocar 위치 추론 (정확히 SutureBot이 해결하는 문제)
-3. **Tertiary**: 256×256 + patch16 = 패치당 ~2-3mm. Stage 1/2 후 별도 axis
+→ **이런 신호 보이면 어떤 ckpt 돌려봐도 의미 없음**. 학습 자체가 broken.
 
-### Stage 1 — Inference sweep (in flight, ETA ~1.5h)
-- `scripts/sweep_diff_exec.sh` — diff_steps × exec_steps grid on v3/1000 @ retreat=2
-- 8 cells: (diff, exec) ∈ {(10,1), (25,1), (50,1), (100,1), (25,2), (50,2), (25,4), (50,4)}
-- Added `--num-inference-timesteps`, `--num-steps-execute` CLI to `sim_eval_align_only.py`
-- Added `close_once_1mm_pct`, `close_once_2mm_pct`, `time_near_1mm`, `time_near_2mm`, `p50/p90 dist` to `analyze_trajectory.py`
-- Results: `/tmp/sweep_diff_exec_results.md`
+### 3. lr/step/warmup 권장 매트릭스
 
-### Stage 2 — SutureBot goal-overlay (pipeline ready, waits for Stage 1)
-**Key discovery during impl**: HDF5 already has GT UV in `observations/keypoints_wrist[:, 2:4]` (normalized [0,1]) + `keypoints_visibility[:, 1]`. **No projection code needed** — Save_dataset_*.py:project_to_2d already ran offline during collection.
+| 시나리오 | lr | max_steps | warmup | 비고 |
+|---|---|---|---|---|
+| 같은 분포 + cap 조정 | **1e-6** | 1000-2000 | 100 | lr ablation 결론 |
+| Data 추가 (cotrain mix) | 1e-6 ~ 2.5e-6 | 1500-2500 | 200 | v2_dual 결과 |
+| Aux loss 강화 | 1e-6 | 1000-1500 | 100 | v5 over-train 빨라짐 |
+| **Visual distribution shift** | **1e-5 (10× ↑)** 또는 from-scratch | 5000+ | 500+ | crop_zoom 교훈 |
+| Pretrained 변경 | from-scratch | 50000+ | 1000+ | dead-end 영역 |
 
-**Files**:
-- `src/utils/overlay_utils.py` — `draw_overlay()` + `apply_overlay_batch()` (cv2.circle, supports dropout/jitter)
-- `src/datasets/sim_act_align.py` — overlay_enabled/color/radius/dropout/jitter params, applied BEFORE local crop/resize
-- `scripts/train.py` — dataset wiring for overlay options
-- `scripts/sim_eval_align_only.py` — `--overlay-source {gt,predicted,off}` CLI + apply on `frames["tool_camera"]` before preprocess
-- `config/sim_train_align_siglip2_overlay_v1_config.yaml` — finetune from v3/1000, lr 5e-6, max_steps 3000, save 500, overlay red dot radius 3 + dropout 0.1
+**비대칭 trade-off**: 같은 분포면 lr 낮을수록 안정 / 다른 분포면 lr 너무 낮으면 base에서 못 빠져나옴.
 
-**Sanity (read-only)**:
-- Color collision: 0 pure red px in all sampled tool_camera frames (any of red/blue/green safe)
-- Dataloader smoke: 39-frame ep, mean 29.6 red px/frame (radius 3 disk area ≈28), 35/39 frames have overlay (10% dropout exact)
-- Visual: red dot lands on trocar entry hole — see `/tmp/overlay_preview_zoom.png`
+### 4. Cotrain mix의 진짜 역할 — Catastrophic forgetting 방어 + 분포 점진 transition
 
-**Eval cells (after train)**:
-1. v3/1000 baseline (no overlay) — reference
-2. overlay_v1 + GT UV (oracle ceiling)
-3. overlay_v1 + predicted UV (실전 시나리오, kp head 4.4px err)
-4. overlay_v1 + no overlay (ablation: dependence on overlay)
+**잘못된 사용** (crop_zoom_v1 실수):
+- alignment 데이터 처음부터 100% cropped → base가 본 적 없는 분포로 shock
 
-**Targets**:
-- Cell 3 (predicted): mean min_dist ≤ 3mm, SR(close_once_2mm) ≥ 60% (~3-4x precision gain expected per SutureBot)
-- Cell 2 (GT oracle): mean min_dist ≤ 1.5mm → tertiary 천장 (vision resolution) 진짜 다음 axis 확정
+**올바른 curriculum** (distribution shift 클 때):
+- Phase 1 (warmup 500step): uncropped 80% + cropped 20% — base 안 깨짐
+- Phase 2 (1000step): 50/50 — 점진 transition
+- Phase 3 (1500step): cropped 100% — final task
 
-### Autonomous orchestration
-- Watcher 1 (`/tmp/launch_stage2_after_sweep.sh`): sweep PID 1090065 wait → overlay_v1 smoke train (200 steps) on GPU 1
-- Watcher 2 (`/tmp/launch_overlay_full_then_eval.sh`): smoke log success → full 3000-step train → 4-cell eval (`scripts/eval_overlay_4cell.sh`)
+또는 영구 cotrain (champion 방식): uncropped/cropped 동시 mix로 학습 (분포 전환 없음).
 
-### 11.1 Run-time bug fixes (2026-05-20 08:00-08:25)
+### 5. Base ckpt 선택 — fresh vs continual
 
-1. **UnboundLocalError**: `from src.utils.overlay_utils import draw_overlay` inside conditional block shadowed module-level `draw_overlay` (sim_eval's replay overlay). → renamed to `_draw_goal_overlay` alias.
-2. **CLI override silent fail**: `if "key" not in DictConfig` raises TypeError → removed guard since cfg.model/eval always exist.
-3. **Pipe truncation**: sweep v1 used `2>&1 | tail -20` losing real errors and making `set -e` blind. v2/v3 save full per-cell logs to `/tmp/sweep_v3_logs/`.
-4. **Stale npz contamination**: v1 cell 1 showed SR 3% because prior session's eval dirs (retreat=10) mixed with new (retreat=2). v3 sweep `rm -rf` each target dir before run.
-5. **ckpt path mismatch**: project name `VLANeXt_SigLIP2_overlay_v1` → train saved to `VLANeXt_SigLIP2_overlay/v1/`. Watcher had wrong path; bash variable cached too early to fix in-flight.
-6. **KP head ckpt naming**: actual is `head_best.pt` not `best.pt`. Smart eval fixed.
-
-### 11.2 Smart eval design (per user 2026-05-20 ranking guidance)
-
-User feedback: "SR지표가 비정확할 수 있으니 목표 지점에 정확하게 도달하는 다른 지표들이 많았는데 그걸 기준으로 종합적으로 판단해서 모델 좋은걸 찾아줘"
-
-- **`scripts/rank_models.py`**: 9-metric rank-sum (close_once_2mm, close_once_1mm, time_near_2mm, handoff_ok, min_dist_mean, p90_dist, lateral_when_near, angle_when_near, retreat). Lower Σrank = better.
-- **`scripts/eval_overlay_smart.sh`**: 2-stage
-  - Stage A: sparse ckpt sweep (1000/2000/3000) with `--overlay-source predicted` (realistic) + v3 baseline reference
-  - Stage B: ablation on winner with `gt` + `off` (oracle ceiling + dependency check)
-- Output: `/tmp/overlay_smart_stageA.md`, `/tmp/overlay_smart_final.md`
-
-### 11.3 Status snapshot (08:25)
-
-- Sweep v3 cell 1 in progress (Episode 9/27, 66.7% SR ← real baseline, not v1's bogus 3%)
-- Smart eval Stage A cell 1 (overlay_v1 step 1000 + predicted UV) started
-- GPU 1 + 2 fully utilized
-
-### 11.4 ⚠️ v1 overlay 진단: radius=3 px가 invisible (1.8% of SigLIP patch token)
-
-Smart eval Stage A 중간 결과 (n=27 each):
-
-| label | n | 2mm% | 1mm% | t≤2mm | handoff | mean_min | p90 | lat<5 | ang<5 | retreat | Σrank |
-|-------|---|------|------|-------|---------|----------|-----|-------|-------|---------|-------|
-| v3_baseline (sweep v3 cell 1) | 17 | 5.9 | 0.0 | 0.00 | 0.0 | 4.96 | 30.74 | 1.47 | 3.26 | 0.00 | 16 |
-| ovlPred_step1000 | 27 | 7.4 | 0.0 | 0.00 | 0.0 | 5.29 | 30.02 | 1.49 | 3.98 | 0.00 | 18 |
-| ovlPred_step2000 | 27 | 0.0 | 0.0 | 0.00 | 0.0 | 5.34 | 29.96 | 1.51 | 3.68 | 0.00 | 20 |
-
-⚠️ overlay 모델이 v3 baseline 대비 모든 정밀도 지표에서 동일/나쁨.
-
-**근본 원인 (math)**:
-- v1 config: `radius_px: 3` @ 640×480 raw render
-- → resize 256×256 = 1.2px disk (= 2.4px diameter)
-- → SigLIP2 **patch16 (16×16=256 px²)** 1.8%만 차지 → patch token avg color에 0.018%만 기여 → **invisible**
-
-**Stage 1 sweep v3 결과** (denoising count 비교, 진행 중 cell 1-2):
-
-| diff | exec | n | SR5mm | mean_min |
-|------|------|---|-------|----------|
-| 10 | 1 | 17 | 58.8 | 4.96 |
-| 25 | 1 | 27 | 48.1 | 5.65 |
-
-→ 더 많은 denoising step이 도움 안 됨. Diagnosis #1 (denoising quantization) **부정**. Real bottleneck은 #2 (no goal signal) confirmed. Sweep v3 killed (cells 3-8 skipped).
-
-### 11.5 v2 overlay 재학습 (radius=20, in-flight 09:34)
-
-- `config/sim_train_align_siglip2_overlay_v2_config.yaml`: `radius_px: 20` (40px diameter @ 640×480 → 16px @ 256×256 = 1 full SigLIP patch token, **visible**)
-- 나머지 v1과 동일 (lr 5e-6, max_steps 3000, dropout 0.1)
-- GPU 2에서 학습, watcher가 자동 eval 발사
-- v1 smart eval GPU 1에서 계속 (Stage B GT/off ablation으로 v1 진단 종결)
-
-### 11.6 v2 (radius=20) + v3 (radius=30) 동시 진행 (10:35)
-
-v1 Stage B 결과로 v2 단독으론 부족할 가능성 높아, radius ablation 위해 v3 (radius=30) 추가:
-
-- `config/sim_train_align_siglip2_overlay_v3_config.yaml`: `radius_px: 30` (60px diameter @ 640×480 → 24px @ 256×256 = 1.5 SigLIP patch token)
-- Watcher chain: v1 smart eval 종료 → v3 train on GPU 1 → v3 smart eval on GPU 1 (GPU 2는 v2 eval 진행중)
-
-**v2 step1000 + predicted 중간 결과 (n=20/27)**:
-- SR(close_5mm) = 40%, SR(close_2mm) = 0%, mean_min = 6.45mm
-- v3 baseline (66.7% at ep18)보다 약간 낮으나 진행 중
-
-**비교 결과 (10:34)**:
-- v1 step3000 + off (overlay 없이): SR(close_5) 66.7% @ ep18 ≈ v3 baseline
-- v1 step3000 + predicted: similar
-- v1 step3000 + GT: similar
-- → v1 radius=3 모델은 overlay 입력 완전히 무시 (radius bug 확정)
-
-**예상 결과 (v2/v3 학습이 의미있다면)**:
-- v2 (radius=20)부터 overlay 사용 학습 시작 가능
-- v3 (radius=30)에서 명확한 SR2 향상 보여야 함
-- 두 모델 모두 v3 baseline에 못 미치면 → overlay 접근 자체 폐기, 다른 방향 (e.g., proprio goal, hierarchical) 모색
-
-### 11.7 v1 Stage B 최종 결론 (10:42)
-
-```
-| label                    | n  | 2mm% | mean_min | Σrank |
-|--------------------------|----|------|----------|-------|
-| v3_baseline              | 27 | 3.7  | 5.04     | 16 🏆 |
-| ovlPred_step3000(gt)     | 27 | 3.7  | 5.42     | 19    |
-| ovlPred_step3000(off)    | 27 | 0.0  | 5.45     | 20    |
-```
-
-- **GT oracle UV도 v3 baseline에 패배** → v1 모델은 overlay signal을 완전히 무시
-- off (no overlay) ≈ GT ≈ predicted → 모델이 overlay 픽셀을 noise로 취급
-- **radius=3 invisible 가설 (1.8% patch token area) 확정**
-
-### 11.8 v2 (radius=20) 중간 결과 (11:05)
-
-```
-| label                  | n  | 2mm% | mean_min | Σrank |
-|------------------------|----|------|----------|-------|
-| v3_baseline            | 27 | 3.7  | 5.04     | 16 🏆 |
-| v2_step1000_predicted  | 27 | 3.7  | 5.42     | 18    |
-| v1_step3000_off        | 27 | 0.0  | 5.45     | 21    |
-```
-
-- v2 step1000은 v3 baseline 거의 동등 (mean_min 5.42 vs 5.04)
-- step2000 partial (n=24): mean_min=6.15mm — 오히려 악화 추세
-- step3000 + GT/off 필요
-
-### 11.9 가설 재평가
-
-v2 (radius=20)이 v1 (radius=3)와 유사하면 → "overlay 자체가 성능 boost 어려움":
-1. **v3 baseline이 이미 vision으로 trocar 잘 localize 함** — 추가 goal signal 정보 가치 낮음
-2. **Action precision bottleneck** (diffusion noise floor ~5mm) — vision improvement만으로 못 뚫음
-3. **SutureBot 결과 vs ours**: 그쪽은 π0 3.9→1.0mm. 우리는 5.0mm fixed.
-   - 가능한 이유: 우리 task 더 어려움? 우리 vision 이미 더 좋음? 데이터 적음?
-
-**다음 방향 후보** (v2/v3 도 baseline 못 이기는 경우):
-1. **Proprio goal**: trocar_world_mm을 proprio에 concat (overlay 대신 명시적 좌표 입력)
-2. **Goal-conditioned diffusion**: trocar UV/dist를 action diffusion condition에 추가
-3. **Multi-step refinement**: near-goal에서 별도 fine-tune된 작은 모델로 zoom-in
-4. **Action representation 변경**: bin-quantized vs continuous diffusion
-
-### 11.10 ⚠️ v2 (radius=20) 결과 — overlay 자체가 visual feature 손상
-
-```
-Model                  | close_2 | close_3 | close_5 | mean_min
------------------------|---------|---------|---------|----------
-v1 step3000 predicted  | 3.7%    | 25.9%   | 59.3%   | 5.04mm
-v1 step3000 GT         | 0.0%    | 22.2%   | 55.6%   | 5.45mm
-v1 step3000 off        | 3.7%    | 25.9%   | 59.3%   | 5.04mm  ← v1 무시
-v2 step1000 predicted  | 0.0%    | 3.7%    | 51.9%   | 5.90mm  ← v2 손상
-v2 step2000 predicted  | 0.0%    | 3.7%    | 55.6%   | 5.89mm
-v2 step3000 predicted  | 0.0%    | 3.7%    | 51.9%   | 5.78mm
-```
-
-**중요 관찰**:
-1. v1 predicted ≡ v1 off → 모델이 radius=3 overlay를 픽셀 노이즈로 무시 (radius invisible 확정)
-2. v2 (visible radius=20)는 v1보다 **더 나쁨** (mean_min 5.78-5.90 > 5.04)
-3. **새 가설**: visible overlay가 **trocar entry hole의 visual feature를 가림** (40px disk가 hole 위에 그려짐 → 모델이 hole pixel을 못 봄)
-
-**구조적 결론**: SutureBot의 "opaque pixel marker" 접근은 우리 환경에서 부적합. 우리 trocar는 이미 카메라에 명확히 보이므로 marker가 redundant + 가림.
-
-### 11.11 다음 방향: keypoint proprio injection
-
-- 기존 코드 `use_keypoint_proprio=True` (proprio_dim=9 = ee_pose 6 + troc_uv 2 + dist_norm 1)
-- Overlay 대신 **명시적 trocar UV/dist 좌표**를 proprio에 concat
-- visual feature 가림 없이 goal signal 주입
-- `project_keypoint_pipeline_0514` 학습된 head 그대로 사용 가능
-
-대안:
-- v3 (radius=30) 결과 확인 후 결정 (radius=30이 더 나으면 overlay 자체 가능성 재검토)
-- v3도 v2와 유사하게 못 이기면 keypoint proprio로 pivot
-
-### 11.12 v3 (radius=30) 초기 결과 + Pivot 결정
-
-```
-v3 (radius=30) step1000 predicted:
-  close_once 1/2/3/5/8/10 mm: 0.0 / 0.0 / 0.0 / 51.9 / 81.5 / 88.9 %
-  mean_min = 5.75mm
-```
-
-vs.
-- v3 baseline: 5.04mm
-- v1 step3000 pred: 5.04mm (overlay 무시)
-- v2 step1000 pred: 5.90mm
-- v3 step1000 pred: 5.75mm
-
-→ **radius 클수록 더 나빠짐 (occlusion 가설 확정)**. SutureBot 접근법 우리 task에 부적합.
-
-### 11.13 v4 keypoint proprio injection (12:10 launch)
-
-- `config/sim_train_align_siglip2_kp_proprio_v4_config.yaml`
-- `proprio_dim: 9`, `use_keypoint_proprio: true` (overlay 폐기)
-- 명시적 `[troc_u, troc_v, dist_norm]` 3차원을 ee_pose(6)에 concat
-- Visual feature 가림 없이 goal signal 주입
-- pretrained_checkpoint: v3 SigLIP2_repro/b24_ft10mm_aux_strong/checkpoint_10000.pt (proprio_proj 6→9 random init)
-- lr 5e-6 (v3 recipe), max_steps 3000, save 500
-- 학습 후 auto-eval (watcher armed, GPU 2)
-
-**예상**:
-- Best case: proprio에 정확한 좌표 있으니 모델이 fine alignment 학습 쉬워짐, mean_min 4mm 이하 가능
-- Worst case: proprio 신호도 무시 (champion 이미 vision만으로 잘하니 추가 signal 무의미) → 5mm 영역 정체
-- Either case: overlay vs proprio 두 가설 결판
-
-### 11.14 v3 (radius=30) 전체 ckpt 결과 — overlay 폐기 확정
-
-```
-v3 step1000 (radius=30, predicted):
-  close 1/2/3/5/8/10mm: 0.0 / 0.0 / 0.0 / 51.9 / 81.5 / 88.9 %  | mean_min=5.75mm
-v3 step2000:
-  close 1/2/3/5/8/10mm: 0.0 / 0.0 / 0.0 / 55.6 / 81.5 / 88.9 %  | mean_min=5.62mm
-v3 step3000:
-  close 1/2/3/5/8/10mm: 0.0 / 0.0 / 0.0 / 48.1 / 81.5 / 88.9 %  | mean_min=5.66mm
-```
-
-vs v3 baseline (5.04mm, close_2mm=3.7%) — 모든 ckpt에서 baseline에 패배. 더 큰 overlay = 더 큰 occlusion. **overlay 접근법 결정적 폐기**.
-
-### 11.15 Architecture 재검토 (user prompt 12:30)
-
-User raised 3 questions:
-
-1. **Proprio 묻힘 (1 / 289 tokens = 0.35%)**: 단일 proprio token이 256 vision token과 attention 경쟁 → 묻힐 가능성 높음
-2. **Meta queries (32) — vision-only에서 무용**: VLM에서 cross-attend summarization 역할인데 우리는 LM 없음 → 그냥 32개 learnable register, 큰 도움 안 됨
-3. **Vision encoder 거대 + 해상도 낮음**: SigLIP2-so400m native 512 vs 우리 256 입력 (encoder 능력 절반 활용). patch16 @ 256 = ~1.6mm/token (1mm precision 불가)
-
-**HDF5 raw frames 640x480 검증됨** — `project_input_resolution_ceiling` 메모리 일부 오류 (HDF5 재생성 불필요, dataloader resize만 변경하면 됨)
-
-### 11.16 v5 design plan (v4 oracle 결과 후 launch)
-
-**v4 oracle test 추가**: `--oracle-kp` flag로 GT trocar 좌표 직접 주입 → proprio signal이 본질적으로 유효한지 확인. v4 watcher에 oracle eval 추가됨.
-
-**v5 (v4 결과에 따라)**:
-- v4 oracle >> predicted → proprio 효과 있음, KP head quality 개선 필요
-- v4 oracle ≈ v3 baseline → proprio 1 token 흡수 안 됨 → 강화 필요 (multi-token, FiLM, replicated tokens)
-
-**v5 후보 구성**:
-| 변경 | 효과 |
+| 상황 | base 권장 |
 |---|---|
-| input_image_size 256→384 | tokens 256→576, 패치당 1.6→1.1mm |
-| Multi-token proprio (ee_pose+goal_uv+goal_dist 분리) | proprio 토큰 1→3, attention 표면 3x |
-| Remove meta_queries (or condition_type="tight") | 깔끔, vision token이 더 강조 |
-| FiLM modulation (옵션) | goal coords로 vision feature 자체 변조 |
-| smaller encoder (옵션, 효과 검증 후) | SigLIP-base or DINOv2-base 시 메모리 ↓ |
+| 새 데이터/분포 axis (단독 효과 측정) | **fresh** (champion v3 ckpt1000) |
+| Hyperparameter 미세 조정 | **continual** (현 best ckpt) |
+| 다단계 curriculum (warmup→final) | **fresh** 또는 짧은 단계별 cascade |
 
-### 11.17 사용자 hard-won feedback (12:30)
+**경험**: continual_v1 (lr1e6 ckpt1500 base) vs extreme_rebal (champion fresh) 차이 거의 없음 (median 4.70 vs 4.95). axis 효과가 base 차이를 압도하는 영역에선 fresh가 명확한 비교 가능.
 
-| 시도 | 결과 |
-|---|---|
-| Sensor handoff | ❌ 효능 없음 (1D 신호 부족) — safety brake로만 |
-| Proprio (ee_pose 6) | ✅ 효과 있음 |
-| Proprio + sensor/KP | ❌ 떨어짐 |
-| aux_distance_loss ↑ | ✅ **올릴수록 좋아짐** (v5a 1st-axis) |
-| CNN encoder | ✅ but **unfreeze 필수** |
+### 6. Eval 진단 워크플로 (학습 fail 빠른 확인)
 
-### 11.18 v4 (kp proprio) catastrophic failure (13:10 confirm)
-- 24/27 eps ALL FAIL, dist 9~20mm
-- 사용자 prediction 정확. proprio injection path 폐기.
-
-### 11.19 v5 launches (13:25-)
-
-**v5a (GPU 1)**: champion v3 base + aux_distance_loss boost (weight 0.5→1.0, max_boost 10→50). 1500 step finetune, lr 5e-6. 사용자 추천 1st-axis.
-
-**v5b (GPU 2)**: ConvNeXtV2-base-384 + backbone_mode=finetune (full unfreeze). lr 1e-6 (보수적). 3000 step from-scratch effectively (pretrained=ImageNet only). 사용자 직관: CNN 쓸 거면 unfreeze 필수.
-
-Watcher 자동 eval (v5a: ckpts 500/1000/1500, v5b: ckpts 1500/3000) on completion.
-
-### 11.20 v5b (ConvNeXt unfreeze) 실패 (14:00)
-
-- gnorm 11-42 throughout, loss never <1.5 (early start at 2.5+)
-- eval 7/27 all FAIL, dist 19-21mm
-- lr 1e-6 도 너무 높음 OR ConvNeXt full unfreeze 우리 데이터 size에 over-parameterized
-- v5b.2 retry 보류 — v5a (frozen SigLIP2 + aux boost) 결과 우선
-
-### 11.21 v5a.2 launch (14:00) — aux boost stress test
-
-GPU 2 free → v5a.2 시작:
-- weight 1.0 → **2.0**, max_boost 50 → **100** (사용자 "올릴수록 좋아짐" stress)
-- 나머지 v5a 동일 (lr 5e-6, 1500 step, champion v3 base)
-- GPU 1: v5a 3-ckpt eval 진행중 (ckpt 1500 ep 1/27)
-- GPU 2: v5a.2 train 시작
-
-만약 v5a > baseline AND v5a.2 > v5a → "올릴수록 좋아짐" confirmed, sweep aux weight 더 올려서 한계점 찾기 (v5a.3 weight 4.0?)
-
-### 11.22 사용자 feedback: ckpt eval sparse (14:00)
-
-"Eval을 그렇게 많이 할 필요없긴하거든? 지금 그런식이면 final이랑 중반 초반만 봐도 될 것 같기도"
-
-→ memory `feedback_eval_workflow.md` 보강. watcher 작성 시:
-- final 우선 (1500 step)
-- final이 좋으면 mid 추가 (500 또는 1000)
-- early 일반적으로 안 봄
-
-**즉시 적용**:
-- v5a.2 watcher: final 1500만 eval (500/1000 skip)
-- v5a 현재 eval은 1500 진행중 → 끝나면 결과 보고 500/1000 cancel 검토
-
-### 11.23 v5a (aux boost 1.0/50) 결과 + outlier 분석 (14:15)
-
-**Raw distribution comparison (27 ep)**:
-
-```
-                       n  mean  median  p25   p10  best5  <2mm  <1mm
-v3_baseline           27  5.42  5.33   2.96  2.41  2.26    1     0
-v5a (boost 1.0/50)    27  5.44  5.10   3.17  2.82  2.56    1     0
-                                ↑                          
-                            median 0.23 ↑       best 0.30 ↓
-```
-
-**해석** (user outlier insight 적용):
-- Mean 동등 → 평균만 보면 "별 효과 없음"
-- Median 0.23mm 개선 (v5a 살짝 ↑)
-- **하지만 best 10/5 cells 모두 후퇴** (best5 2.26→2.56) — fine alignment 손해!
-- 결론: aux_boost는 **모든 cell을 5mm 영역으로 수렴**시키는 효과. outlier는 약간 개선, best cells는 후퇴 → fine precision 측면 net 손해
-
-→ 사용자 가설 "올릴수록 좋아짐"이 이 config에서 confirm 안 됨. v5a.2 (2.0/100) 더 강화하면 더 안 좋을 가능성 큼.
-
-**analyze_trajectory.py 보강**: 분포 metric 추가 (p25, p10, best5_mean, n_under_2mm/1mm).
-
-### 11.24 v5a.2 (w=2.0, b=100) 결과 + aux_boost saturation (14:40)
-
-```
-                       n  mean  med   p25   p10  best5 <2 <1
-v3_baseline           27  5.42  5.33  2.96  2.41  2.26  1  0
-v5a (w=1.0, b=50)     27  5.44  5.10  3.17  2.82  2.56  1  0
-v5a.2 (w=2.0, b=100)  27  5.46  5.05  3.15  2.78  2.59  1  0  ← v5a와 거의 동일
-```
-
-aux_boost weight 2x 차이로도 결과 동일 → **saturation**. 더 강화 의미 없음. axis 종결.
-
-### 11.25 사용자 결정 (14:45)
-
-- **GPU당 2 eval 동시 가능** (`feedback_gpu_concurrency` 신규) — 시간 절약 시 활용
-- **Compact 준비**: 모든 v1~v5a.2 결과 + 사용자 dead-end 결정 + GPU concurrency를 memory에 강하게 저장
-
-### 11.26 현재 진행 (compact 전)
-
-**GPU 1**: v3 baseline + diff_steps=50 redo (Stage 1 sweep 결과 stale npz 오염 의심, 깨끗하게 재확인). ep ~5/27.
-
-**다음 axes** (post-compact 진행 후보):
-1. Action precision 분석 (diffusion noise floor)
-2. Near-goal data 재생성 (HOLD step ↑, 0~5mm trajectory 보강)
-3. CNN partial unfreeze v5b.2 (last 2 stages만, lr 1e-7)
-4. Hierarchical fine-policy (별도 small near-goal model)
-
----
-
-## 11.27 Action Variance Diagnostic (2026-05-20 post-compact)
-
-**가설**: 5mm 천장 = diffusion sampling noise floor (action precision 한계)
-**방법**: v3 ckpt1000 고정, 같은 obs에서 30 samples (×3 diff_steps × 3 phantom offsets) → per-dim std 측정
-
-**Output**: `logs/action_variance_v3_ckpt1000.json`
-
-| diff_steps | state    | dx     | dy     | dz     | rx     | ry     | rz     |
-|------------|----------|--------|--------|--------|--------|--------|--------|
-| 10         | far_10mm | 0.059  | 0.069  | 0.097  | 0.087  | 0.122  | 0.076  |
-| 10         | mid_5mm  | 0.057  | 0.067  | 0.088  | 0.087  | 0.117  | 0.059  |
-| 10         | near_3mm | 0.078  | 0.073  | 0.106  | 0.089  | 0.097  | 0.090  |
-| 25         | far_10mm | 0.076  | 0.073  | 0.092  | 0.126  | 0.122  | 0.090  |
-| 25         | mid_5mm  | 0.072  | 0.082  | 0.091  | 0.108  | 0.092  | 0.093  |
-| 25         | near_3mm | 0.062  | 0.062  | 0.101  | 0.090  | 0.146  | 0.065  |
-| 50         | far_10mm | 0.079  | 0.067  | 0.086  | 0.102  | 0.132  | 0.072  |
-| 50         | mid_5mm  | 0.060  | 0.066  | 0.093  | 0.116  | 0.079  | 0.087  |
-| 50         | near_3mm | 0.095  | 0.060  | 0.112  | 0.079  | 0.111  | 0.081  |
-
-**해석** (action_max_sim ≈ 1mm/step normalized to [-1,1]):
-- per-step std 0.06~0.13 = **0.06~0.13mm 또는 0.1° uncertainty/step** (sub-mm)
-- closed-loop control, RMS over 100 steps = √100 × 0.1 ≈ 1mm 누적 변동
-- **diff_steps 10 = 25 = 50: 거의 동일** (rx/ry 약간 변동 있으나 평균 차이 없음)
-
-**결론** ⚠️:
-1. ❌ **Action precision은 5mm 천장의 원인 아님**. Sampling noise는 sub-mm.
-2. ❌ Diffusion step 늘리는 것도 효과 없음 (10 = 50). Stage 1 sweep 결과 (모든 cell 5mm 천장)와 일치.
-3. ✓ 진짜 천장: **BC 모델이 near-goal에 정확한 mean action을 학습 못함** (데이터 + 표현력 한계)
-4. ✓ 다음 axis 정당화: **near-goal 데이터 보강 (HOLD=60)** + hierarchical model
-
-**Caveat**: phantom offset 10mm시에도 actual dist 33.7mm로 측정됨 — robot이 home pose. fine-align 영역 (≤5mm) state는 trained model 추론 후의 동적 state. 진단은 "approach far region" variance만 측정. 향후 actual fine-align state에서 측정 필요시 reset에 robot pre-align 추가.
-
-## 11.28 Near-goal Data Regeneration (2026-05-20)
-
-**가설**: 천장은 BC near-goal 데이터 부족. Hold trajectory 2배 보강 → fine alignment frame 학습량 ↑.
-
-**구성**:
-- `Sim/Save_dataset_align_NEARGOAL.py` (Save_dataset_align_HARD_unified copy)
-- HOLD_RECORD_STEPS: 30 → **60** (hold trajectory 2배)
-- ALIGN_HOLD_STEPS: 10 → **20** (성공 인정 더 엄격 — 진짜 정렬된 trajectory만)
-- ALIGN_THRESHOLD_M: 0.002 그대로 (1mm 시도하면 성공률 망함)
-
-**Launch** (GPU 영향 없음, CPU 4 worker):
 ```bash
-python -u Sim/run_parallel.py --script align_neargoal \
-  --workers 4 --episodes 250 \
-  --base-dir dataset/fine_align/NEARGOAL_hold60_v1 \
-  --randomize-phantom-pos --no-side-camera --seed 42
+# Step 1 — 5분 sanity (train log 확인)
+grep "final loss" train.log         # >0.7면 fail 가능성 ↑
+grep "gnorm" train.log | tail -10   # 30+ spike면 fail 가능성 ↑
+
+# Step 2 — 1 ckpt 부분 eval (5-10 cell만, 5분)
+# initial_dist vs min_dist 비교, 둘이 비슷하면 학습 무효
+
+# Step 3 — 전체 fail 확정 시 곧장 폐기, full 27-cell 안 돌림 (시간 절약)
 ```
 
-**예상**: ~70분 (HARD 30step hold 기준 +10% 시간). 완료 후 champion finetune cotrain mix에 추가.
+### 7. Visual distribution shift 회복 옵션 (crop_zoom 후속)
+
+- **A. lr 10× 증가** (1e-6 → 1e-5): 큰 shift에 큰 step
+- **B. Cotrain mix curriculum**: uncropped+cropped 점진 transition
+- **C. From-scratch baseline**: champion 안 씀, 더 길게 (≥10K step) — 진짜 axis 효과 측정
+- **D. Crop center 고정 (UV 의존 제거)**: train/eval consistency 위험 회피
+
+관련: [[project_lr_ablation_final]] (lr 1e-6 정상 분포 default), [[feedback_fine_alignment_dead_ends]] (폐기 axis 카탈로그)
+
+### 다음 단계
+1. ✅ lr ablation 완료 — **lr 1e-6 ckpt 1500 = 신 median champion**
+2. **다른 PC 10K v3 데이터** 도착 대기 → 도착 시 lr1e6 spec으로 새 finetune (retreat=0, hold=30 사양)
+3. **Architecture axis** (데이터 axis 후 천장 못 깨면): vision encoder partial unfreeze (last_n=2, seeds 다중)
+4. **데이터 axis** (10K v3 외): y=-25 region에 추가 데이터 fix (approach_00 imbalance 직접 해결)
+
+### 신규 도구 (2026-05-20)
+- `scripts/diagnose_action_variance.py` — action sampling std 측정
+- `scripts/analyze_cell_failures.py` — 27-cell phantom metadata 매핑 + cell별 fail 분석
+- `scripts/analyze_trajectory.py` — distribution metrics (p25, p10, best5, n<2mm/<1mm)
+- `scripts/visualize_robot_perturbation_clean.py` — world frame perturb 시각화 (4 PNG, tool+side cameras)
+- `scripts/visualize_robot_perturbation_trocar.py` — trocar local frame 시각화 (4 PNG)
+- `Sim/run_parallel.py` — `--perturb-*` flags
+- `Sim/6_neargoal_dual_track.sh` — Track A+B 동시 datagen (완료)
+- `Sim/7_multi_10k_v3.sh` — 10K v3 datagen (다른 PC, retreat 0/hold 30)
+
+### Compact 후 핵심 reference
+- 메모리: `project_lr5e6_median_winner` (신규), `project_y_neg_distribution_bias`, `project_neargoal_v2_datagen` (업데이트), `project_champion_v3_0520`
+- 폐기 메모리: feedback_fine_alignment_dead_ends에 OptC 추가 필요
 
 
 ---
 
-## 11.29 v3 diff50 clean retest (2026-05-20)
 
-**가설**: Stage 1 sweep contamination 의심 (stale npz로 모든 cell 5mm 천장). diff_steps=50으로 깨끗하게 retest 시 천장 깨질까?
+## Ablation Studies (moved out)
 
-**구성**: v3 ckpt1000, fresh eval dir (이전 stale dir 삭제), 27-cell @ retreat=2, diff50/exec1
+Detailed ablation experiments now live in a separate file: **[`ablation.md`](./ablation.md)** (~790 lines).
 
-**결과** (vs diff10 baseline):
-| | diff10 baseline | diff50 retest |
+Contains:
+- **Section 22** — Ablation Master Table (architecture / loss / data / inference / training / metric design)
+- **Section 29** — Qwen3.5-2B (with-LM) vs vision-only encoder ablation
+- **Section 31** — `hold_recovery` autonomous sweep v3-v8 (holdSR 52% ceiling 탐색)
+- **Section 32** — Post-cleanup follow-up: exec=4 sweep + v9-v14 sub-mm/hold variants
+- **Section 33** — 3-axis driver analysis: Architecture / Data / Loss for sub-mm + hold
+
+→ For "어떤 axis가 가장 sub-mm 정확도/hold를 끌어올렸나" — see `ablation.md` Section 33.
+
+
+---
+
+## Section 28: 세션 최종 Compact-ready Summary (2026-05-23 마무리)
+
+이 세션은 사용자 질문 5가지를 순차 답변:
+1. "Three Pillars of Sub-mm Precision 더 추가할 거?" → Section 20+21 새 발견 반영
+2. "DCT 키고 끄기 비교" → Section 20 controlled ablation
+3. "ACT/DP/ConvNeXt/SigLIP2/DINOv3 baseline 비교" → Section 21 baseline matrix
+4. "ACT/DP hold loss 안 해서 holdSR 낮은 거 아닌가?" → Section 21.3b false confound 입증
+5. "ACT처럼 SR 100 올릴 수 있나? 기존 성능 유지하며" → Section 23-27 reach_recover 10 variants
+
+### 28.1 결정적 발견 (paper에 직접 영향)
+
+| # | 발견 | 영향 |
 |---|---|---|
-| SR | 88.9% | **70.4% (-18pp)** |
-| close_5mm | 88.9% | **48.1% (-41pp!)** |
-| close_2mm | 3.7% | 0% |
-| close_1mm | 0% | 0% |
-| mean_min | 5.42 | 5.59 |
-| median_min | 5.33 | 5.11 |
-| best5_mean | 2.26 | 2.37 |
+| 1 | **"ACT/DP 22% 천장"은 retreat=10 artifact**. retreat=2에선 ACT/DP **SR_old 100%** | baseline narrative 정정 필수 |
+| 2 | **진짜 차별화 = holdSR + min_lat**. ACT 24.5% / DP 11.1% vs Ours 77.8% | paper Table 1 multi-metric |
+| 3 | **Hold-loss false confound**: SigLIP2 + dist-only도 holdSR 74.1%. aux_hold 효과는 +3.7pp marginal | "aux_hold = key contribution" 정정 |
+| 4 | **Encoder choice는 fresh budget에서 차별화 X**. ConvNeXt/DINOv3 fresh 20k도 SR_old 0~3.7% | "SigLIP2 우월" claim caveat |
+| 5 | **Chain matching이 dominant**. champion 우위 = base 50k + finetune cascade | encoder ablation은 fair budget matching 필요 |
+| 6 | **DCT loss 0.1 ≈ 0**. controlled rerun primary 지표 noise 수준 | champion config DCT off 권장 |
+| 7 | **Reach 회복 가능**: v5 ck2000 = SR 44%→63% (+19pp), holdSR/min_lat 거의 손실 없이 | "Ours는 reach도 회복" 강한 claim |
+| 8 | **exec axis = Pareto knob**. exec=4 holdSR **81.5%** (champion 77.8% 추월), exec=2 SR best, exec=1 close_2 best | single training 3 deployment modes |
+| 9 | **y=-25 약점은 데이터 양 문제 아님**. yneg25_strict 1500ep 추가도 무효 (2/9 그대로) | fundamental 한계 (occlusion/action space) |
 
-**결론**:
-1. ❌ Stage 1 sweep contamination 의혹은 무효. Stage 1 결과대로 diff_steps 변경은 도움 안 됨
-2. ⚠️ **학습-inference diffusion step mismatch는 해로움**. 학습 diff10 + inference diff50 → 48% SR 폭락
-3. 학습 distribution과 inference scheduler 일관성 유지가 중요
-4. action variance diagnostic도 동일 의미: diffusion step 자체는 천장과 무관
+### 28.2 Pareto Champion 확정
 
-## 11.30 v3 final ckpt eval (2026-05-20)
+**Reach champion**: `reach_recover_v5_combo/checkpoint_2000.pt` + exec=2 — SR_old **63.0%**, holdSR 74.1%, y=0 6/9 (champion 3/9)
+**Hold champion**: 동일 ckpt + exec=4 — holdSR **81.5%** (모든 variant 중 최고), ang 2.49°, safety 10.78mm
+**Precision champion**: 동일 ckpt + exec=1 — close_2 **63.0%**
+**Sub-mm lateral**: lat_hold_v4_yneg_hold/ck1000 + exec=2 — min_lat **0.87mm**
 
-**가설**: champion ckpt1000이 sweet spot인가, training 더 가면 좋아지는가?
+→ **Single ckpt + 3 inference modes로 paper Table 1 4 column 모두 cover**.
 
-**구성**: v3 checkpoint_final (5000 step), 27-cell, diff10/exec1
+### 28.3 데이터 변경
 
-**결과** (vs ckpt1000):
-| | ckpt1000 (champion) | checkpoint_final (5000) |
+| dataset | size | purpose | 결과 |
+|---|---|---|---|
+| `NEARGOAL_yneg_v1` | 1500 ep, y ∈ [-29,-10] | y<0 일반 보강 (이전 세션) | v5에 포함, 도움 |
+| `NEARGOAL_ypos_v1` | 1500 ep, y ∈ [+10,+29] | y>0 일반 보강 (이전 세션 끝물) | v5에 포함, 도움 |
+| `NEARGOAL_yneg25_strict_v1` | 1500 ep, y ∈ [-29,-21] | **y=-25 강화 (이번 세션 신규)** | v10에 추가 → **무효** |
+
+### 28.4 새 configs (이 세션)
+
+```
+config/sim_train_align_dct_{off,on}_v1_config.yaml                    (Section 20)
+config/sim_train_align_{dinov3,siglip2}_baseline_v1_config.yaml      (Section 21 fresh 1500)
+config/sim_train_align_{convnext,dinov3,siglip2}_long5k_v1_config.yaml (21.3c)
+config/sim_train_align_{convnext,dinov3}_long20k_v1_config.yaml      (21.3c)
+config/sim_train_align_reach_recover_v{1,2_aggressive,3_softhold,
+                                       4_longer,5_combo,6_v5consol,
+                                       7_pushlr,8_gentle,9_v5push,
+                                       10_yneg25}_config.yaml          (Section 23-27)
+```
+
+### 28.5 새 scripts (이 세션)
+
+```
+scripts/eval_dct_ablation.sh                                        (Section 20)
+scripts/analyze_dct_ablation.py                                     (Section 20)
+scripts/eval_baseline_matrix.sh                                     (Section 21)
+scripts/analyze_baseline_matrix.py (확장됨, 모든 variant 포함)         (Section 21+ all)
+scripts/eval_long5k_matrix.sh                                       (Section 21.3c)
+scripts/eval_long20k_matrix.sh                                      (Section 21.3c)
+scripts/eval_reach_recover.sh                                       (Section 23)
+scripts/eval_reach_recover_v23.sh                                   (Section 24)
+Sim/10_yneg25_strict.sh                                             (Section 27)
+```
+
+### 28.6 새 memory (이 세션)
+
+- `project_dct_ablation_0522` — DCT noise 수준 contribution
+- `project_baseline_matrix_0522` — ACT/DP 100%, narrative 정정
+- `project_hold_loss_false_confound_0522` — aux_hold marginal
+- `feedback_chain_dominant_over_encoder` — fresh ≠ chain
+- `project_ablation_master_0522` — 세션 종합 ablation
+- `project_reach_recover_v1_0522` — initial recovery (lr 5e-7)
+- `project_reach_recover_pareto_0523` — v5 ck2000 + exec axis Pareto
+- `feedback_fine_alignment_dead_ends` — DCT(8), hold loss(9), encoder fresh(10) 추가
+
+### 28.7 Paper-grade table (Table 1 후보)
+
+| Method | SR_old (3D<5mm) | close_5 | close_2 | **holdSR** | **min_lat** | finLat | ang° | safety (p99) |
+|---|---|---|---|---|---|---|---|---|
+| ACT (ResNet18 scratch 30k) | 100% | 100% | 48.1% | 24.5% | 2.00mm | 2.01mm | 1.55° | **3.78mm** |
+| DP (ResNet18 scratch 30k) | 100% | 100% | 33.3% | 11.1% | 2.22mm | 2.34mm | 1.36° | 3.91mm |
+| ConvNeXt-base frozen + ours head, fresh 20k | 3.7% | 14.8% | 3.7% | 11.1% | 20.50mm | 21.96mm | nan | 48.46mm |
+| DINOv3-ViT-L/16 frozen + ours head, fresh 20k | 0% | 7.4% | 0% | 11.1% | 19.04mm | 19.04mm | nan | 45.97mm |
+| **Ours (SigLIP2-so400m + chain) Reach** | 63.0% | 74.1% | 55.6% | 74.1% | 1.00mm | 1.55mm | 3.40° | 11.62mm |
+| **Ours Hold** (same ckpt, exec=4) | 48.1% | 74.1% | 55.6% | **81.5%** | 1.00mm | 1.88mm | **2.49°** | 10.78mm |
+| **Ours Sub-mm lateral** (champion ckpt, exec=2) | 44.4% | 70.4% | 51.9% | 77.8% | **0.87mm** | 1.96mm | 3.00° | 11.48mm |
+
+### 28.8 Open axes (다음 세션)
+
+| priority | axis | 비용 | 기대 |
+|---|---|---|---|
+| 1 | y=-25 occlusion 진단 (frame 시각화) | 30min | fundamental 원인 파악 |
+| 2 | Champion + v5 ck2000 ensemble (action averaging) | 1h code | reach + precision 결합 |
+| 3 | Input resolution 384/512 | 1일 datagen+train | encoder 정밀도 ↑ |
+| 4 | Action space delta scale 조정 | 1일 | y reach 강화 |
+| 5 | Multi-seed eval (3 seeds) | 1h | stochasticity bound |
+
+### 28.9 Section index (이 세션 추가/수정)
+
+```
+17  Loss synergy (이전)
+18  Data ablation (이전)
+19  Compact summary (이전)
+20  DCT controlled ablation (NEW)
+21  Vision encoder + baseline matrix (NEW)
+    21.3b  Hold-loss false confound (NEW)
+    21.3c  Encoder long-train test (NEW)
+    21.3d  Encoder choice vs chain conclusion (NEW)
+22  Ablation Master Table (NEW)
+23  reach_recover_v1 (NEW)
+24  reach_recover v2/v3 (NEW)
+25  reach_recover v4/v5 (NEW)
+26  v5 ck2000 exec sweep Pareto (NEW)
+27  v10 yneg25 strict + fundamental conclusion (NEW)
+28  Final compact summary (NEW)
+29  Qwen3.5-2B (with-LM) ablation — fresh 20k = reach champion (NEW, 2026-05-23 PM)
+```
+
+→ compact 후 Section 28 + 29만 봐도 이 세션 결과 전체 reconstruction 가능. Section 29 신 발견 (Qwen3.5-2B 66.7% SR fresh 20k) paper narrative 정정 필수.
+
+
+---
+
+
+## Section 30: Qwen + reach_recover finetune — **신 ABSOLUTE SOTA** (2026-05-23 PM)
+
+### 30.1 Motivation
+
+Section 29: Qwen3.5-2B fresh 20k = reach champion (SR 66.7%, close5 100%, safety 3.95mm) but hold 약함 (holdSR 44%). Vision-only chain의 reach_recover 처방 (aux_lat + aux_hold + yneg_hold + perfect_strict + lr 5e-7~1e-6) 적용해서 Qwen 기반 강한 reach를 보존하면서 hold/precision 회복 시도.
+
+### 30.2 Setup — 2개 finetune variant 병렬 학습 (GPU 1+2)
+
+| variant | config | lr | max_steps | base ckpt |
+|---|---|---|---|---|
+| **v1 conservative** | `sim_train_align_qwen_reach_recover_v1_config.yaml` | 5e-7 | 1500 | Qwen 20k |
+| **v2 aggressive** | `sim_train_align_qwen_reach_recover_v2_aggressive_config.yaml` | 1e-6 | 1500 | Qwen 20k |
+
+공통:
+- Data: approach_00 (5K) + 10mm_fine_align + range + NEARGOAL_eval_match + angle_only + **yneg_hold + perfect_strict + yneg_v1 + ypos_v1** (v5_combo recipe와 동일)
+- Loss: aux_dist 0.5 + aux_lat 0.5 + aux_hold (pos 0.15 + rot 0.25, softhold) + DCT 0.1
+- backbone frozen, aug off, batch 8, ee_pose proprio only
+- eval: 27-cell @ retreat=2, exec=2, single seed 2026
+
+학습 시간: 단일 GPU × ~23min each (병렬 진행)
+
+### 30.3 Results — Pareto Pareto
+
+#### v1 conservative (lr 5e-7)
+
+| ckpt | SR_old | close5 | close2 | holdSR | min_lat | min_3D | finLat | ang° | safety | y=-25 | y=0 | y=+25 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **v1 ck500** ⭐ | **88.9%** | 100% | 59.3% | 33.3% | **1.54** | **2.47** | 1.81 | 2.08 | **3.53** | **6/9** | 9/9 | 9/9 |
+| v1 ck1000 | 85.2% | 100% | **66.7%** | 33.3% | 1.74 | 2.49 | **1.78** | **1.96** | 3.76 | 5/9 | 9/9 | 9/9 |
+| v1 ck1500 | 88.9% | 100% | 63.0% | 37.0% | 1.75 | 2.53 | 1.85 | 2.08 | 3.83 | 6/9 | 9/9 | 9/9 |
+
+#### v2 aggressive (lr 1e-6) — 🏆 SOTA
+
+| ckpt | SR_old | close5 | close2 | holdSR | min_lat | min_3D | finLat | ang° | safety | y=-25 | y=0 | y=+25 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| v2 ck500 | **100%** | 100% | 66.7% | 33.3% | 1.42 | 2.44 | 1.59 | 2.07 | **2.64** | **9/9** | 9/9 | 9/9 |
+| v2 ck1000 | 96.3% | 100% | **74.1%** | 40.7% | 1.34 | 2.44 | **1.43** | 2.10 | 2.91 | 8/9 | 9/9 | 9/9 |
+| **v2 ck1500** 🏆 | **100%** | 100% | 70.4% | **48.1%** | **1.32** | **2.34** | 1.53 | **2.01** | 2.86 | **9/9** | 9/9 | 9/9 |
+
+### 30.4 vs prior SOTA — 모든 reach/precision/safety 추월
+
+| Method | SR_old | close_2 | min_lat | safety | y=-25 | holdSR |
+|---|---|---|---|---|---|---|
+| ACT (ResNet18 30k) | 100% | 48.1% | 2.00mm | 3.78mm | 9/9 | 24.5% |
+| DP (ResNet18 30k) | 100% | 33.3% | 2.22mm | 3.91mm | 9/9 | 11.1% |
+| SigLIP2 champion (chain) | 44.4% | 51.9% | **0.87mm** | 11.48mm | 0/9 | **77.8%** |
+| reach_recover v5 + exec=4 | 48.1% | 55.6% | 1.00mm | 10.78mm | 0/9 | **81.5%** |
+| Qwen3.5-2B fresh 20k | 66.7% | 40.7% | 1.50mm | 3.95mm | 1/9 | 44.4% |
+| **Qwen reach_recover v2 ck1500** 🏆 | **100%** | **70.4%** | 1.32mm | **2.86mm** | **9/9** | 48.1% |
+
+- **SR_old 100%**: ACT/DP 동급, single VLA-class 모델 최초
+- **close_2 70.4%**: ACT 48% +22pp, **모든 prior 모델 압도** (v2 ck1000 74.1%는 더 강함)
+- **safety 2.86mm**: ACT 3.78mm 대비 **−24%**, 모든 chain 모델 (10+) 대비 **−74%**, 의료 worst-case bound 신 record
+- **y=-25 9/9**: champion + 모든 vision-only chain (0/9) 천장 깸. **"fundamental limit (occlusion/action saturation)" 가설 ([[project_y_region_asymmetry_0521]], Section 27) 반박**
+- **holdSR 48.1%**: ACT 24.5% +2배, 단 chain champion 78%엔 못 미침 (paper Pareto)
+
+### 30.5 핵심 발견
+
+1. **VLM (Qwen3.5-2B) reach + champion loss/data recipe = SOTA**: 단일 ckpt가 ACT/DP 동급 reach + champion 동급 precision/safety + 더 강한 holdSR. **single-model paper headline 가능**.
+
+2. **lr 1e-6 (aggressive) ≫ lr 5e-7 (conservative)**: v2가 v1보다 모든 지표 우위. Qwen base의 강한 reach를 흔들지 않으면서 추가 학습 신호 충분히 흡수.
+
+3. **ck sweet spot = 1500 (max trained)**: ck500 → 1000 → 1500 monotonic improvement (over-training 없음, lr 1e-6 with strong data alignment).
+
+4. **y=-25 fundamental limit 가설 반박**: yneg25_strict 1500ep 단독 추가는 무효 (Section 27)였지만, **VLM backbone + 강한 lr + balanced y data 조합으로 9/9 perfect 달성**. 원인은 데이터 부족이 아니라 **vision encoder representational power**.
+
+5. **재학습 budget vs 기존 chain**: 
+   - 기존 vision-only chain = base 50k + 4-7 cascade (~80k step + 시간 소요)
+   - Qwen v2 = fresh 20k + reach_recover 1500 step (~21.5k step total)
+   - **3배 적은 budget으로 SOTA 달성**.
+
+6. **남은 약점은 holdSR + ang**:
+   - holdSR 48% (chain 78%) — VLM action style이 hold-friendly 아님
+   - ang 2.01° (ACT 1.55°) — angle 정밀도 약간 약함
+   - chain champion ckpt + exec=4 ensemble로 잠재적 회복 가능
+
+### 30.6 Paper narrative 정정 — 4 deployment regimes → 5 modes
+
+기존 (Section 29.6): single-training-3-deployment + Qwen fresh
+**Section 30 NEW**:
+
+| Use case | Champion | SR_old | close_2 | min_lat | safety | y=-25 | holdSR |
+|---|---|---|---|---|---|---|---|
+| **Reach + Precision + Safety (medical SOTA)** 🏆 | `reach_recover_v2_aggressive/checkpoint_flat_1500.pt` | **100%** | 70.4% | 1.32 | **2.86** | **9/9** | 48% |
+| **Best precision** | v2 ck1000 | 96.3% | **74.1%** | 1.34 | 2.91 | 8/9 | 40.7% |
+| **Hold (chain)** | reach_recover_v5_combo/ck2000 + exec=4 | 48.1% | 55.6% | 1.00 | 10.78 | 0/9 | **81.5%** |
+| **Sub-mm lateral (chain)** | lat_hold_v4/ck1000 + exec=2 | 44.4% | 51.9% | **0.87** | 11.48 | 0/9 | 77.8% |
+| **Reach (chain only)** | v5 ck2000 + exec=2 | 63.0% | 55.6% | 1.00 | 11.62 | 2/9 | 74.1% |
+
+→ **paper Table 1 row 5개**. Qwen+reach_recover row가 main result, chain models이 hold/precision specialist.
+
+### 30.7 Engineering 노트 (재현용)
+
+1. **Ckpt 형식 함정**: train.py 저장 ckpt = `{"model_state_dict": OrderedDict}` 1단계 wrap. sim_eval.py는 `config` + `model_state_dict` 둘 다 있어야 wrap을 unwrap. 한 개만 있으면 outer dict를 state_dict로 잘못 인식 → 921 missing/1 unexpected. 해결: torch.save로 flat dict 별도 저장.
+
+2. **flat ckpt 명명**: `checkpoint_{STEP}_flat.pt`로 저장하면 sim_eval의 `step_str = ckpt_path.stem.split("_")[-1]` 가 "flat"을 추출 → 모든 ckpt eval 결과가 같은 dir로 collision. 해결: `checkpoint_flat_{STEP}.pt` (step을 마지막에) 로 저장.
+
+3. **project name → 디렉토리 분할**: train.py가 `project.name`에 underscore 있으면 첫 2 segment를 부모 디렉토리로 분할. e.g., `VLANeXt_Qwen35_NEARGOAL_reach_recover_v1` → `VLANeXt_Qwen35_NEARGOAL/reach_recover_v1/`. 평가 스크립트의 ckpt 경로 작성 시 주의.
+
+4. **GPU 0 dead + multi-GPU NCCL**: torchrun multi-GPU 시 NCCL이 NVML로 GPU 0 enum → `ncclSystemError: nvmlDeviceGetHandleByIndex(0) failed`. 해결: **single-GPU only** on this PC. CUDA_VISIBLE_DEVICES=1 → nvidia-smi GPU 2, =0 → GPU 1. 두 학습을 GPU 1+2로 병렬 실행 가능.
+
+5. **Linear attention slow path**: Qwen3.5-2B linear_attention layers는 `flash-linear-attention` + `causal-conv1d` 없으면 torch fallback. 학습 1500 step 23분 (single GPU bf16, batch 8). 설치 시 더 빠를 것.
+
+### 30.8 Artifacts
+
+- Configs: `config/sim_train_align_qwen_reach_recover_v{1,2_aggressive}_config.yaml`
+- Train logs: `logs/qwen_finetune/train.log`, `logs/qwen_finetune/train_v2.log`
+- Eval logs: `logs/qwen_eval/{v1,v2}_step{500,1000,1500}_exec2.log`
+- Phase 3 orchestrator: `/tmp/qwen_unified_phase3.sh`
+- Pipeline log: `logs/qwen_finetune/unified_phase3.log`
+- Checkpoints:
+  - `checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v1/checkpoint_{500,1000,1500}.pt`
+  - `checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v2_aggressive/checkpoint_{500,1000,1500}.pt`
+  - flat versions: `checkpoint_flat_{STEP}.pt`
+- wandb: v1=e20hlhwb, v2=jqa9ejg3
+
+### 30.9 다음 axes (open questions)
+
+1. **v2 ck1500 + exec=4**: chain models은 exec=4가 hold↑. Qwen base에선 exec=4 → holdSR ↓ (Section 29.4 결과). v2 finetune 후엔? 별도 sweep 필요.
+2. **v2 + 추가 학습 (3000 step)**: ck1500 sweet spot인가 over-train 시작인가? 추가 학습.
+3. **Multi-seed (3 seeds)**: ±5pp 변동 정량화 — paper claim strengthening.
+4. **chain + Qwen ensemble**: v2 reach + chain hold action averaging. inference 2× cost지만 holdSR 70%+ + SR 100% 가능?
+5. **v2 holdSR 약점 분석**: aux_hold weight ↑ 또는 hold-rich data 비중 ↑ 시 회복?
+6. **EXPERIMENTS Table 1 / Paper figures 업데이트**.
+
+### 30.10 Section index 업데이트
+
+```
+30  Qwen + reach_recover finetune = 신 ABSOLUTE SOTA (NEW)
+    30.4  vs prior SOTA — 모든 reach/precision/safety 추월
+    30.5  핵심 발견 (y=-25 fundamental limit 반박 등)
+    30.6  Paper narrative 정정 — 5 deployment modes
+```
+
+
+---
+
+
+## Archive (historical sessions)
+
+Detailed daily progress logs for sections moved out of this doc on **2026-05-24** cleanup:
+
+| Section in archive | Topic | When |
 |---|---|---|
-| SR | 88.9% | 74.1% |
-| close_5mm | 88.9% | 47.1% |
-| close_2mm | 3.7% | 2.9% |
-| close_1mm | 0% | 0% |
-| mean_min | 5.42 | 5.89 |
-| median_min | 5.33 | 5.21 |
-| best5_mean | 2.26 | 2.18 |
+| Old 2026-05-21 EOD snapshot | 9-cycle autonomous, exec=2 discovery, b100 finetune | 2026-05-21 |
+| Old 2026-05-20 EOD summary | lr ablation final, lr1e6 ckpt1500 median champion | 2026-05-20 |
+| Section 10 | Repo housekeeping (configs/scripts attic) | 2026-05-19 |
+| Section 11 (.27–.38) | 1mm precision program, NEARGOAL dual-track datagen, lr5e6 winner | 2026-05-20 |
+| Section 12 | Post-compact snapshot | 2026-05-21 |
+| Section 13–15 | b100 50k base finetune (phase2/phase3) | 2026-05-21 |
+| Section 16 | Ablation + baseline 종합 | 2026-05-22 |
+| Section 17 | Loss ablation 4-cell synergy | 2026-05-22 |
+| Section 18 | Data ablation (yneg_hold +11.1pp) | 2026-05-22 |
+| Section 19 | Session 종합 (compact-ready) | 2026-05-22 |
+| Section 20 | DCT loss controlled ablation (≈0 contribution) | 2026-05-22 |
+| Section 21 | Vision encoder + baseline matrix (ACT/DP/ConvNeXt/DINOv3) | 2026-05-22 |
+| Section 23–27 | reach_recover v1-v10 (vision-only chain, pre-Qwen) | 2026-05-22/23 |
 
-**결론**:
-- **ckpt1000이 sweet spot 확정**. 5000 step까지 가면 mean/SR/close_5 모두 약간 worse
-- best5는 살짝 better (overfit 가능성) 하지만 일관성 떨어짐
-- v3 학습 schedule (max 5000 step)에서 best ckpt = 1000 stand firm
+Archive file: `attic/EXPERIMENTS_fine_align_history.md` (~2300 lines).
+Full pre-cleanup backup: `attic/EXPERIMENTS_fine_align.md.bak_pre_cleanup_20260524` (3528 lines).
 
-## 11.31 NEARGOAL Dual Track datagen launch (2026-05-20)
-
-**가설** (사용자 인사이트):
-1. 5mm 이내 정렬/유지 데이터 부족 → Track A
-2. 각도 교정 약함 → Track B (angle-only specialized)
-
-**구성**:
-- Track A: `Save_dataset_align_only` script, phantom ±12/±29/0/±7°, perturb 5mm XY/±5mm Z/5° angle, hold 60, 3000 ep
-- Track B: 동일 phantom, perturb XY=0/Z=0/angle=15° (angle-only), hold 60, 1000 ep
-- 동시 launch (20 worker), CPU only
-
-**코드 변경**:
-- `Sim/run_parallel.py`: `--perturb-xy-mm/-z-min-mm/-z-max-mm/-angle-deg` flag 추가
-- `Sim/6_neargoal_dual_track.sh`: dual-track 동시 launch
-
-**진행 상황**:
-- Track A worker 0: ~30 sec/ep (perturb 복잡) → 100 ep × 10 worker ~5h
-- Track B worker 0: ~10 sec/ep (angle만이라 빠름) → 100 ep × 10 worker ~1.5h
-- System load: 60/96 cores (24 worker total: Track A 10 + Track B 10 + 기존 NEARGOAL_v1 4). 정상
-
-**Next** (~1.5h 후):
-- Track B 완료 → sanity check (HDF5 ≥800, perturb metadata 검증)
-- Track A 진행 중 (~5h)
-- 둘 다 완료 → champion v3 finetune cotrain mix (lr 2.5e-6, max 2000 step)
-
+Key historical findings retained in current doc (Master Cheatsheet / Section 22 / Sections 28-31):
+- **"5mm 천장 = metric artifact"** (3D dist + retreat 2mm Z offset). Real lateral median 0.87-1.19mm.
+- **exec axis = Pareto knob**: vision-only chain exec=4 → holdSR 81.5%, exec=2 → SR best, exec=1 → close_2 best.
+- **DCT loss contribution ≈ 0**: champion config DCT 0.1 → 0.0 권장.
+- **Encoder swap fresh budget 무력**: ConvNeXt/DINOv3 fresh 20k 모두 SR 0~3.7%. chain matching이 dominant.
+- **Hold-loss false confound**: SigLIP2 + dist-only도 holdSR 74.1% (champion 77.8%와 noise 차이). encoder + chain이 real driver.
+- **lr ≤ 1e-6 default** — VLANeXt 학습 >1e-5는 일관 gnorm 폭주.
+- **y=-25 region asymmetry** (approach_00 PHANTOM_Y 비대칭 72% y>0) — vision-only chain에선 fundamental 한계처럼 보였으나 Section 30 Qwen으로 9/9 perfect 달성 (Section 27 데이터 부족 가설 반박).
