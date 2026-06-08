@@ -124,9 +124,14 @@ class ApproachRealEnv:
     """Real Meca500 + OAK cameras. Drop-in replacement for ApproachSimEnv during eval."""
 
     def __init__(self, robot_address=ROBOT_ADDRESS_DEFAULT, swap_cameras=False, skip_home=False,
-                 joint_vel_limit=None):
+                 joint_vel_limit=None, start_joints=None):
         self.swap_cameras = swap_cameras
         self.skip_home = skip_home
+        # Joint config (deg) to MoveJoints to before inference. Defaults to
+        # HOME_JOINTS (an inter-episode *transit* pose, far from the trocar).
+        # For align, pass the trocar-adjacent start pose used during data
+        # collection so eval begins in-distribution.
+        self.start_joints = tuple(start_joints) if start_joints is not None else HOME_JOINTS
 
         # Robot
         logger.info(f"🔌 Connecting to robot at {robot_address}...")
@@ -135,7 +140,21 @@ class ApproachRealEnv:
         if not self.robot.IsConnected():
             raise RuntimeError(f"Failed to connect to robot at {robot_address}")
         logger.info("✅ Robot connected. Activating + homing...")
+        # A prior uncleanly-disconnected/crashed run can leave a latched error that
+        # makes ActivateAndHome silently fail → later commands hit "1005 NOT_ACTIVATED".
+        # Clear it first (no-op if no error), then activate and BLOCK until homed
+        # (ActivateAndHome is async — sending MoveJoints before it completes fails).
+        try:
+            self.robot.ResetError()
+            self.robot.ResumeMotion()
+        except Exception as e:
+            logger.warning(f"ResetError/ResumeMotion (non-fatal): {e}")
         self.robot.ActivateAndHome()
+        try:
+            self.robot.WaitHomed(timeout=60)
+            logger.info("✅ Robot activated + homed")
+        except Exception as e:
+            logger.warning(f"WaitHomed failed/timeout (continuing): {e}")
         self.robot.SetRealTimeMonitoring(1)
         if joint_vel_limit is not None and joint_vel_limit > 0:
             try:
@@ -144,9 +163,9 @@ class ApproachRealEnv:
             except Exception as e:
                 logger.warning(f"SetJointVelLimit failed (non-fatal): {e}")
         if not skip_home:
-            self.robot.MoveJoints(*HOME_JOINTS)
+            self.robot.MoveJoints(*self.start_joints)
             self.robot.WaitIdle()
-            logger.info(f"🏠 Home joints {HOME_JOINTS} reached")
+            logger.info(f"🏠 Start joints {self.start_joints} reached")
         else:
             logger.info("⏭️ skip_home: starting from current robot pose (manual pre-positioning)")
 
@@ -167,7 +186,7 @@ class ApproachRealEnv:
     # ── matches ApproachSimEnv.reset ──────────────────────────────────────────
     def reset(self):
         if not self.skip_home:
-            self.robot.MoveJoints(*HOME_JOINTS)
+            self.robot.MoveJoints(*self.start_joints)
             self.robot.WaitIdle()
             time.sleep(0.5)
         try:

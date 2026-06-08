@@ -323,7 +323,7 @@ class AlignSimEnv:
     Success: needle tip within threshold of trocar entry
     """
 
-    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False, phantom_pos: tuple = None, retreat_mm: float = 10.0):
+    def __init__(self, model_xml_path: str, randomize_phantom: bool = False, use_sensor_success: bool = False, phantom_pos: tuple = None, retreat_mm: float = 10.0, phantom_angle_deg: float = None):
         self.model = mujoco.MjModel.from_xml_path(model_xml_path)
         self.data = mujoco.MjData(self.model)
         self.renderer = mujoco.Renderer(self.model, height=IMG_HEIGHT, width=IMG_WIDTH)
@@ -339,6 +339,8 @@ class AlignSimEnv:
         # Phantom randomization / fixed position
         self.randomize_phantom = randomize_phantom
         self.phantom_pos = phantom_pos
+        # Fixed phantom rotation (deg). None → random ±25° (legacy/training behavior).
+        self.phantom_angle_deg = phantom_angle_deg
         self.use_sensor_success = use_sensor_success
         self.retreat_mm = retreat_mm
         # New XML structure: trocar_assembly (X,Y, rotation parent), phantom_assembly (Z lift)
@@ -467,7 +469,7 @@ class AlignSimEnv:
         mujoco.mj_forward(self.model, self.data)
 
         if self.phantom_pos is not None:
-            self._set_fixed_phantom(self.phantom_pos)
+            self._set_fixed_phantom(self.phantom_pos, angle_deg=self.phantom_angle_deg)
         elif self.randomize_phantom:
             self._randomize_phantom()
 

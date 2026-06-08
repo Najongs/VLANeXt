@@ -11,8 +11,8 @@ Insertion dataset collection.
 #     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data \
 #     --phantom-pos 0.0 0.0
 
-python run_parallel.py --script insertion --workers 20 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data
+python /data/public/NAS/VLANeXt/Sim/run_parallel.py --script insertion --workers 1 --episodes 1 \
+    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align
 """
 
 import os

@@ -77,11 +77,54 @@ from digital_twin.real_eval_approach import (  # noqa: E402
     HOME_JOINTS,
     OAKCameraManager,
 )
+from src.utils.tip_frame import flange_to_tip_euler6  # noqa: E402
+from src.datasets.euler_convention import mujoco_to_mecademic_euler  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
 
 INSERTION_SPEED_MPS = 0.005  # slow, mirrors FINE_ALIGN_SPEED for stable IK
+
+
+def _mat_to_euler_xyz(mat):
+    """Rotation matrix → MuJoCo extrinsic XYZ euler (matches AlignSimEnv.get_ee_pose)."""
+    sy = np.sqrt(mat[0, 0] ** 2 + mat[1, 0] ** 2)
+    if sy > 1e-6:
+        r = np.arctan2(mat[2, 1], mat[2, 2])
+        p = np.arctan2(-mat[2, 0], sy)
+        y = np.arctan2(mat[1, 0], mat[0, 0])
+    else:
+        r = np.arctan2(-mat[1, 2], mat[1, 1])
+        p = np.arctan2(-mat[2, 0], sy)
+        y = 0.0
+    return np.array([r, p, y])
+
+
+def _log_sim_real_tip_diff(robot, sim_tip_mm, sim_tip_rpy_mec_rad):
+    """At the current real pose (assumed = ALIGN qpos), read GetPose→tip and compare
+    to the sim tip at the same joints. Isolates robot/tool kinematic mismatch:
+    same joints → same tip IFF sim kinematics + needle tool offset match reality."""
+    try:
+        fl = list(robot.GetPose())[:6]
+    except Exception as e:
+        logger.warning(f"GetPose failed; skipping sim-vs-real tip diff: {e}")
+        return
+    flange6 = np.array([fl[0], fl[1], fl[2],
+                        np.deg2rad(fl[3]), np.deg2rad(fl[4]), np.deg2rad(fl[5])], dtype=np.float64)
+    real_tip = flange_to_tip_euler6(flange6, mm=True)            # mm, rad (Mecademic intrinsic)
+    dpos = real_tip[:3] - sim_tip_mm
+    drot = real_tip[3:6] - sim_tip_rpy_mec_rad
+    drot = np.arctan2(np.sin(drot), np.cos(drot))               # wrap to [-pi, pi]
+    logger.info("─" * 60)
+    logger.info("🔬 SIM vs REAL tip @ ALIGN qpos (identical joint angles):")
+    logger.info(f"   sim  tip pos (mm)   = {sim_tip_mm.round(2).tolist()}")
+    logger.info(f"   real tip pos (mm)   = {real_tip[:3].round(2).tolist()}")
+    logger.info(f"   Δpos (real-sim, mm) = {dpos.round(2).tolist()}   |Δ| = {np.linalg.norm(dpos):.2f} mm")
+    logger.info(f"   sim  tip rpy (deg)  = {np.rad2deg(sim_tip_rpy_mec_rad).round(2).tolist()}")
+    logger.info(f"   real tip rpy (deg)  = {np.rad2deg(real_tip[3:6]).round(2).tolist()}")
+    logger.info(f"   Δrot (real-sim,deg) = {np.rad2deg(drot).round(2).tolist()}")
+    logger.info("   → |Δpos|≈0: 운동학·툴 일치(문제=팬텀 위치). 큼: 툴오프셋(177.5mm)/base 프레임 불일치.")
+    logger.info("─" * 60)
 
 
 def _solve_insertion_qpos(model, data, h: SimHandles, p_entry, p_depth, needle_len,
@@ -241,6 +284,15 @@ def main():
     logger.info(f"   needle length (mm) = {needle_len * 1000:.1f}")
     logger.info(f"   ALIGN qpos (deg)   = {align_deg.round(2).tolist()}")
 
+    # Capture sim tip pose AT the aligned qpos for later sim-vs-real comparison
+    # (re-forward to be robust; _pre_align_sim already leaves data aligned).
+    data.qpos[: h.n_motors] = aligned_qpos
+    mujoco.mj_forward(model, data)
+    sim_tip_mm = data.site_xpos[h.tip_id].copy() * 1000.0
+    sim_tip_rpy_mec = mujoco_to_mecademic_euler(
+        _mat_to_euler_xyz(data.site_xmat[h.tip_id].reshape(3, 3)))
+    logger.info(f"   sim ALIGN tip (mm) = {sim_tip_mm.round(2).tolist()}")
+
     insertion_deg = None
     if args.phase in ("insertion", "both"):
         depth_label = (f"{args.insertion_depth_mm:.1f}mm from entry"
@@ -304,6 +356,9 @@ def main():
         # the phantom from an unsafe angle). Pause only when user requested it.
         align_pause = args.pause_sec if args.phase in ("align", "both") else 0.0
         _move_robot_to(robot, cam_mgr, align_deg, "ALIGN final", align_pause)
+
+        # Diagnostic: at the ALIGN qpos (real now there), compare sim tip vs real tip.
+        _log_sim_real_tip_diff(robot, sim_tip_mm, sim_tip_rpy_mec)
 
         if args.phase in ("insertion", "both") and insertion_deg is not None:
             n_cycles = max(1, int(args.cycles))

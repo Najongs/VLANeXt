@@ -24,3 +24,6 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python -m digital_twin.real_coll
     "${EXTRA_ARGS[@]}"
 
 rsync -av --progress -e 'ssh -p 37840' /home/irom/NAS/VLANeXt/dataset/real_align/collected_data_real yohan@nayohan.iptime.org:/data/public/NAS/VLANeXt/dataset
+rsync -av --progress /data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_final.pt irom@10.130.41.45:/home/irom/NAS/VLANeXt/checkpoints/v11/
+
+scp /data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_final.pt 10.130.41.45:/home/irom/NAS/VLANeXt/checkpoints/v11/

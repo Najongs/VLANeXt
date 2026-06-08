@@ -27,11 +27,15 @@ Differences from real_eval_approach.py:
   - ckpt와 train-config는 반드시 짝이 맞아야 함 (architecture mismatch 방지).
 
 Usage:
-    python -m digital_twin.real_eval_align \
-        --config config/sim_eval_align_config.yaml \
-        --checkpoint /path/to/checkpoint \
-        --train-config <ckpt에 맞는 train config> \
-        --max-steps 200 [--skip-home] [--use-sensor] [--dry-run] [--swap-cameras]
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -m digital_twin.real_eval_align \
+    --config config/sim_eval_align_config.yaml \
+    --checkpoint checkpoints/checkpoint_1500.pt \
+    --train-config config/sim_train_align_qwen_reach_recover_v2_aggressive_config.yaml \
+    --max-steps 200 \
+    --start-joints "43, -28, 28, 0, 34, 57" \
+    --joint-vel-limit 5 \
+    --converge-thresh-mm 0.3 \
+    --num-steps-execute 4
 """
 
 import os
@@ -136,6 +140,7 @@ def run_real_eval(cfg):
         swap_cameras=getattr(cfg, "swap_cameras", False),
         skip_home=getattr(cfg, "skip_home", False),
         joint_vel_limit=getattr(cfg, "joint_vel_limit", None),
+        start_joints=getattr(cfg, "start_joints", None),
     )
     dry_run = getattr(cfg, "dry_run", False)
     if dry_run:
@@ -310,9 +315,19 @@ if __name__ == "__main__":
     parser.add_argument("--skip-home", action="store_true",
                         help="Don't MoveJoints to HOME — use whatever pose the robot is in. "
                              "Recommended for align: manually pre-position needle near trocar first.")
+    parser.add_argument("--start-joints", type=str, default=None,
+                        help="6 joint angles (deg) 'j1,j2,j3,j4,j5,j6' to MoveJoints to before "
+                             "inference — the trocar-adjacent align start pose from data collection "
+                             "(HOME_JOINTS is only a far transit pose). Overrides HOME and forces "
+                             "homing on (ignores --skip-home).")
     parser.add_argument("--joint-vel-limit", type=float, default=None,
                         help="Mecademic SetJointVelLimit (deg/s). Lower = slower + smoother. "
                              "Combine with larger --max-steps for slower trajectory. e.g. 5")
+    parser.add_argument("--num-steps-execute", type=int, default=None,
+                        help="How many actions from each predicted chunk to execute before "
+                             "re-inferring (overrides eval.num_steps_execute in config). "
+                             "Higher = more open-loop/smoother/fewer model calls, but less "
+                             "closed-loop correction. SoTA measured at 2.")
     parser.add_argument("--use-sensor", action="store_true",
                         help="Append 2-channel sensor proprio [dist=5.0mm, valid=0.0] (saturated/no-info). "
                              "Required if checkpoint was trained with use_sensor=True (proprio_dim=9).")
@@ -333,6 +348,20 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         cfg_dict = yaml.safe_load(f)
     cfg_dict.setdefault("eval", {})["finetuned_checkpoint"] = args.checkpoint
+    if args.num_steps_execute is not None:
+        cfg_dict["eval"]["num_steps_execute"] = args.num_steps_execute
+
+    # Parse fixed start joint config (deg). If given, it overrides --skip-home:
+    # we always want to MoveJoints to the specified pose before inference.
+    start_joints = None
+    if args.start_joints:
+        parts = [float(x) for x in args.start_joints.replace(" ", "").split(",")]
+        assert len(parts) == 6, f"--start-joints needs 6 comma-separated values, got {len(parts)}"
+        start_joints = tuple(parts)
+        if args.skip_home:
+            logging.getLogger(__name__).warning(
+                "--start-joints given → overriding --skip-home (will MoveJoints to start pose)")
+        args.skip_home = False
 
     cfg = DictConfig(cfg_dict)
     cfg.train_config_path = args.train_config
@@ -341,6 +370,7 @@ if __name__ == "__main__":
     cfg.num_episodes = args.num_episodes
     cfg.swap_cameras = args.swap_cameras
     cfg.skip_home = args.skip_home
+    cfg.start_joints = start_joints
     cfg.use_sensor = args.use_sensor
     cfg.joint_vel_limit = args.joint_vel_limit
     cfg.dry_run = args.dry_run

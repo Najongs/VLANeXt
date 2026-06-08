@@ -31,7 +31,7 @@ data:
   - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2" # 5000
   - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/align_small_angle_10k_v3" # 3000
   - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/align_10k_v3/collected_data_merged" # 3000
-  # - path: "/home/najo/NAS/VLANeXt/dataset/real_align/collected_data_real_all" # 6000
+  - path: "/home/najo/NAS/VLANeXt/dataset/real_align/collected_data_real_all" # 6000
 
   task_suite_name: ""
   full_sequence: true

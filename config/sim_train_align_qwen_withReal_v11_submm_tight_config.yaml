@@ -1,0 +1,164 @@
+# Qwen3.5-2B reach_recover v11_submm_tight — withReal base chain stage 2 (2026-05-26)
+#
+# Stage 2 of withReal SOTA cascade. Mirrors v11_submm_tight (paper SOTA recipe) but:
+#   - pretrained_checkpoint = withReal_v2_aggressive/checkpoint_1500.pt (stage 1 output)
+#   - data: SOTA v11 mix (perfect_strict + perfect_hold + yneg_hold + submm_hold 2× + yneg_v1/ypos_v1)
+#           + 6 real_align subdirs (maintain Real exposure through fine-tune)
+#   - aux_hold threshold_mm 1.5 (paper SOTA setting)
+
+project:
+  name: "VLANeXt_Qwen35_withReal_reach_recover_v11_submm_tight"
+  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  log_interval: 5
+  save_interval: 500
+  use_wandb: true
+
+data:
+  dataset_name: "sim_align"
+  data_root:
+  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+    max_episodes: 2000
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_strict_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_hold_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_ypos_v1/collected_data_merged"
+  # NEW sub-mm hold data — 2x oversample
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_submm_hold_v1/collected_data_merged"
+  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_submm_hold_v1/collected_data_merged"
+  # ===== real data (6 date-split subdirs) =====
+  - path: "/data/public/NAS/VLANeXt/dataset/real_align/collected_data_real_0430"
+  - path: "/data/public/NAS/VLANeXt/dataset/real_align/collected_data_real_0501"
+  - path: "/data/public/NAS/VLANeXt/dataset/real_align/collected_data_real_0502"
+  - path: "/data/public/NAS/VLANeXt/dataset/real_align/collected_data_real_0503"
+  - path: "/data/public/NAS/VLANeXt/dataset/real_align/collected_data_real_0503_2"
+  - path: "/data/public/NAS/VLANeXt/dataset/real_align/collected_data_real_0504"
+
+  task_suite_name: ""
+  full_sequence: true
+  skip_history_padding: true
+
+  history_len: 8
+  future_len: 8
+  buffer_size: 4000
+
+  batch_size: 16   # 2x — VRAM headroom 12→~20GB
+  max_steps: 1500
+  num_workers: 4
+
+  input_modality: "image"
+  view_mode: "single"
+  cam_exterior: "tool_camera"
+  cam_wrist: ""
+  cam_top: ""
+
+  augmentation:
+    enabled: false
+
+model:
+  model_type: "vlanext"
+  lmm_path: "Qwen/Qwen3.5-2B"
+  backbone_mode: "frozen"
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+
+  action_dim: 6
+  proprio_dim: 6
+  use_sensor: false
+
+  loss_type: "diffusion"
+  num_train_timesteps: 1000
+  num_inference_timesteps: 10
+  scheduler_type: "flow_match"
+  num_bins: 256
+  action_vqvae:
+    enabled: false
+    frozen: true
+    codebook_size: 1024
+    hidden_size: 256
+    depth: 4
+    num_heads: 8
+    steps: 1000
+    learning_rate: 1.0e-3
+
+  condition_type: "soft"
+  num_queries: 32
+  use_transformer_connector: true
+  connector_depth: 2
+  connector_num_heads: 4
+
+  policy_hidden_size: 1152
+  policy_depth: 24
+  policy_num_heads: 16
+  policy_mlp_ratio: 4.0
+
+  future_image_loss_weight: 0.0
+  generator_hidden_size: 768
+  generator_depth: 24
+  generator_num_heads: 12
+  generator_mlp_ratio: 4.0
+  future_image_mode: "horizon"
+
+  dct_loss_weight: 0.1
+  dct_freq_split: 0.125
+  dct_low_freq_weight: 1.0
+  dct_high_freq_weight: 1.0
+  dct_similarity_type: "mae"
+
+  use_proprio_input_vlm: true
+  use_transformer_proprio_projector: false
+  projector_depth: 2
+  projector_num_heads: 4
+  use_action_input_policy: false
+  gradient_checkpointing: true
+
+  aux_distance_loss:
+    enabled: true
+    weight: 0.5
+    margin_mm: 0.1
+    pos_denorm_mm: [0.37, 0.37, 0.37]
+    near_goal_scale_mm: 2.0
+    near_goal_max_boost: 10.0
+    apply_to_main_loss: true
+
+  aux_lateral_loss:
+    enabled: true
+    weight: 0.5
+    margin_mm: 0.05
+    near_goal_scale_mm: 1.0
+    near_goal_max_boost: 10.0
+
+  aux_hold_loss:
+    enabled: true
+    pos_weight: 0.3
+    rot_weight: 0.5
+    threshold_mm: 1.5
+    soft_scale_mm: 0.7
+
+  direction_decoupled_loss:
+    enabled: false
+
+train:
+  seed: 2026
+  resume_path: ""
+  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v2_aggressive/checkpoint_1500.pt"
+  reset_optimizer_scheduler: true
+  learning_rate: 3.0e-7
+  weight_decay: 0.01
+  warmup_steps: 100
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  device: "cuda"
+  distributed: false
+  dist_backend: "nccl"
+  deepspeed:
+    enabled: false
+    zero_stage: 2
+    offload_optimizer_device: "none"
+    offload_param_device: "none"
