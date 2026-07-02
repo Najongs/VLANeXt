@@ -11,6 +11,7 @@ Architecture:
 
 import os
 import sys
+from pathlib import Path
 import time
 import threading
 import logging
@@ -27,7 +28,8 @@ import depthai as dai
 
 # === Configuration ===
 ROBOT_ADDRESS = "192.168.0.100"
-MODEL_PATH = "/home/irom/NAS/VLANeXt/Sim/meca_add.xml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = str(REPO_ROOT / "Sim" / "meca_add.xml")
 SYNC_FREQUENCY = 15  # Hz (match robot control frequency)
 HOME_JOINTS = (30, -20, 20, 0, 30, 60)
 

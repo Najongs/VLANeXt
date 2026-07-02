@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 LOG_DIR=logs/reach_recover
 mkdir -p "$LOG_DIR"
 
@@ -21,13 +21,13 @@ run_eval() {
 # v2 aggressive: ck1500, ck2000, ck3000 (focus on potential winners)
 for STEP in 1500 2000 3000; do
   run_eval "v2_ck${STEP}" config/sim_train_align_reach_recover_v2_aggressive_config.yaml \
-    /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v2_aggressive/checkpoint_${STEP}.pt
+    /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v2_aggressive/checkpoint_${STEP}.pt
 done
 
 # v3 softhold: ck1000, ck1500
 for STEP in 1000 1500; do
   run_eval "v3_ck${STEP}" config/sim_train_align_reach_recover_v3_softhold_config.yaml \
-    /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v3_softhold/checkpoint_${STEP}.pt
+    /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v3_softhold/checkpoint_${STEP}.pt
 done
 
 echo "=== reach_recover v2/v3 eval complete ==="

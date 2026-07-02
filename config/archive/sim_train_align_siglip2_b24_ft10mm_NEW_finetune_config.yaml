@@ -1,6 +1,6 @@
 project:
   name: "VLANeXt_SigLIP2_repro_b24_ft10mm_NEW_finetune"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 2500
   use_wandb: true
@@ -8,8 +8,8 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
 
   task_suite_name: ""
   full_sequence: true
@@ -118,7 +118,7 @@ train:
   # pretrained_checkpoint = dir with pytorch_model.bin — train.py auto-detects.
   resume_path: ""
   reset_optimizer_scheduler: true
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/output_dir_b100_ft10mm_fine_align_20000step_fixed"
+  pretrained_checkpoint: "/home/najo/NAS/VLANeXt/checkpoints/output_dir_b100_ft10mm_fine_align_20000step_fixed"
   # lr 5e-6: continue-train below ceiling 1e-5. aux strong supervision needs lower lr to
   # stabilize transition from default-aux to strong-aux.
   learning_rate: 5.0e-6

@@ -3,9 +3,9 @@
 # Goal: isolate diffusion-quantization ceiling (precision diagnosis #1).
 # Eval grid: 27-cell (xy 3x3, y 3, z 1, angle 3) @ retreat=2mm, max-steps 250.
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 
-CKPT=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
+CKPT=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
 TRAIN_CONFIG=config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v3_config.yaml
 RESULTS_MD=/tmp/sweep_diff_exec_results.md
 SUMMARY_JSON=/tmp/sweep_diff_exec_summary.json
@@ -69,7 +69,7 @@ for cell in "${CELLS[@]}"; do
     python3 -c "
 import sys, json, numpy as np
 from pathlib import Path
-sys.path.insert(0, '/data/public/NAS/VLANeXt/scripts')
+sys.path.insert(0, '/home/najo/NAS/VLANeXt/scripts')
 from analyze_trajectory import analyze_episode, summarize
 d = Path('$MERGED')
 rows = [r for r in (analyze_episode(f) for f in sorted(d.glob('traj_ep*.npz'))) if r is not None]

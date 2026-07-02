@@ -7,7 +7,7 @@
 
 project:
   name: "VLANeXt_SigLIP2_NEARGOAL_dct_off_v1"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 500
   use_wandb: true
@@ -15,16 +15,16 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
     max_episodes: 5000
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_eval_range_v1"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_eval_range_v1"
     max_episodes: 1000
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1/collected_data_merged"
     max_episodes: 200
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
 
   task_suite_name: ""
   full_sequence: true
@@ -138,7 +138,7 @@ model:
 train:
   seed: 2026
   resume_path: ""
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/loss_lat_hold_v1/checkpoint_1000.pt"
+  pretrained_checkpoint: "/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/loss_lat_hold_v1/checkpoint_1000.pt"
   reset_optimizer_scheduler: true
   learning_rate: 1.0e-6
   weight_decay: 0.01

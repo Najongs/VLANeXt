@@ -17,12 +17,12 @@ cd "$(dirname "$0")"
 export MUJOCO_GL=egl
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 
-LOG_DIR=/data/public/NAS/VLANeXt/logs
+LOG_DIR=/home/najo/NAS/VLANeXt/logs
 mkdir -p "$LOG_DIR"
 
 echo "Launching y<0 dedicated datagen (1500 ep)..."
 python run_parallel.py --script align --workers 10 --episodes 150 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_v1 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_v1 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 60 \
     --phantom-x-mm -12 12 --phantom-y-mm -29 -10 \

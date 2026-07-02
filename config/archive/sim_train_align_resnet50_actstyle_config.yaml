@@ -4,7 +4,7 @@ project:
   # #16은 mode collapse (mean action) — conv token에 positional 정보 없어서 정렬 신호 못 받음.
   # 이 변경으로 spatial reasoning 부여.
   name: "VLANeXt_ResNet50_actstyle_fine_align"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 2000
   use_wandb: true
@@ -12,7 +12,7 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
 
   task_suite_name: ""
   full_sequence: true

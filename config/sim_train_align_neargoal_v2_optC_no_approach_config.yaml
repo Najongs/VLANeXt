@@ -17,7 +17,7 @@
 
 project:
   name: "VLANeXt_SigLIP2_NEARGOAL_v2_optC"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 500
   use_wandb: true
@@ -28,11 +28,11 @@ data:
   # ===== approach_00 제거 (옵션 C 핵심) =====
   # ===== approach_eval_range_v1 / align_phantom_range_v1 제거 =====
   # ===== Champion fine-align 데이터만 유지 =====
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
   # ===== NEW Track A: pos+angle 5mm, hold 60 =====
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
   # ===== NEW Track B: angle-only 15°, hold 60 =====
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
 
   task_suite_name: ""
   full_sequence: true
@@ -132,7 +132,7 @@ model:
 train:
   seed: 2026
   resume_path: ""
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt"
+  pretrained_checkpoint: "/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt"
   reset_optimizer_scheduler: true
   learning_rate: 2.5e-6           # 사용자 의견 "lr 올리면 바보" → 2.5e-6 유지
   weight_decay: 0.01

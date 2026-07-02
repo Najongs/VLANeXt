@@ -18,8 +18,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-MODEL_PATH = "/data/public/NAS/VLANeXt/Sim/meca_add.xml"
-OUT_DIR = Path("/data/public/NAS/VLANeXt/vqa_samples")
+MODEL_PATH = "/home/najo/NAS/VLANeXt/Sim/meca_add.xml"
+OUT_DIR = Path("/home/najo/NAS/VLANeXt/vqa_samples")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 IMG_W, IMG_H = 640, 480

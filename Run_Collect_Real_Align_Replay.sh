@@ -23,7 +23,11 @@ EXTRA_ARGS=("$@")
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python -m digital_twin.real_collect_align_replay \
     "${EXTRA_ARGS[@]}"
 
-rsync -av --progress -e 'ssh -p 37840' /home/irom/NAS/VLANeXt/dataset/real_align/collected_data_real yohan@nayohan.iptime.org:/data/public/NAS/VLANeXt/dataset
-rsync -av --progress /data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_final.pt irom@10.130.41.45:/home/irom/NAS/VLANeXt/checkpoints/v11/
+if [ "${SYNC_REAL_ARTIFACTS:-0}" = "1" ]; then
+    : "${REMOTE_DATA_TARGET:?set REMOTE_DATA_TARGET, e.g. user@host:/path/to/dataset}"
+    rsync -av --progress dataset/real_align/collected_data_real "${REMOTE_DATA_TARGET}"
 
-scp /data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_final.pt 10.130.41.45:/home/irom/NAS/VLANeXt/checkpoints/v11/
+    if [ -n "${REMOTE_CKPT_TARGET:-}" ]; then
+        rsync -av --progress checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_final.pt "${REMOTE_CKPT_TARGET}"
+    fi
+fi

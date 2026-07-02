@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 LOG_DIR=logs/reach_recover
 mkdir -p "$LOG_DIR"
 
 CFG=config/sim_train_align_reach_recover_v1_config.yaml
-CKPT_DIR=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v1
+CKPT_DIR=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v1
 
 for STEP in 500 1000 1500; do
   CKPT="${CKPT_DIR}/checkpoint_${STEP}.pt"

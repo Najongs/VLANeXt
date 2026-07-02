@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 
-python dataset/visualize_all_trajectories_3d.py --dataset_path "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
-python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+python dataset/visualize_all_trajectories_3d.py --dataset_path "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
+python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
 
 # Multiple folders:
 python dataset/visualize_all_trajectories_3d.py --dataset_path "/path/to/folder1" "/path/to/folder2"
-python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/data/public/NAS/VLANeXt/dataset/approach_00/collected_data_merged" "/data/public/NAS/VLANeXt/dataset/approach_04/collected_data_merged"
+python dataset/visualize_all_trajectories_3d.py --analyze --dataset_path "/home/najo/NAS/VLANeXt/dataset/approach_00/collected_data_merged" "/home/najo/NAS/VLANeXt/dataset/approach_04/collected_data_merged"
 Shows all trajectories with their start and end points marked
 """
 
@@ -685,7 +685,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Visualize and analyze trajectories')
     parser.add_argument('--dataset_path', type=str, nargs='+',
-                       default=['/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged'],
+                       default=['/home/najo/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged'],
                        help='Path(s) to dataset directories (supports multiple)')
     parser.add_argument('--output', type=str, default='all_trajectories_3d.png',
                        help='Output image path')

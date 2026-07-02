@@ -9,7 +9,7 @@ Architecture:
 - State synchronization via thread-safe queue
 - Gamepad control of real robot → visualization in simulation
 
-python /home/irom/NAS/VLA/Insertion_VLA_Sim/digital_twin/real_to_sim.py
+python -m digital_twin.real_to_sim
 """
 
 import time

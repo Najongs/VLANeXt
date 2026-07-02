@@ -8,11 +8,11 @@ Insertion dataset collection.
 5. 성공: 목표 깊이 도달 + lateral error 작음
     
 # python run_parallel.py --script insertion --workers 10 --episodes 5 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/insertion_data \
+#     --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/insertion_data \
 #     --phantom-pos 0.0 0.0
 
-python /data/public/NAS/VLANeXt/Sim/run_parallel.py --script insertion --workers 1 --episodes 1 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align
+python /home/najo/NAS/VLANeXt/Sim/run_parallel.py --script insertion --workers 1 --episodes 1 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align
 """
 
 import os

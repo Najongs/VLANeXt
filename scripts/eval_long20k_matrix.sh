@@ -1,7 +1,7 @@
 #!/bin/bash
 # Long20k baseline matrix eval (DINOv3 + ConvNeXt, ck20000)
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 LOG_DIR=logs/baseline_long20k
 mkdir -p "$LOG_DIR"
 
@@ -20,9 +20,9 @@ run_eval() {
 }
 
 run_eval "dinov3_long20k" config/sim_train_align_dinov3_long20k_v1_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_DINOv3_long20k/v1/checkpoint_20000.pt
+  /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_DINOv3_long20k/v1/checkpoint_20000.pt
 
 run_eval "convnext_long20k" config/sim_train_align_convnext_long20k_v1_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_ConvNeXt_long20k/v1/checkpoint_20000.pt
+  /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_ConvNeXt_long20k/v1/checkpoint_20000.pt
 
 echo "=== Long20k eval complete ==="

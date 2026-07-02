@@ -30,7 +30,7 @@ from scripts.visualize_robot_perturbation_clean import (
     ALIGN_SPEED, ALIGN_THRESHOLD_M, ALIGN_HOLD_STEPS,
 )
 
-OUT_DIR = Path("/data/public/NAS/VLANeXt/vqa_samples")
+OUT_DIR = Path("/home/najo/NAS/VLANeXt/vqa_samples")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Render at this distance from trocar entry (eval retreat)

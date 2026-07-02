@@ -14,8 +14,8 @@ import cv2
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-OUT = Path("/data/public/NAS/VLANeXt/vqa_samples/crop_eval_sanity.png")
-MODEL_PATH = "/data/public/NAS/VLANeXt/Sim/meca_add.xml"
+OUT = Path("/home/najo/NAS/VLANeXt/vqa_samples/crop_eval_sanity.png")
+MODEL_PATH = "/home/najo/NAS/VLANeXt/Sim/meca_add.xml"
 HOME_POSE = np.array([0.75, -0.5, 0.5, 0, 0.6, 1.0])
 
 CROP_WIN = 256
@@ -31,7 +31,7 @@ def center_crop(img, win=CROP_WIN, tgt=CROP_TGT):
 
 
 # === Train side: HDF5 한 episode 첫 frame ===
-hdf5_path = "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged/w0_episode_20260520_152751.h5"
+hdf5_path = "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged/w0_episode_20260520_152751.h5"
 with h5py.File(hdf5_path, "r") as f:
     img_grp = f["observations"]["images"]
     buf = np.array(img_grp["tool_camera"][0]).flatten().astype(np.uint8)

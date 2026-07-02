@@ -8,8 +8,8 @@ Examples:
     # 학습된 ckpt 사용 (SigLIP2 backbone 추출)
     python -m scripts.visualize_vision_features \
         --backbone google/siglip2-so400m-patch16-512 \
-        --ckpt /data/public/NAS/VLANeXt/checkpoints/.../step_5000.pt \
-        --episode /data/public/NAS/VLANeXt/dataset/approach/approach_00/collected_data_merged/w0_episode_20260507_174548.h5 \
+        --ckpt /home/najo/NAS/VLANeXt/checkpoints/.../step_5000.pt \
+        --episode /home/najo/NAS/VLANeXt/dataset/approach/approach_00/collected_data_merged/w0_episode_20260507_174548.h5 \
         --frames 0 25 50 75 100 \
         --out viz/siglip2_step5000
 

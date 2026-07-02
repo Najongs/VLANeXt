@@ -27,7 +27,7 @@ from scripts.visualize_robot_perturbation_clean import (
     IMG_W, IMG_H, MODEL_PATH,
 )
 
-OUT_DIR = Path("/data/public/NAS/VLANeXt/vqa_samples")
+OUT_DIR = Path("/home/najo/NAS/VLANeXt/vqa_samples")
 
 
 def make_trocar_basis(axis_dir):

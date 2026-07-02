@@ -16,9 +16,9 @@ import cv2
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-DATA_A = "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
-DATA_B = "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
-OUT_DIR = Path("/data/public/NAS/VLANeXt/vqa_samples")
+DATA_A = "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
+DATA_B = "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
+OUT_DIR = Path("/home/najo/NAS/VLANeXt/vqa_samples")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

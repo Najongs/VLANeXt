@@ -32,7 +32,7 @@ with `src/datasets/sim_act_approach.py` for sim+real merged training.
                                                                                                                                                                            
   # 3) 본격 수집                                                                                                                                                           
   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 --num-episodes 50 \                                                                                                
-      --save-dir /data/public/NAS/VLANeXt/dataset/real_align/run_0429 --seed 42 
+      --save-dir /home/najo/NAS/VLANeXt/dataset/real_align/run_0429 --seed 42 
 
 Usage
 -----

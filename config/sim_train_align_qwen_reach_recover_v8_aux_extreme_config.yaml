@@ -15,7 +15,7 @@
 
 project:
   name: "VLANeXt_Qwen35_NEARGOAL_reach_recover_v8_aux_extreme"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 5
   save_interval: 500
   use_wandb: true
@@ -24,20 +24,20 @@ data:
   dataset_name: "sim_align"
   data_root:
   # v5 holddata: drop wide approach data, oversample hold-rich data 2x
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
     max_episodes: 2000  # reduced from 5000 (less wide approach)
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
   # drop range/phantom_range — less wide variety
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2/collected_data_merged"
   # hold-rich data: include 2x (path entry twice = upsample)
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_strict_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_strict_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_hold_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_ypos_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_hold_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_strict_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_strict_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_perfect_hold_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_yneg_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_ypos_v1/collected_data_merged"
 
   task_suite_name: ""
   full_sequence: true
@@ -149,7 +149,7 @@ model:
 train:
   seed: 2026
   resume_path: ""
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v5_holddata/checkpoint_500.pt"  # v5 ck500 = current hold champion
+  pretrained_checkpoint: "/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v5_holddata/checkpoint_500.pt"  # v5 ck500 = current hold champion
   reset_optimizer_scheduler: true
   learning_rate: 2.5e-7  # v8: very low lr, building on top of hold champ v5 ck500
   weight_decay: 0.01

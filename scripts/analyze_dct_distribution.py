@@ -10,7 +10,7 @@ and plots:
 
 Usage:
   python scripts/analyze_dct_distribution.py \
-      --h5 /data/public/NAS/VLANeXt/dataset/approach/approach_00/collected_data_merged/w0_episode_20260507_174548.h5 \
+      --h5 /home/najo/NAS/VLANeXt/dataset/approach/approach_00/collected_data_merged/w0_episode_20260507_174548.h5 \
       --T 8 --out-dir figures/dct_distribution
 """
 import argparse

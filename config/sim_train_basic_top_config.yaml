@@ -1,13 +1,13 @@
 project:
   name: "VLANeXt_Qwen3.5_basic_motion_top"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
   use_wandb: true
 
 data:
   dataset_name: "sim_basic"
-  data_root: "/data/public/NAS/VLANeXt/dataset/basic_motion"
+  data_root: "/home/najo/NAS/VLANeXt/dataset/basic_motion"
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true

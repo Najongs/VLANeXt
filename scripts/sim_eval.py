@@ -5,7 +5,7 @@ Evaluates a fine-tuned VLANeXt model in the MuJoCo needle-insertion simulation.
 
 Usage:
 python scripts/sim_eval.py --config config/sim_eval_config.yaml \
-    --checkpoint /data/public/NAS/VLANeXt/output_step6500.pt
+    --checkpoint /home/najo/NAS/VLANeXt/output_step6500.pt
 
 The script:
   1. Loads the fine-tuned model checkpoint

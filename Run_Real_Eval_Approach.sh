@@ -6,10 +6,10 @@
 #
 # Examples:
 #   # Dry-run (no robot motion — recommended first):
-#   bash Run_Real_Eval_Approach.sh /data/public/NAS/VLANeXt/output_dir_approach_2mix_0426 --dry-run --max-steps 10
+#   bash Run_Real_Eval_Approach.sh /home/najo/NAS/VLANeXt/output_dir_approach_2mix_0426 --dry-run --max-steps 10
 #
 #   # Live run:
-#   bash Run_Real_Eval_Approach.sh /data/public/NAS/VLANeXt/output_dir_approach_2mix_0426 --max-steps 50
+#   bash Run_Real_Eval_Approach.sh /home/najo/NAS/VLANeXt/output_dir_approach_2mix_0426 --max-steps 50
 #
 #   # Swap camera roles if camera1/2 enumerated in unexpected order:
 #   bash Run_Real_Eval_Approach.sh /path/to/ckpt --swap-cameras --max-steps 50

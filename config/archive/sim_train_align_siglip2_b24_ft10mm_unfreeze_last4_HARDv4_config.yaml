@@ -1,25 +1,25 @@
 project:
   name: VLANeXt_SigLIP2_repro_b24_ft10mm_unfreeze_last4_HARDv4
-  output_dir: /data/public/NAS/VLANeXt/checkpoints
+  output_dir: /home/najo/NAS/VLANeXt/checkpoints
   log_interval: 1
   save_interval: 500
   use_wandb: true
 data:
   dataset_name: sim_align
   data_root:
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_ang15_hold30_part2/collected_data_merged
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_0
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_1
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_2
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_3
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_4
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_5
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_6
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_7
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_8
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_9
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_ang15_hold30_part2/collected_data_merged
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_0
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_1
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_2
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_3
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_4
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_5
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_6
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_7
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_8
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75/worker_9
   task_suite_name: ''
   full_sequence: true
   skip_history_padding: true
@@ -115,7 +115,7 @@ train:
   seed: 2033
   resume_path: ''
   reset_optimizer_scheduler: true
-  pretrained_checkpoint: /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HOLD_focus_v2/checkpoint_3000.pt
+  pretrained_checkpoint: /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HOLD_focus_v2/checkpoint_3000.pt
   learning_rate: 1.0e-05
   weight_decay: 0.01
   warmup_steps: 300

@@ -20,11 +20,12 @@
 #   관련 파일: Save_dataset_align_only.py, sim_eval_align_only.py, run_parallel.py
 #
 # Examples:
-# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0507_10step --phantom-pos 0.0 0.0 --retreat-mm 2 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1 --sensor-stop
-# bash Run_Eval_Parallel.sh align /data/public/NAS/VLANeXt/output_dir_align_0508 --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 3 --z-steps 2 --angle-steps 3 --repeats 1
-# bash Run_Eval_Parallel.sh lerobot_dp /data/public/NAS/VLANeXt/outputs/train/lerobot_dp_align_20260511_0205/checkpoints/last/pretrained_model --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1
+# bash Run_Eval_Parallel.sh align checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v11_submm_tight/checkpoint_flat_1500.pt --train-config config/sim_train_align_qwen_reach_recover_v11_submm_tight_config.yaml --no-early-term --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 3 --z-steps 2 --angle-steps 3 --repeats 1
+# bash Run_Eval_Parallel.sh lerobot_dp outputs/train/lerobot_dp_align_20260511_0205/checkpoints/last/pretrained_model --max-steps 250 --eval-seed 2026 --perturb-mode grid --xy-steps 5 --z-steps 2 --angle-steps 1 --repeats 1
 
-
+set -e
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${REPO_ROOT}"
 
 # Auto-detect: if first arg starts with / or . it's a checkpoint path, not a mode
 if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
@@ -33,13 +34,52 @@ if [[ "$1" == /* ]] || [[ "$1" == .* ]]; then
     EXTRA_ARGS=("${@:2}")
 elif [ "$1" = "align" ] || [ "$1" = "approach" ] || [ "$1" = "insertion" ] || [ "$1" = "basic" ] || [ "$1" = "lerobot_act" ] || [ "$1" = "lerobot_dp" ] || [ "$1" = "lerobot_vqbet" ]; then
     MODE="$1"
-    CHECKPOINT="${2:-/data/public/NAS/VLANeXt/output_dir_align_0410}"
+    CHECKPOINT="${2:-checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v11_submm_tight/checkpoint_flat_1500.pt}"
     EXTRA_ARGS=("${@:3}")
 else
     MODE="align"
-    CHECKPOINT="${1:-/data/public/NAS/VLANeXt/output_dir_align_0410}"
+    CHECKPOINT="${1:-checkpoints/VLANeXt_Qwen35_NEARGOAL/reach_recover_v11_submm_tight/checkpoint_flat_1500.pt}"
     EXTRA_ARGS=("${@:2}")
 fi
+
+PASSTHROUGH_ARGS=()
+CLI_TRAIN_CONFIG=""
+idx=0
+while [ $idx -lt ${#EXTRA_ARGS[@]} ]; do
+    arg="${EXTRA_ARGS[$idx]}"
+    if [ "${arg}" = "--train-config" ]; then
+        idx=$((idx + 1))
+        CLI_TRAIN_CONFIG="${EXTRA_ARGS[$idx]:?--train-config requires a path}"
+    else
+        PASSTHROUGH_ARGS+=("${arg}")
+    fi
+    idx=$((idx + 1))
+done
+EXTRA_ARGS=("${PASSTHROUGH_ARGS[@]}")
+
+MERGE_EXEC_STEPS=1
+MERGE_DIFF_STEPS=10
+idx=0
+while [ $idx -lt ${#EXTRA_ARGS[@]} ]; do
+    arg="${EXTRA_ARGS[$idx]}"
+    case "${arg}" in
+        --num-steps-execute)
+            idx=$((idx + 1))
+            MERGE_EXEC_STEPS="${EXTRA_ARGS[$idx]:?--num-steps-execute requires a value}"
+            ;;
+        --num-steps-execute=*)
+            MERGE_EXEC_STEPS="${arg#*=}"
+            ;;
+        --num-inference-timesteps)
+            idx=$((idx + 1))
+            MERGE_DIFF_STEPS="${EXTRA_ARGS[$idx]:?--num-inference-timesteps requires a value}"
+            ;;
+        --num-inference-timesteps=*)
+            MERGE_DIFF_STEPS="${arg#*=}"
+            ;;
+    esac
+    idx=$((idx + 1))
+done
 
 # GPU 할당: GPUS env var로 override 가능 (예: GPUS="1,2" bash Run_Eval_Parallel.sh ...)
 # 각 shard는 GPU_LIST의 순서대로 1장씩 pinned.
@@ -77,30 +117,27 @@ elif [ "$MODE" = "lerobot_act" ] || [ "$MODE" = "lerobot_dp" ] || [ "$MODE" = "l
     TRAIN_CONFIG=""
 else
     CONFIG=config/sim_eval_align_config.yaml
-    TRAIN_CONFIG="${TRAIN_CONFIG_OVERRIDE:-config/sim_train_align_config.yaml}"
+    TRAIN_CONFIG="${CLI_TRAIN_CONFIG:-${TRAIN_CONFIG_OVERRIDE:-config/sim_train_align_qwen_reach_recover_v11_submm_tight_config.yaml}}"
     EVAL_SCRIPT=scripts.sim_eval_align_only
     MERGE_PREFIX="align"
+    if [[ " ${EXTRA_ARGS[*]} " != *" --no-early-term "* ]]; then
+        EXTRA_ARGS+=(--no-early-term)
+    fi
 fi
-
-# Build extra flags string
-EXTRA_FLAGS=""
-for arg in "${EXTRA_ARGS[@]}"; do
-    EXTRA_FLAGS="${EXTRA_FLAGS} ${arg}"
-done
 
 echo "=== Parallel Eval: ${NUM_SHARDS} shards on GPUs ${GPU_LIST[*]} ==="
 echo "Mode: ${MODE}"
 echo "Checkpoint: ${CHECKPOINT}"
 echo "Script: ${EVAL_SCRIPT}"
-if [[ "${EXTRA_FLAGS}" == *"--randomize-phantom"* ]]; then
+if [[ " ${EXTRA_ARGS[*]} " == *" --randomize-phantom "* ]]; then
     echo "Phantom: RANDOMIZED"
 else
     echo "Phantom: FIXED"
 fi
-if [[ "${EXTRA_FLAGS}" == *"--sensor-success"* ]]; then
+if [[ " ${EXTRA_ARGS[*]} " == *" --sensor-success "* ]]; then
     echo "Sensor Success: ON (AND with distance criterion)"
 fi
-if [[ "${EXTRA_FLAGS}" == *"--sensor-stop"* ]]; then
+if [[ " ${EXTRA_ARGS[*]} " == *" --sensor-stop "* ]]; then
     echo "Sensor Stop: ON (early-success when sensor sees through hole)"
 fi
 
@@ -109,19 +146,19 @@ for SHARD in $(seq 0 $((NUM_SHARDS - 1))); do
     GPU_ID=${GPU_LIST[$SHARD]}
     echo "Starting shard ${SHARD} on GPU ${GPU_ID}..."
     if [[ "$MODE" == lerobot_* ]]; then
-        LEROBOT_PY="${LEROBOT_PYTHON:-/home/yohan/miniconda3/envs/lerobot/bin/python}"
-        CUDA_VISIBLE_DEVICES=${GPU_ID} PYTHONPATH="/data/public/NAS/VLANeXt:${PYTHONPATH}" ${LEROBOT_PY} -m ${EVAL_SCRIPT} \
+        LEROBOT_PY="${LEROBOT_PYTHON:-python}"
+        CUDA_VISIBLE_DEVICES=${GPU_ID} PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}" ${LEROBOT_PY} -m ${EVAL_SCRIPT} \
             --policy ${LEROBOT_POLICY} \
             --checkpoint ${CHECKPOINT} \
             --shard-id ${SHARD} \
-            --num-shards ${NUM_SHARDS} ${EXTRA_FLAGS} &
+            --num-shards ${NUM_SHARDS} "${EXTRA_ARGS[@]}" &
     else
         CUDA_VISIBLE_DEVICES=${GPU_ID} python -u -m ${EVAL_SCRIPT} \
             --config ${CONFIG} \
             --checkpoint ${CHECKPOINT} \
             --train-config ${TRAIN_CONFIG} \
             --shard-id ${SHARD} \
-            --num-shards ${NUM_SHARDS} ${EXTRA_FLAGS} &
+            --num-shards ${NUM_SHARDS} "${EXTRA_ARGS[@]}" &
     fi
 done
 
@@ -130,4 +167,5 @@ wait
 echo "All shards complete."
 
 # Merge results
-python scripts/merge_eval_shards.py ${CHECKPOINT} --num-shards ${NUM_SHARDS} --prefix ${MERGE_PREFIX}
+python scripts/merge_eval_shards.py "${CHECKPOINT}" --num-shards "${NUM_SHARDS}" --prefix "${MERGE_PREFIX}" \
+    --exec-steps "${MERGE_EXEC_STEPS}" --diff-steps "${MERGE_DIFF_STEPS}"

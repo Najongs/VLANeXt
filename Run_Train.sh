@@ -1,17 +1,27 @@
-# Single GPU
-# CUDA_VISIBLE_DEVICES=0 python -m scripts.train --config config/libero_train_config.yaml
+#!/bin/bash
+set -e
 
-# Multi-GPU (Set distributed=true in config)
-# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=5 --master_port=29505 -m scripts.train --config config/libero_train_config.yaml
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${REPO_ROOT}"
 
-# CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=3 --master_port=29505 -m scripts.train --config /data/public/NAS/VLANeXt/config/sim_train_spatial_config.yaml
-# GPU 0 hardware fail + NVML probe로 multi-GPU 불가 + PCI remove도 막힘 → single-GPU 학습.
-# 살아있는 GPU 1 사용. config에서 distributed/deepspeed false로 맞춰둠.
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 \
-    python -m scripts.train --config config/sim_train_align_siglip2_config.yaml
+# Default: final Qwen v11 fine-align recipe. Override with:
+#   CONFIG=config/your_config.yaml GPUS=1 bash Run_Train.sh
+CONFIG="${CONFIG:-config/sim_train_align_qwen_reach_recover_v11_submm_tight_config.yaml}"
+GPUS="${GPUS:-0}"
 
-# Single GPU
-# CUDA_VISIBLE_DEVICES=0 python -m scripts.train --config config/droid_train_config.yaml
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
-# Multi-GPU (Set distributed=true in config)
-# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=0,1,2,3,4 torchrun --nproc_per_node=5 --master_port=29505 -m scripts.train --config config/droid_train_config.yaml
+IFS=',' read -r -a GPU_LIST <<< "${GPUS}"
+NUM_GPUS=${#GPU_LIST[@]}
+
+echo "=== VLANeXt Train ==="
+echo "Config: ${CONFIG}"
+echo "GPUs:   ${GPUS}"
+
+if [ "${NUM_GPUS}" -gt 1 ]; then
+    CUDA_VISIBLE_DEVICES="${GPUS}" torchrun --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_PORT:-29505}" \
+        -m scripts.train --config "${CONFIG}" "$@"
+else
+    CUDA_VISIBLE_DEVICES="${GPUS}" python -m scripts.train --config "${CONFIG}" "$@"
+fi

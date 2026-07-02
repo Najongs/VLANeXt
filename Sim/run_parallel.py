@@ -6,16 +6,16 @@ Supports full pipeline, align-only, and insertion-only.
 
 Usage:
 python run_parallel.py --script align --workers 10 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 -0.4 --no-side-camera
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 -0.4 --no-side-camera
 
 python run_parallel.py --script align --workers 10 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 0.0 --no-side-camera
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align --phantom-pos 0.0 0.0 --no-side-camera
 
 python run_parallel.py --script approach --workers 10 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach_00 --phantom-pos 0.0 0.0 --no-side-camera --no-insertion
+    --base-dir /home/najo/NAS/VLANeXt/dataset/approach_00 --phantom-pos 0.0 0.0 --no-side-camera --no-insertion
 
 python run_parallel.py --script approach --workers 10 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach_04 --phantom-pos 0.0 -0.4 --no-side-camera --no-insertion
+    --base-dir /home/najo/NAS/VLANeXt/dataset/approach_04 --phantom-pos 0.0 -0.4 --no-side-camera --no-insertion
 
     python Sim/run_parallel.py --script insertion --workers 10 --episodes 500 \
         --base-dir dataset/insertion_data --approach-offset 5 --approach-xy-offset 2
@@ -23,7 +23,7 @@ python run_parallel.py --script approach --workers 10 --episodes 500 \
     python run_parallel.py --grid --grid-bins-xy 8 --grid-bins-z 6 --workers 10 --base-dir dataset/grid_data
     
 python run_parallel.py --script basic --direction all --episodes 1000 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/basic_motion --no-side-camera --seed 42
+    --base-dir /home/najo/NAS/VLANeXt/dataset/basic_motion --no-side-camera --seed 42
       
 """
 import os

@@ -1,6 +1,6 @@
 project:
   name: "VLANeXt_SigLIP2_repro_b24_ft10mm_plan_b_from_b100"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 2500
   use_wandb: true
@@ -11,11 +11,11 @@ data:
   # Plan B: b100 외부 ckpt 위에 NEW_finetune 패턴(10k step)으로 새 mix 학습.
   # NEW_finetune은 (approach + tip2)만 썼지만 fine-align은 tip 계열이 핵심이라
   # tip + tip2 + HARD + y50 + yn25_xp15 풀세트로 간다.
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/HARD_ang15_hold30_part2/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/HARD_y50_v1/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/HARD_yn25_xp15_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/HARD_ang15_hold30_part2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/HARD_y50_v1/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/HARD_yn25_xp15_v1/collected_data_merged"
 
   task_suite_name: ""
   full_sequence: true
@@ -120,7 +120,7 @@ train:
   seed: 2026
   resume_path: ""
   reset_optimizer_scheduler: true
-  pretrained_checkpoint: "/data/public/NAS/VLANeXt/checkpoints/output_dir_b100_ft10mm_fine_align_20000step_fixed"
+  pretrained_checkpoint: "/home/najo/NAS/VLANeXt/checkpoints/output_dir_b100_ft10mm_fine_align_20000step_fixed"
   learning_rate: 5.0e-6
   weight_decay: 0.01
   warmup_steps: 200

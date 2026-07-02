@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 LOG_DIR=logs/reach_recover
 mkdir -p "$LOG_DIR"
 
@@ -21,13 +21,13 @@ run_eval() {
 # v4 longer (lr 1e-6, 5000 step) — eval 3000/4000/5000 (saturation curve)
 for STEP in 3000 4000 5000; do
   run_eval "v4_ck${STEP}" config/sim_train_align_reach_recover_v4_longer_config.yaml \
-    /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v4_longer/checkpoint_${STEP}.pt
+    /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v4_longer/checkpoint_${STEP}.pt
 done
 
 # v5 combo (lr 1e-6 + softhold) — eval 1500/2000/3000
 for STEP in 1500 2000 3000; do
   run_eval "v5_ck${STEP}" config/sim_train_align_reach_recover_v5_combo_config.yaml \
-    /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v5_combo/checkpoint_${STEP}.pt
+    /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/reach_recover_v5_combo/checkpoint_${STEP}.pt
 done
 
 echo "=== reach_recover v4/v5 eval complete ==="

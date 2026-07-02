@@ -1,6 +1,6 @@
 project:
   name: "VLANeXt_Qwen3.5_fine_approach"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
   use_wandb: true
@@ -8,8 +8,8 @@ project:
 data:
   dataset_name: "sim_approach"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_03/collected_data_merged"
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_04/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_03/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_04/collected_data_merged"
     max_episodes: 10000
   task_suite_name: ""
   full_sequence: true

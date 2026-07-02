@@ -26,7 +26,7 @@ TARGETS = [
     ("chain v5combo ck2000 e4","VLANeXt_SigLIP2_NEARGOAL","reach_recover_v5_combo",          2000, 4),
 ]
 
-BASE = Path("/data/public/NAS/VLANeXt/checkpoints")
+BASE = Path("/home/najo/NAS/VLANeXt/checkpoints")
 
 def get_dirs(arch, variant, step, execn):
     parent = BASE / arch / variant

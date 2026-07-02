@@ -65,7 +65,7 @@ def aggregate(csv_path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL")
+    ap.add_argument("--root", default="/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL")
     args = ap.parse_args()
 
     root = Path(args.root)
@@ -115,7 +115,7 @@ def main():
         d = lambda key, scale=1: (on[key] - off[key]) * scale
         print(f"ck{step:<4} | {d('sr_old',100):+8.1f}pp | {d('close_5',100):+8.1f}pp | {d('close_2',100):+8.1f}pp | {d('minLat_med'):+7.2f}mm | {d('flat_med'):+7.2f}mm | {d('ang_med'):+6.2f}° | {d('safety'):+7.2f}mm")
 
-    out = Path("/data/public/NAS/VLANeXt/logs/dct_ablation/dct_ablation_metrics.json")
+    out = Path("/home/najo/NAS/VLANeXt/logs/dct_ablation/dct_ablation_metrics.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({k: {kk: ({str(rk): rv for rk, rv in vv.items()} if isinstance(vv, dict) else vv) for kk, vv in v.items()} for k, v in results.items()}, indent=2, default=str))
     print(f"\nJSON saved: {out}")

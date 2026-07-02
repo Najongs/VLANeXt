@@ -39,7 +39,7 @@ python Sim/filter_outliers.py \
     --execute
 
 python Sim/filter_outliers.py \
-    --data-dir /data/public/NAS/VLANeXt/dataset \
+    --data-dir /home/najo/NAS/VLANeXt/dataset \
     --spike-ratio 2.0 \
     --pos-sigma 2.5 \
     --max-range 150 \

@@ -24,7 +24,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2}
 #   approach 스크립트는 occlusion check 없음 → 자동 통과
 # ============================================================
 python run_parallel.py --script approach --workers 15 --episodes 334 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_eval_range_v1 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/approach/approach_eval_range_v1 \
     --randomize-phantom-pos --no-side-camera --no-insertion \
     --hold-steps 30 --cameras tool_camera \
     --phantom-x-mm -12 12 --phantom-y-mm -29 29 \
@@ -37,7 +37,7 @@ python run_parallel.py --script approach --workers 15 --episodes 334 \
 #   --allow-occluded: 가린 ep도 keep (IK reach만 통과하면 OK)
 # ============================================================
 python run_parallel.py --script align --workers 15 --episodes 34 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 30 \
     --phantom-x-mm -12 12 --phantom-y-mm -29 29 \
@@ -48,11 +48,11 @@ python run_parallel.py --script align --workers 15 --episodes 34 \
 # ============================================================
 # # old approach_00 (wide phantom range, hold 10 — champion baseline data)
 # python run_parallel.py --script approach --workers 25 --episodes 200 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_00 \
+#     --base-dir /home/najo/NAS/VLANeXt/dataset/approach/approach_00 \
 #     --randomize-phantom-pos --no-side-camera --no-insertion \
 #     --hold-steps 10 --cameras tool_camera
 #
 # # tip2 (phantom 고정 origin, robot perturb ±10mm — champion baseline data)
 # python run_parallel.py --script align --workers 20 --episodes 50 \
-#     --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2 \
+#     --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2 \
 #     --phantom-pos 0.0 0.0 --no-side-camera --cameras tool_camera --allow-occluded

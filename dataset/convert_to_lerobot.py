@@ -10,9 +10,9 @@ Output features (baseline — no sensor flags):
 
 Usage:
     python -m dataset.convert_to_lerobot \
-        --src /data/public/NAS/VLANeXt/dataset/approach/approach_00 \
+        --src /home/najo/NAS/VLANeXt/dataset/approach/approach_00 \
         --repo-id vlanext/sim_align_baseline \
-        --root /data/public/NAS/VLANeXt/dataset/lerobot \
+        --root /home/najo/NAS/VLANeXt/dataset/lerobot \
         --fps 15
 
 Notes:
@@ -135,7 +135,7 @@ def main():
             from lerobot.common.datasets.lerobot_dataset import LeRobotDataset  # < 0.2
         except ImportError as e_old:
             print(f"ERROR importing LeRobotDataset:\n  v0.5 path: {e_new}\n  legacy:    {e_old}\n"
-                  "Try: pip install -e '/data/public/NAS/VLANeXt/lerobot[dataset,training]'",
+                  "Try: pip install -e '/home/najo/NAS/VLANeXt/lerobot[dataset,training]'",
                   file=sys.stderr)
             sys.exit(1)
 

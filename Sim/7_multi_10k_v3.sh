@@ -39,7 +39,7 @@ unset __EGL_VENDOR_LIBRARY_FILENAMES  # mesa 강제 해제, NVIDIA default 사�
 export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
-LOG_DIR=/data/public/NAS/VLANeXt/logs
+LOG_DIR=/home/najo/NAS/VLANeXt/logs
 mkdir -p "$LOG_DIR"
 
 TS=$(date +%Y%m%d_%H%M)
@@ -61,7 +61,7 @@ echo "===================================================================="
 echo ""
 echo "[1/3] Launching Approach (5000 ep)..."
 python run_parallel.py --script approach --workers 10 --episodes 500 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/approach/approach_10k_v3 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/approach/approach_10k_v3 \
     --randomize-phantom-pos --no-side-camera --no-insertion \
     --hold-steps 30 --cameras tool_camera \
     --retreat-mm 0 \
@@ -82,7 +82,7 @@ sleep 3
 echo ""
 echo "[2/3] Launching Align wide 15mm (3000 ep, hold 30, retreat 0)..."
 python run_parallel.py --script align --workers 10 --episodes 300 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/align_10k_v3 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/align_10k_v3 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 30 \
     --retreat-mm 0 \
@@ -105,7 +105,7 @@ sleep 3
 echo ""
 echo "[3/3] Launching Align small 5mm + angle 20° (2000 ep, hold 30, retreat 0)..."
 python run_parallel.py --script align --workers 10 --episodes 200 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/align_small_angle_10k_v3 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/align_small_angle_10k_v3 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 30 \
     --retreat-mm 0 \
@@ -134,9 +134,9 @@ echo "[$(date +%H:%M:%S)] Track 3 (Align angle-only) complete"
 echo ""
 echo "===================================================================="
 echo "10K Datagen v3 COMPLETE"
-echo "  approach_10k_v3:            $(ls -1 /data/public/NAS/VLANeXt/dataset/approach/approach_10k_v3/worker_*/*.h5 2>/dev/null | wc -l) episodes"
-echo "  align_10k_v3 (wide 10mm):   $(ls -1 /data/public/NAS/VLANeXt/dataset/fine_align/align_10k_v3/worker_*/*.h5 2>/dev/null | wc -l) episodes"
-echo "  align_small_angle_10k_v3:   $(ls -1 /data/public/NAS/VLANeXt/dataset/fine_align/align_small_angle_10k_v3/worker_*/*.h5 2>/dev/null | wc -l) episodes"
+echo "  approach_10k_v3:            $(ls -1 /home/najo/NAS/VLANeXt/dataset/approach/approach_10k_v3/worker_*/*.h5 2>/dev/null | wc -l) episodes"
+echo "  align_10k_v3 (wide 10mm):   $(ls -1 /home/najo/NAS/VLANeXt/dataset/fine_align/align_10k_v3/worker_*/*.h5 2>/dev/null | wc -l) episodes"
+echo "  align_small_angle_10k_v3:   $(ls -1 /home/najo/NAS/VLANeXt/dataset/fine_align/align_small_angle_10k_v3/worker_*/*.h5 2>/dev/null | wc -l) episodes"
 echo "===================================================================="
 echo ""
 echo "Next steps:"

@@ -13,12 +13,12 @@
 #
 # Usage: bash eval_overlay_smart.sh [overlay_v1_ckpt_dir]
 set -uo pipefail
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 
-OVERLAY_DIR="${1:-/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_overlay/v1}"
-V3_CKPT=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
-UV_CKPT=/data/public/NAS/VLANeXt/checkpoints/keypoint_trocar/uv_only/head_best.pt
-DIST_CKPT=/data/public/NAS/VLANeXt/checkpoints/keypoint_trocar/dist_only/head_best.pt
+OVERLAY_DIR="${1:-/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_overlay/v1}"
+V3_CKPT=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
+UV_CKPT=/home/najo/NAS/VLANeXt/checkpoints/keypoint_trocar/uv_only/head_best.pt
+DIST_CKPT=/home/najo/NAS/VLANeXt/checkpoints/keypoint_trocar/dist_only/head_best.pt
 OVERLAY_TRAIN_CONFIG=config/sim_train_align_siglip2_overlay_v1_config.yaml
 V3_TRAIN_CONFIG=config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v3_config.yaml
 GPUS_OVERRIDE="${EVAL_GPUS:-0}"
@@ -105,7 +105,7 @@ if [ ${#STAGE_A_DIRS[@]} -gt 0 ]; then
     # Pick winner by rank (smallest rank_sum)
     BEST_LABEL=$(python -c "
 import sys
-sys.path.insert(0, '/data/public/NAS/VLANeXt/scripts')
+sys.path.insert(0, '/home/najo/NAS/VLANeXt/scripts')
 from rank_models import load_eval_dir, rank_models
 from pathlib import Path
 dirs = ['$V3_DIR'] + '''${STAGE_A_DIRS[@]}'''.split()

@@ -5,7 +5,7 @@ project:
   # crop을 wrist 슬롯 view로 stack, view_mode=multi → 2 view (full + needle-zoom).
   # 효과: crop 안에서 patch당 world 거리 ~1/2 ↓, mm precision 신호 향상 기대
   name: "VLANeXt_SigLIP2_localcrop_lr5e5_fine_align"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 2000
   use_wandb: true
@@ -13,7 +13,7 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
 
   task_suite_name: ""
   full_sequence: true

@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 export MUJOCO_GL=egl
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 
-LOG_DIR=/data/public/NAS/VLANeXt/logs
+LOG_DIR=/home/najo/NAS/VLANeXt/logs
 mkdir -p "$LOG_DIR"
 
 # === Track A: NEARGOAL_eval_match_v2 ===
@@ -20,7 +20,7 @@ mkdir -p "$LOG_DIR"
 # hold_record_steps = 60 (v3 standard 30의 2배)
 echo "Launching Track A (pos+angle, 3000 ep)..."
 python run_parallel.py --script align --workers 10 --episodes 300 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_eval_match_v2 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 60 \
     --phantom-x-mm -12 12 --phantom-y-mm -29 29 \
@@ -36,7 +36,7 @@ sleep 2
 # perturb XY=0, Z=0, angle=15° (angle 교정만 specialized)
 echo "Launching Track B (angle-only 15°, 1000 ep)..."
 python run_parallel.py --script align --workers 10 --episodes 100 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_angle_only_v2 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 60 \
     --phantom-x-mm -12 12 --phantom-y-mm -29 29 \

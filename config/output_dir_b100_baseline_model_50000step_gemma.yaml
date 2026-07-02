@@ -1,18 +1,25 @@
+# Local 50k baseline (PaliGemma2 + SigLIP2 vision encoder, sim-only)
+# Uses datasets currently present on this server:
+# approach_00, approach_10k_v3, 10mm_fine_align_00_tip2,
+# align_small_angle_10k_v3, align_10k_v3.
+
 project:
-  name: "VLANeXt_DINOv2_large_match_fine_align"
+  name: "VLANeXt_PaliGemma2_b100_baseline_50k_simOnly"
   output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
-  save_interval: 2000
+  save_interval: 5000   # sparse eval (250/500/1000/1500/final 중 500 단위)
   use_wandb: true
 
-# #1과 단일변수: backbone만 SigLIP2-SO400m → DINOv2-large.
-# head/queries/proprio_dim/projector/etc 모두 #1과 동일.
-# input 518 = DINOv2 native (patch14, 37x37=1369 tokens) — SigLIP2 1024 patches보다 약간 많음.
-# lr 1e-5: DINOv3-vitl 처럼 큰 backbone에 1e-4는 발산 위험 (#4). DINOv3-vitl_match도 1e-5 사용.
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
+  # ===== Champion v3 mix (DOWN-SAMPLED to fix y+ bias) =====
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00/collected_data_merged" # 5000
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_10k_v3/collected_data_merged" # 5000
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2" # 5000
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/align_small_angle_10k_v3" # 3000
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/align_10k_v3/collected_data_merged" # 3000
+  # - path: "/home/najo/NAS/VLANeXt/dataset/real_align/collected_data_real_all" # 6000
 
   task_suite_name: ""
   full_sequence: true
@@ -22,8 +29,8 @@ data:
   future_len: 8
   buffer_size: 4000
 
-  batch_size: 16
-  max_steps: 10000
+  batch_size: 100
+  max_steps: 50000
   num_workers: 4
 
   input_modality: "image"
@@ -33,20 +40,33 @@ data:
   cam_wrist: ""
   cam_top: ""
 
+  # augmentation (applied to image/video frames before processor)
   augmentation:
-    enabled: false
+    enabled: true
+    random_resized_crop:
+      scale: [0.8, 1.0]
+      ratio: [0.9, 1.1]
+    random_brightness: [0.2]
+    random_contrast: [0.8, 1.2]
+    random_saturation: [0.8, 1.2]
+    random_hue: [0.05]
+    augment_order:
+      - "random_resized_crop"
+      - "random_brightness"
+      - "random_contrast"
+      - "random_saturation"
+      - "random_hue"
 
 model:
   model_type: "vlanext"
-  lmm_path: "vision_only"
-  vision_encoder_path: "facebook/dinov2-large"
-  input_image_size: 518
+  lmm_path: "google/paligemma2-3b-mix-224"  # "Qwen/Qwen3-VL-2B-Instruct" # 
+  vision_encoder_path: "google/siglip2-base-patch16-256"
   backbone_mode: "frozen"
   lora:
     r: 16
     lora_alpha: 32
     lora_dropout: 0.05
-    target_modules: ["q_proj", "v_proj", "k_proj", "out_proj"]
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
   action_dim: 6
   proprio_dim: 6
@@ -100,34 +120,32 @@ model:
 
   aux_distance_loss:
     enabled: true
-    weight: 0.2
+    weight: 0.5
     margin_mm: 0.1
     pos_denorm_mm: [0.37, 0.37, 0.37]
-    near_goal_scale_mm: 5.0
-    near_goal_max_boost: 5.0
+    near_goal_scale_mm: 2.0
+    near_goal_max_boost: 10.0
     apply_to_main_loss: true
 
   direction_decoupled_loss:
     enabled: false
-    pos_mag_weight: 0.5
-    pos_dir_weight: 0.1
-    other_weight: 1.0
-    min_mag_threshold: 0.05
 
 train:
   seed: 2026
   resume_path: ""
+  # CRITICAL: champion v3 ckpt 1000 base (best so far)
   pretrained_checkpoint: ""
-  learning_rate: 1.0e-5
+  reset_optimizer_scheduler: false
+  learning_rate: 1e-5          # champion 5e-6의 절반 (catastrophic forgetting 보호)
   weight_decay: 0.01
-  warmup_steps: 500
+  warmup_steps: 500               # short finetune이라 warmup 짧게
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
   device: "cuda"
   distributed: false
   dist_backend: "nccl"
   deepspeed:
-    enabled: false
+    enabled: True
     zero_stage: 2
     offload_optimizer_device: "none"
     offload_param_device: "none"

@@ -7,9 +7,9 @@ data:
   cam_top: ''
   cam_wrist: ''
   data_root:
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged
-  - path: /data/public/NAS/VLANeXt/dataset/fine_align/HARD_ang15_hold30_part2/collected_data_merged
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip/collected_data_merged
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged
+  - path: /home/najo/NAS/VLANeXt/dataset/fine_align/HARD_ang15_hold30_part2/collected_data_merged
   dataset_name: sim_align
   full_sequence: true
   future_len: 8
@@ -97,7 +97,7 @@ model:
 project:
   log_interval: 1
   name: VLANeXt_SigLIP2_repro_b24_ft10mm_HARD_cotrain_lr_ultra_low
-  output_dir: /data/public/NAS/VLANeXt/checkpoints
+  output_dir: /home/najo/NAS/VLANeXt/checkpoints
   save_interval: 500
   use_wandb: true
 train:
@@ -112,7 +112,7 @@ train:
   gradient_accumulation_steps: 1
   learning_rate: 1.0e-06
   max_grad_norm: 1.0
-  pretrained_checkpoint: /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HOLD_focus_v2/checkpoint_3000.pt
+  pretrained_checkpoint: /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HOLD_focus_v2/checkpoint_3000.pt
   reset_optimizer_scheduler: true
   resume_path: ''
   seed: 2026

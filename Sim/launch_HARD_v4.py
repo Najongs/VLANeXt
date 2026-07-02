@@ -15,7 +15,7 @@ import argparse
 from pathlib import Path
 import numpy as np
 
-BASE_DIR_DEFAULT = "/data/public/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75"
+BASE_DIR_DEFAULT = "/home/najo/NAS/VLANeXt/dataset/fine_align/HARD_v4_y75"
 NUM_WORKERS_DEFAULT = 10
 EPISODES_PER_WORKER_DEFAULT = 100   # → 1000 total
 
@@ -79,14 +79,14 @@ def main():
     print("=" * 70)
 
     procs = []
-    log_dir = Path("/data/public/NAS/VLANeXt/logs")
+    log_dir = Path("/home/najo/NAS/VLANeXt/logs")
     log_dir.mkdir(exist_ok=True)
     for w in range(args.workers):
         save_dir = base / f"worker_{w}"
         save_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
             "python", "-u",
-            "/data/public/NAS/VLANeXt/Sim/Save_dataset_align_HARD.py",
+            "/home/najo/NAS/VLANeXt/Sim/Save_dataset_align_HARD.py",
             "--save-dir", str(save_dir),
             "--num-episodes", str(args.episodes_per_worker),
             "--grid-cells-file", str(worker_jsons[w]),
@@ -102,7 +102,7 @@ def main():
         env.setdefault("__EGL_VENDOR_LIBRARY_FILENAMES",
                        "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
         p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
-                              cwd="/data/public/NAS/VLANeXt/Sim")
+                              cwd="/home/najo/NAS/VLANeXt/Sim")
         procs.append((p, log_path))
         print(f"  worker {w}: pid={p.pid}  log={log_path}")
 

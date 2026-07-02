@@ -6,7 +6,7 @@ Grid 데이터 수집 결과 시각화.
 성공/실패 셀을 3D scatter + 2D projection으로 시각화.
 
 Usage:
-    python scripts/vis_grid_coverage.py /data/public/NAS/VLANeXt/dataset/fine_align/grid/collected_data_merged
+    python scripts/vis_grid_coverage.py /home/najo/NAS/VLANeXt/dataset/fine_align/grid/collected_data_merged
     python scripts/vis_grid_coverage.py /path/to/grid_data --bins-xy 8 --bins-z 6
 """
 import json

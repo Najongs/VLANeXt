@@ -1,7 +1,7 @@
 #!/bin/bash
 # Long5k baseline matrix eval — DINOv3 + ConvNeXt only (SigLIP2 = champion 사용)
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 LOG_DIR=logs/baseline_long5k
 mkdir -p "$LOG_DIR"
 
@@ -20,9 +20,9 @@ run_eval() {
 }
 
 run_eval "dinov3_long5k" config/sim_train_align_dinov3_long5k_v1_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_DINOv3_long5k/v1/checkpoint_5000.pt
+  /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_DINOv3_long5k/v1/checkpoint_5000.pt
 
 run_eval "convnext_long5k" config/sim_train_align_convnext_long5k_v1_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_ConvNeXt_long5k/v1/checkpoint_5000.pt
+  /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_ConvNeXt_long5k/v1/checkpoint_5000.pt
 
 echo "=== Long5k eval complete ==="

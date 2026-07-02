@@ -35,21 +35,9 @@
               rgba="0.2 0.2 0.2 1" 
               specular="0.8" shininess="0.8" reflectance="0.2" 
               texrepeat="2 2"/>
-    <material name="mat_trocar_metal" texture="tex_scratch_metal"
-              rgba="0.7 0.7 0.7 1"
-              specular="0.8" shininess="0.8" reflectance="0.2"
-              texrepeat="2 2"/>
-    <material name="mat_trocar_red" texture="tex_scratch_metal"
-              rgba="0.85 0.25 0.25 1"
-              specular="0.8" shininess="0.8" reflectance="0.2"
-              texrepeat="2 2"/>
-    <material name="mat_trocar_green" texture="tex_scratch_metal"
-              rgba="0.25 0.75 0.35 1"
-              specular="0.8" shininess="0.8" reflectance="0.2"
-              texrepeat="2 2"/>
-    <material name="mat_trocar_blue" texture="tex_scratch_metal"
-              rgba="0.25 0.45 0.85 1"
-              specular="0.8" shininess="0.8" reflectance="0.2"
+    <material name="mat_trocar_metal" texture="tex_scratch_metal" 
+              rgba="0.7 0.7 0.7 1" 
+              specular="0.8" shininess="0.8" reflectance="0.2" 
               texrepeat="2 2"/>
     <material name="mat_white_plastic" texture="tex_white_plastic"
               rgba="0.95 0.9 0.9 1"
@@ -111,46 +99,26 @@
     <site name="viz_target_tip" pos="0 0 0" size="0.001" rgba="1 0 1 0"/>
     <body name="phantom_assembly" pos="0 0 0">
       <geom pos="0.274999 0.34 -0.0015" quat="0.499998 0.5 -0.500002 -0.5" type="mesh" material="mat_dark_metal" mesh="Optical_plate" contype="0" conaffinity="0"/>
-      <body name="trocar_assembly" pos="0.225 0.2 0.11">
-      <geom pos="0 0 0" quat="0.499998 -0.5 0.500002 -0.5" type="mesh" material="mat_white_plastic" mesh="Trocar_plate" contype="0" conaffinity="0"/>
-      <body name="rotating_assembly" pos="0 0 0">
+      <body name="rotating_assembly" pos="0.214998 0.165 0.11">
+        <geom pos="0 0 0" quat="0.499998 -0.5 0.500002 -0.5" type="mesh" material="mat_white_plastic" mesh="Trocar_plate" contype="0" conaffinity="0"/>
         <body name="Trocar_cover" pos="0.001213 0.010284 -0.006" quat="0.707105 0 0 -0.707108">
           <inertial pos="0 0 0.0031894" mass="0.051623" diaginertia="1.8441e-05 1.8441e-05 1.698e-05"/>
           <geom type="mesh" material="mat_yellow_resin" mesh="Trocar_cover" contype="0" conaffinity="0"/>
           <body name="Trocar_gripper" pos="0 0 0.005" quat="0.572213 0.572216 0.415417 0.415415">
             <inertial pos="6.15922e-08 0.00866204 -8.45455e-08" quat="0.707107 0.707107 0 0" mass="0.0004651" diaginertia="4.62973e-08 4.62973e-08 4.54118e-08"/>
             <geom type="mesh" material="mat_white_plastic" mesh="Trocar_gripper" contype="0" conaffinity="0"/>
-            <!-- phantom_rot: Eye_phantom + 자식 trocar/site 전체를 함께 회전. euler 라디안 단위. 60°=1.0472 -->
-            <body name="phantom_rot" euler="0 0.75 0">
             <body name="Eye_phantom" quat="0.685123 0.174941 -0.174941 -0.685126">
               <inertial pos="-0.0124723 -1.50679e-05 -2.5814e-05" quat="0.709403 0.704677 0.013154 -0.00207198" mass="0.00166355" diaginertia="1.67718e-07 1.51029e-07 1.50531e-07"/>
               <geom type="mesh" material="mat_eye_sclera" mesh="Eye_phantom" contype="0" conaffinity="0"/>
-              <!-- 3-port wrapping: 광축=phantom local X 가정. viewer로 phantom 정면 보고 3 port가 원형 등간격이면 OK; 아니면 port_* euler의 회전 component를 X→Y 또는 X→Z로 교체 -->
-              <body name="port_A" euler="0 0 0">
-                <site name="trocar_depth_A" pos="-0.0075 0 -0.0075" size="0.001" rgba="1 0 0 0"/>
-                <body name="Eye_trocar_A" pos="-0.018742 -3.9168e-05 0.0062012" quat="0.924581 0.0636132 -0.336065 -0.167821">
-                  <inertial pos="0 0 0.00446798" mass="7.44793e-06" diaginertia="7.45448e-12 7.45448e-12 5.94805e-12"/>
-                  <geom type="mesh" material="mat_trocar_red" mesh="Eye_trocar" contype="0" conaffinity="0"/>
-                  <site name="trocar_entry_A"  pos="0 0  0.0075" size="0.001" rgba="0 1 0 1"/>
-                  <site name="trocar_back_A"   pos="0 0 -0.0075" size="0.001" rgba="0 1 0 1"/>
-                  <site name="trocar_target_A" pos="0 0 -0.0075" size="0.001" rgba="0 1 0 1"/>
-                </body>
+              <site name="trocar_depth" pos="-0.0075 0 -0.0075" size="0.001" rgba="0 1 0 1"/>
+              <body name="Eye_trocar" pos="-0.018742 -3.9168e-05 0.0062012" quat="0.924581 0.0636132 -0.336065 -0.167821">
+                <inertial pos="0 0 0.00446798" mass="7.44793e-06" diaginertia="7.45448e-12 7.45448e-12 5.94805e-12"/>
+                <geom type="mesh" material="mat_trocar_metal" mesh="Eye_trocar" contype="0" conaffinity="0"/>
+                <site name="trocar_target" pos="0 0 0.0075" size="0.001" rgba="0 1 0 1"/>
               </body>
-              <body name="port_B" euler="1.39626 0 0">
-                <site name="trocar_depth_B" pos="-0.0075 0 -0.0075" size="0.001" rgba="1 0 0 0"/>
-                <body name="Eye_trocar_B" pos="-0.018742 -3.9168e-05 0.0062012" quat="0.924581 0.0636132 -0.336065 -0.167821">
-                  <inertial pos="0 0 0.00446798" mass="7.44793e-06" diaginertia="7.45448e-12 7.45448e-12 5.94805e-12"/>
-                  <geom type="mesh" material="mat_trocar_green" mesh="Eye_trocar" contype="0" conaffinity="0"/>
-                  <site name="trocar_entry_B"  pos="0 0  0.0075" size="0.001" rgba="0 1 0 1"/>
-                  <site name="trocar_back_B"   pos="0 0 -0.0075" size="0.001" rgba="0 1 0 1"/>
-                  <site name="trocar_target_B" pos="0 0 -0.0075" size="0.001" rgba="0 1 0 1"/>
-                </body>
-              </body>
-            </body>
             </body>
           </body>
         </body>
-      </body>
       </body>
     </body>
   </worldbody>

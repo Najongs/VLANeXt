@@ -202,7 +202,7 @@ def render_comparison(runs):
 def discover_runs():
     """Find all metrics_summary.csv under known checkpoint root."""
     found = []
-    for p in sorted(glob.glob("/data/public/NAS/VLANeXt/checkpoints/**/metrics_summary.csv", recursive=True)):
+    for p in sorted(glob.glob("/home/najo/NAS/VLANeXt/checkpoints/**/metrics_summary.csv", recursive=True)):
         sd = os.path.dirname(p)
         # label = parent ckpt dir name + shard subdir
         parts = sd.split("/")

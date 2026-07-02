@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path("/data/public/NAS/VLANeXt/checkpoints")
+ROOT = Path("/home/najo/NAS/VLANeXt/checkpoints")
 
 TARGETS = [
     ("ACT (ResNet18+CVAE+T)",        ROOT / "ACT_baseline_align/align_eval_step30000_exec1_diff10", 1, "retreat=2, 30k step, exec=1"),
@@ -177,7 +177,7 @@ def main():
     for label, _v, note in rows_out:
         print(f"  {label}: {note}")
 
-    out_json = Path("/data/public/NAS/VLANeXt/logs/baseline_matrix/baseline_matrix_metrics.json")
+    out_json = Path("/home/najo/NAS/VLANeXt/logs/baseline_matrix/baseline_matrix_metrics.json")
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps([
         {"label": l, "note": n, **{k: ({str(rk): rv for rk, rv in vv.items()} if isinstance(vv, dict) else vv) for k, vv in agg.items()}}

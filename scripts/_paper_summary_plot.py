@@ -9,8 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-LOG_DIR = Path("/data/public/NAS/VLANeXt/logs")
-OUT_DIR = Path("/data/public/NAS/VLANeXt/docs")
+LOG_DIR = Path("/home/najo/NAS/VLANeXt/logs")
+OUT_DIR = Path("/home/najo/NAS/VLANeXt/docs")
 OUT_DIR.mkdir(exist_ok=True)
 
 

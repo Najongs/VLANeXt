@@ -6,9 +6,9 @@
 #   - Clean target dir before each cell to avoid stale-npz contamination
 #   - Wall-time recorded BEFORE result parse
 set -uo pipefail
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 
-CKPT=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
+CKPT=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
 TRAIN_CONFIG=config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v3_config.yaml
 RESULTS_MD=/tmp/sweep_diff_exec_v2_results.md
 SUMMARY_JSON=/tmp/sweep_diff_exec_v2_summary.json
@@ -98,7 +98,7 @@ for cell in "${CELLS[@]}"; do
     python3 - <<EOF
 import sys, json
 from pathlib import Path
-sys.path.insert(0, '/data/public/NAS/VLANeXt/scripts')
+sys.path.insert(0, '/home/najo/NAS/VLANeXt/scripts')
 from analyze_trajectory import analyze_episode, summarize
 d = Path('$MERGED')
 rows = [r for r in (analyze_episode(f) for f in sorted(d.glob('traj_ep*.npz'))) if r is not None]

@@ -1,6 +1,6 @@
 project:
   name: "VLANeXt_Qwen3.5_fine_align"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
   use_wandb: true
@@ -8,11 +8,11 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
-  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
-  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
-  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
-  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align_Random/uniform_new/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
+  # - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/fine_align_01/collected_data_merged"
+  # - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/fine_align_03/collected_data_merged"
+  # - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/fine_align_04/collected_data_merged"
+  # - path: "/home/najo/NAS/VLANeXt/dataset/fine_align_Random/uniform_new/collected_data_merged"
   task_suite_name: ""
   full_sequence: true
   skip_history_padding: true

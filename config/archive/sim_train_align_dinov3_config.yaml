@@ -1,6 +1,6 @@
 project:
   name: "VLANeXt_DINOv3_fine_align"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
   use_wandb: true
@@ -8,7 +8,7 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
 
   task_suite_name: ""
   full_sequence: true

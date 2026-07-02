@@ -30,13 +30,13 @@
 # Examples:
 #   # Dry-run smoke test (no motion):
 #   bash Run_Real_Eval_Align.sh \
-#     /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain_lr_low/checkpoint_3000.pt \
+#     /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain_lr_low/checkpoint_3000.pt \
 #     --train-config config/sim_train_align_siglip2_b24_ft10mm_HARD_cotrain_lr_low_config.yaml \
 #     --skip-home --dry-run --max-steps 20
 #
 #   # Live align run (manual pre-positioned start):
 #   bash Run_Real_Eval_Align.sh \
-#     /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain_lr_low/checkpoint_3000.pt \
+#     /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_HARD_cotrain_lr_low/checkpoint_3000.pt \
 #     --train-config config/sim_train_align_siglip2_b24_ft10mm_HARD_cotrain_lr_low_config.yaml \
 #     --skip-home --max-steps 100
 #

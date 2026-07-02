@@ -11,7 +11,7 @@ along the time axis (T=8), then plots:
 Usage:
   python scripts/visualize_dct.py \
       --config config/sim_train_align_qwen_withReal_v11_submm_tight_config.yaml \
-      --checkpoint /data/public/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_1500.pt \
+      --checkpoint /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_Qwen35_withReal/reach_recover_v11_submm_tight/checkpoint_1500.pt \
       --n-samples 4
 """
 import argparse
@@ -24,7 +24,7 @@ import yaml
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, '/data/public/NAS/VLANeXt')
+sys.path.insert(0, '/home/najo/NAS/VLANeXt')
 from src.models.VLANeXt import VLANeXt
 from src.datasets.sim_act_align import SimActAlign
 from scripts.train import DataCollatorForVLANeXt

@@ -16,7 +16,7 @@ import glob
 
 CROP_WIN = 256
 CROP_TGT = 512
-OUT = Path("/data/public/NAS/VLANeXt/vqa_samples/approach_crop_sanity.png")
+OUT = Path("/home/najo/NAS/VLANeXt/vqa_samples/approach_crop_sanity.png")
 
 
 def center_crop(img, win=CROP_WIN, tgt=CROP_TGT):
@@ -34,7 +34,7 @@ def decode_jpeg(jpeg_data):
 
 
 # Sample 5 random approach_00 episodes
-approach_paths = sorted(glob.glob("/data/public/NAS/VLANeXt/dataset/approach/approach_00/**/*.h5", recursive=True))
+approach_paths = sorted(glob.glob("/home/najo/NAS/VLANeXt/dataset/approach/approach_00/**/*.h5", recursive=True))
 print(f"Total approach_00 eps: {len(approach_paths)}")
 rng = np.random.RandomState(42)
 sample_eps = rng.choice(approach_paths, 5, replace=False).tolist()

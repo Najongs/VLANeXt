@@ -39,7 +39,7 @@ Reuses `RealCollectEnv`, `SimHandles`, IK solver, etc. from
                                                                                                                                                                            
   # 3) 본격 수집                                                                                                                                                           
   bash Run_Collect_Real_Align.sh --phantom-pos 0.0 -0.4 --num-episodes 50 \                                                                                                
-      --save-dir /data/public/NAS/VLANeXt/dataset/real_align/run_0429 --seed 42 
+      --save-dir /home/najo/NAS/VLANeXt/dataset/real_align/run_0429 --seed 42 
       
 Usage:
     bash Run_Collect_Real_Align.sh --num-episodes 10 --phantom-pos 0.0 -0.4

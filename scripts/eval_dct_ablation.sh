@@ -5,13 +5,13 @@
 # - GPUs 0,1 sharded (training already done)
 
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 
 LOG_DIR=logs/dct_ablation
 mkdir -p "$LOG_DIR"
 
-CKPT_DIR_OFF=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/dct_off_v1
-CKPT_DIR_ON=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/dct_on_v1
+CKPT_DIR_OFF=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/dct_off_v1
+CKPT_DIR_ON=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_NEARGOAL/dct_on_v1
 
 for STEP in 500 1000 1500; do
   for VARIANT in off on; do

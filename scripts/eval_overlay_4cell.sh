@@ -5,12 +5,12 @@
 # Outputs: each cell creates a separate eval dir.
 # Final comparison printed at end.
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 
-OVERLAY_CKPT="${1:-/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_overlay/v1/checkpoint_3000.pt}"
-V3_CKPT=/data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
-UV_CKPT=/data/public/NAS/VLANeXt/checkpoints/keypoint_trocar/uv_only/best.pt
-DIST_CKPT=/data/public/NAS/VLANeXt/checkpoints/keypoint_trocar/dist_only/best.pt
+OVERLAY_CKPT="${1:-/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_overlay/v1/checkpoint_3000.pt}"
+V3_CKPT=/home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_repro/b24_ft10mm_aux_strong_v3/checkpoint_1000.pt
+UV_CKPT=/home/najo/NAS/VLANeXt/checkpoints/keypoint_trocar/uv_only/best.pt
+DIST_CKPT=/home/najo/NAS/VLANeXt/checkpoints/keypoint_trocar/dist_only/best.pt
 OVERLAY_TRAIN_CONFIG=config/sim_train_align_siglip2_overlay_v1_config.yaml
 V3_TRAIN_CONFIG=config/sim_train_align_siglip2_b24_ft10mm_aux_strong_v3_config.yaml
 
@@ -54,7 +54,7 @@ echo "==========================================="
 python3 - << EOF
 from pathlib import Path
 import sys
-sys.path.insert(0, '/data/public/NAS/VLANeXt/scripts')
+sys.path.insert(0, '/home/najo/NAS/VLANeXt/scripts')
 from analyze_trajectory import analyze_episode, summarize
 
 V3_CKPT = "$V3_CKPT"

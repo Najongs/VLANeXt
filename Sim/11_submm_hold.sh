@@ -22,12 +22,12 @@ cd "$(dirname "$0")"
 export MUJOCO_GL=egl
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
 
-LOG_DIR=/data/public/NAS/VLANeXt/logs
+LOG_DIR=/home/najo/NAS/VLANeXt/logs
 mkdir -p "$LOG_DIR"
 
 echo "Launching submm-hold datagen (1800 ep, hold 250)..."
 python run_parallel.py --script align_neargoal --workers 12 --episodes 150 \
-    --base-dir /data/public/NAS/VLANeXt/dataset/fine_align/NEARGOAL_submm_hold_v1 \
+    --base-dir /home/najo/NAS/VLANeXt/dataset/fine_align/NEARGOAL_submm_hold_v1 \
     --randomize-phantom-pos --no-side-camera --cameras tool_camera --allow-occluded \
     --hold-record-steps 250 \
     --retreat-mm 0 \

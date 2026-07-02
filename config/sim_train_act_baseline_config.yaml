@@ -1,6 +1,6 @@
 project:
   name: "ACT_baseline_align"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
   use_wandb: true
@@ -8,11 +8,11 @@ project:
 data:
   dataset_name: "sim_align"
   data_root:
-  - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_00"
-  - path: "/data/public/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
+  - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_00"
+  - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/10mm_fine_align_00_tip2/collected_data_merged"
   # 새 데이터 모두 모이면 아래 두 줄도 활성화:
-  # - path: "/data/public/NAS/VLANeXt/dataset/approach/approach_eval_range_v1"
-  # - path: "/data/public/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1"
+  # - path: "/home/najo/NAS/VLANeXt/dataset/approach/approach_eval_range_v1"
+  # - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/align_phantom_range_v1"
 
   task_suite_name: ""
   full_sequence: true

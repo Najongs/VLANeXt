@@ -1,6 +1,6 @@
 project:
   name: "VLANeXt_Qwen3.5_insertion"
-  output_dir: "/data/public/NAS/VLANeXt/checkpoints"
+  output_dir: "/home/najo/NAS/VLANeXt/checkpoints"
   log_interval: 1
   save_interval: 5000
   use_wandb: true
@@ -9,8 +9,8 @@ data:
   dataset_name: "sim_insertion"
   # Multi-dataset mixing: insertion (전체) + align (절반 샘플링)
   data_root:
-    - path: "/data/public/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged"
-    - path: "/data/public/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
+    - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/insertion_data/collected_data_merged"
+    - path: "/home/najo/NAS/VLANeXt/dataset/fine_align/uniform_new/collected_data_merged"
       max_episodes: 10000
   task_suite_name: ""
   full_sequence: true

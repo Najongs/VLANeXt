@@ -4,16 +4,16 @@
 #
 # Prerequisites
 # -------------
-# 1) lerobot cloned at /data/public/NAS/VLANeXt/lerobot.
+# 1) lerobot available at ./lerobot.
 #    Install (separate env recommended):
-#       cd /data/public/NAS/VLANeXt/lerobot && uv sync --extra all
+#       cd /home/najo/NAS/VLANeXt/lerobot && uv sync --extra all
 #    or `uv pip install -e .` for a minimal install.
 #
 # 2) Convert the HDF5 dataset once (run from VLANeXt repo root):
 #       python -m dataset.convert_to_lerobot \
-#           --src /data/public/NAS/VLANeXt/dataset/approach/approach_00 \
+#           --src /home/najo/NAS/VLANeXt/dataset/approach/approach_00 \
 #           --repo-id vlanext/sim_align_baseline \
-#           --root /data/public/NAS/VLANeXt/dataset/lerobot \
+#           --root /home/najo/NAS/VLANeXt/dataset/lerobot \
 #           --fps 15
 #
 # Usage
@@ -42,9 +42,12 @@
 
 set -e
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${REPO_ROOT}"
+
 POLICY=${1:-act}
 DATASET_REPO_ID=${DATASET_REPO_ID:-vlanext/sim_align_baseline}
-DATASET_ROOT=${DATASET_ROOT:-/data/public/NAS/VLANeXt/dataset/lerobot_sim}
+DATASET_ROOT=${DATASET_ROOT:-${REPO_ROOT}/dataset/lerobot_sim}
 GPUS=${GPUS:-1}
 NUM_GPUS=$(echo "$GPUS" | awk -F, '{print NF}')
 # Workaround: GPU 0 in error state poisons CUDA enumeration → force PCI bus ordering.
@@ -54,7 +57,11 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 RUN_NAME="lerobot_${POLICY}_align_$(date +%Y%m%d_%H%M)"
 
 # lerobot >=0.5: launch via accelerate for multi-GPU (DDP). Single-GPU also works.
-LEROBOT_TRAIN=$(command -v lerobot-train || echo "/home/yohan/miniconda3/envs/lerobot/bin/lerobot-train")
+LEROBOT_TRAIN="${LEROBOT_TRAIN:-$(command -v lerobot-train || true)}"
+if [ -z "${LEROBOT_TRAIN}" ]; then
+    echo "ERROR: lerobot-train not found. Activate the lerobot env or set LEROBOT_TRAIN=/path/to/lerobot-train."
+    exit 1
+fi
 if [ "$NUM_GPUS" -gt 1 ]; then
     TRAIN_CMD="accelerate launch --num_processes=${NUM_GPUS} --mixed_precision=no ${LEROBOT_TRAIN}"
 else

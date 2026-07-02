@@ -9,7 +9,7 @@
 # Plus SigLIP2 minLat champion (lat_hold_v4_yneg_hold) for reference (already done).
 
 set -e
-cd /data/public/NAS/VLANeXt
+cd /home/najo/NAS/VLANeXt
 LOG_DIR=logs/baseline_matrix
 mkdir -p "$LOG_DIR"
 
@@ -36,21 +36,21 @@ run_eval() {
 # === Ours: DINOv3 fresh ===
 run_eval "dinov3_fresh" \
   config/sim_train_align_dinov3_baseline_v1_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_DINOv3_baseline/v1/checkpoint_1500.pt 2
+  /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_DINOv3_baseline/v1/checkpoint_1500.pt 2
 
 # === Ours: SigLIP2 fresh ===
 run_eval "siglip2_fresh" \
   config/sim_train_align_siglip2_baseline_v1_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_baseline/v1/checkpoint_1500.pt 2
+  /home/najo/NAS/VLANeXt/checkpoints/VLANeXt_SigLIP2_baseline/v1/checkpoint_1500.pt 2
 
 # === ACT (lerobot in-house) ===
 run_eval "act_final" \
   config/sim_train_act_baseline_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/ACT_baseline_align/checkpoint_30000.pt 1
+  /home/najo/NAS/VLANeXt/checkpoints/ACT_baseline_align/checkpoint_30000.pt 1
 
 # === DP (lerobot in-house) ===
 run_eval "dp_final" \
   config/sim_train_dp_baseline_config.yaml \
-  /data/public/NAS/VLANeXt/checkpoints/DP_baseline_align/checkpoint_30000.pt 1
+  /home/najo/NAS/VLANeXt/checkpoints/DP_baseline_align/checkpoint_30000.pt 1
 
 echo "=== Baseline matrix eval complete ==="
