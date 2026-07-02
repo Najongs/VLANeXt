@@ -1,7 +1,7 @@
 # Fine Alignment Experiments — Master Cheatsheet
 
 **Last revised**: 2026-05-25 (architecture clarification + ablation reframing)
-**Companion**: `ablation.md` (axis-by-axis ablation analysis), `attic/` (deprecated logs)
+**Companion**: `ablation.md` (axis-by-axis ablation analysis), `../attic/` (deprecated logs)
 
 ---
 
@@ -245,6 +245,6 @@ aux_hold: threshold_mm 1.5 ★, soft_scale 0.7   # tightening = 핵심
 
 | | Path |
 |---|---|
-| Pre-2026-05-23 daily logs | `attic/EXPERIMENTS_fine_align_history.md` (2286 lines, deprecated) |
-| Pre-honest era backup | `attic/EXPERIMENTS_fine_align.md.bak_pre_honest_20260524` |
-| Pre-architecture-correction backup | `attic/EXPERIMENTS_fine_align.md.bak_pre_qwen_correct_20260525` |
+| Pre-2026-05-23 daily logs | `../attic/EXPERIMENTS_fine_align_history.md` (2286 lines, deprecated) |
+| Pre-honest era backup | `../attic/EXPERIMENTS_fine_align.md.bak_pre_honest_20260524` |
+| Pre-architecture-correction backup | `../attic/EXPERIMENTS_fine_align.md.bak_pre_qwen_correct_20260525` |

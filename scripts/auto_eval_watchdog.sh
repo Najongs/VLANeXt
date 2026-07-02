@@ -1,6 +1,6 @@
 #!/bin/bash
 # Auto-eval watchdog: waits for training PIDs to finish, then runs eval on the
-# final checkpoint, appends a summary line to EXPERIMENTS_fine_align.md.
+# final checkpoint, appends a summary line to docs/EXPERIMENTS_fine_align.md.
 #
 # Usage:
 #   bash scripts/auto_eval_watchdog.sh <train_pid> <ckpt_dir> <train_config_yaml> <gpu_uuid> <run_label>
@@ -12,8 +12,8 @@ TRAIN_CFG="$3"
 GPU_UUID="$4"
 LABEL="$5"
 
-REPO=/data/public/NAS/VLANeXt
-SUMMARY=$REPO/EXPERIMENTS_fine_align.md
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SUMMARY=$REPO/docs/EXPERIMENTS_fine_align.md
 EVAL_LOG=$REPO/logs/auto_eval_${LABEL}_$(date +%H%M%S).log
 
 echo "[$(date +%H:%M:%S)] watchdog: waiting on PID $TRAIN_PID ($LABEL)" >> $EVAL_LOG
@@ -40,8 +40,10 @@ if [ "${#CKPTS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-source /home/yohan/miniconda3/etc/profile.d/conda.sh
-conda activate VLANeXt
+if [ -n "${CONDA_SH:-}" ]; then
+    source "${CONDA_SH}"
+    conda activate "${CONDA_ENV:-VLANeXt}"
+fi
 
 for CKPT in "${CKPTS[@]}"; do
     echo "[$(date +%H:%M:%S)] eval $CKPT" >> $EVAL_LOG

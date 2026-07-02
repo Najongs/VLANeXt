@@ -496,5 +496,5 @@ Loss configuration이 statistical effect를 보이는 곳은 **cascade finetune*
 
 | Date | Backup |
 |---|---|
-| 2026-05-24 (pre-honest) | `attic/ablation.md.bak_pre_honest_20260524` |
-| 2026-05-25 (pre-architecture-correction) | `attic/ablation.md.bak_pre_qwen_correct_20260525` |
+| 2026-05-24 (pre-honest) | `../attic/ablation.md.bak_pre_honest_20260524` |
+| 2026-05-25 (pre-architecture-correction) | `../attic/ablation.md.bak_pre_qwen_correct_20260525` |

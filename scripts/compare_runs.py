@@ -7,7 +7,7 @@ Usage:
         "v2/5000: outputs/eval_<v2_5k>/sim_eval_align_only.log" \
         "ACT/15k: outputs/eval_<act_15k>/sim_eval_align_only.log"
 
-Outputs a markdown block ready to paste into EXPERIMENTS_fine_align.md.
+Outputs a markdown block ready to paste into docs/EXPERIMENTS_fine_align.md.
 """
 import re
 import sys
